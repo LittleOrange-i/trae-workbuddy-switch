@@ -54,6 +54,7 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useCompactMode } from "@/lib/use-compact-mode";
+import { useDocumentVisible } from "@/lib/use-document-visible";
 import { useAccountsStore } from "@/stores/accounts";
 import { useT, type Translate } from "@/lib/i18n";
 
@@ -90,52 +91,41 @@ function isWorkbuddyCurrent(account: AccountMeta, current: AppStatus["current"] 
   );
 }
 
-/** 并行查询今日签到；失败的账号不写入，由调用方保留原值。 */
+/**
+ * 并行查询今日签到；失败的账号不写入，由调用方保留原值。
+ *
+ * ★ 必须走 `api.getCheckinStatusMap`（**批量**），不要在这里对每个账号调
+ * `api.getCheckinStatus` —— webui 端那个端点是**整端点**，逐个调用会变成
+ * N × N 次上游签到查询（详见 `api.ts` 里该函数的文档）。
+ */
 async function fetchTodayCheckinMap(
   accountIds: string[],
   region: Region,
   isStale?: () => boolean,
 ): Promise<Record<string, boolean>> {
-  const entries = await Promise.all(
-    accountIds.map(async (id) => {
-      try {
-        const res = await api.getCheckinStatus(id, region);
-        if (isStale?.() || !res.ok) return null;
-        return [id, res.todayCheckedIn] as const;
-      } catch {
-        return null;
-      }
-    }),
-  );
+  const entries = await api.getCheckinStatusMap(accountIds, region);
+  // 整批回来后统一判一次陈旧：过期的结果一条都不用。
+  if (isStale?.()) return {};
   const next: Record<string, boolean> = {};
-  for (const entry of entries) {
-    if (entry) next[entry[0]] = entry[1];
+  for (const [id, entry] of Object.entries(entries)) {
+    if (entry.ok) next[id] = entry.todayCheckedIn;
   }
   return next;
 }
 
-/** 并行查询各账号今日旅行状态；失败的账号不写入，由调用方保留原值。 */
+/**
+ * 并行查询各账号今日旅行状态；失败的账号不写入，由调用方保留原值。
+ *
+ * ★ 同上：必须走批量的 `api.getTravelStatusMap`。
+ */
 async function fetchTravelMap(
   accountIds: string[],
   region: Region,
   isStale?: () => boolean,
 ): Promise<Record<string, TravelStatus>> {
-  const entries = await Promise.all(
-    accountIds.map(async (id) => {
-      try {
-        const res = await api.getTravelStatus(id, region);
-        if (isStale?.()) return null;
-        return [id, res] as const;
-      } catch {
-        return null;
-      }
-    }),
-  );
-  const next: Record<string, TravelStatus> = {};
-  for (const entry of entries) {
-    if (entry) next[entry[0]] = entry[1];
-  }
-  return next;
+  const entries = await api.getTravelStatusMap(accountIds, region);
+  if (isStale?.()) return {};
+  return entries;
 }
 
 // ---------------------------------------------------------------------------
@@ -454,12 +444,31 @@ function RegionPanel({ region }: { region: Region }) {
   // 否则会以每分钟一次的频率持续空打上游 —— 定时器的代价比单次请求更高，更要拦在建立之前。
   // `autoTravelConfig` 为 `null`（配置尚未读回）时同样不发，理由同上：不能把「未知」当作默认开启先打一轮。
   // 依赖里带上 `enabled`，开关切换后 effect 才会重跑：关掉时清理函数会顺手 clearInterval，开关打开时重新建表。
+  //
+  // ★ 拆成两个 effect：**首查**与**轮询**对可见性的要求不同（见下）。
+  const documentVisible = useDocumentVisible();
+
+  // 首查：不受可见性门控 —— 否则「切到后台再切回来」会因为 effect 重跑被跳过而看到空态。
   useEffect(() => {
     if (!autoTravelConfig?.enabled) return;
     if (!accounts.length) return;
     let cancelled = false;
     const ids = accounts.map((account) => account.id);
     void loadTravelMap(ids, () => cancelled);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts, region, autoTravelConfig?.enabled]);
+
+  // 轮询：**加可见性门控** —— 应用在后台时每分钟空打一次上游毫无意义（用户看不见）。
+  // 只门控「要不要建这个定时器」，间隔 60 秒本身不动。
+  useEffect(() => {
+    if (!autoTravelConfig?.enabled) return;
+    if (!accounts.length) return;
+    if (!documentVisible) return;
+    let cancelled = false;
+    const ids = accounts.map((account) => account.id);
     const timer = window.setInterval(() => {
       void loadTravelMap(ids, () => cancelled);
     }, 60_000);
@@ -468,7 +477,7 @@ function RegionPanel({ region }: { region: Region }) {
       window.clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accounts, region, autoTravelConfig?.enabled]);
+  }, [accounts, region, autoTravelConfig?.enabled, documentVisible]);
 
   // 只给尚未缓存的账号拉积分；切回首页不重复请求。点「刷新积分」才强制更新。
   useEffect(() => {

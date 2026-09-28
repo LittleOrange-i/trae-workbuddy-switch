@@ -43,9 +43,45 @@ npm run build:app:release  # 构建 release .app + 签名更新包
 > 本项目此前的发布用的是 `workbuddy-switch`。
 > scoped 包必须带 `--access public`，否则会以私有包发布（私有包需要付费账号）。
 >
-> `npm/package.json` 的 `optionalDependencies` 目前列了 4 个平台（darwin-arm64 / darwin-x64 /
-> win32-x64 / linux-x64），与 CI 矩阵一致；`npm/platform/buddy-switch-linux-arm64/` 这个目录
-> **尚未接入**（既不在依赖里，CI 也不构建它），别误以为 linux-arm64 已可用。
+> `npm/package.json` 的 `optionalDependencies` 列了 5 个平台（darwin-arm64 / darwin-x64 /
+> win32-x64 / linux-x64 / linux-arm64），与 CI 矩阵**一一对应**，改动任一侧都要同步另一侧
+> （`stamp-version.mjs` 会把它们的版本号统一重写，但**不会**替你补漏掉的平台）。
+
+#### linux-arm64 是「CLI only」
+
+CI 矩阵里 `linux-arm64` 的 `bundles` 为空 ⇒ 跳过 `Build desktop app`，`update_arch` 为空 ⇒
+跳过 updater 清单。**它只产出 CLI 裸二进制**（npm 平台包 + Release 资产），**没有桌面 App**。
+
+原因：桌面 App 走 Tauri，需要 webkit2gtk；在 x64 runner 上交叉编 arm64 版要开 dpkg 多架构并装
+`libwebkit2gtk-4.1-dev:arm64`，代价高且易碎。而 CLI 是纯 Rust（reqwest 用 rustls、rusqlite 走
+`bundled`），交叉编译很干净，只需：
+
+- `apt install gcc-aarch64-linux-gnu`
+- job 级 env：`CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc`
+- job 级 env：`CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc`
+  （**不能省**：`libsqlite3-sys` 用 `cc` 现场编译 SQLite 的 C amalgamation，
+  不指定交叉 C 编译器就会拿 host gcc 产出 x86_64 目标文件，链接期报 `file in wrong format`）
+
+⚠️ 若以后要给 linux-arm64 加桌面 App，改的不止是 matrix：`Build desktop app` 的
+`if: matrix.bundles != ''` 会放行，随后 webkit2gtk 的 arm64 依赖必须真的装上。
+
+#### npm 通道开关：`PUBLISH_NPM`（**当前关闭**）
+
+CI 的两个发布 job（`publish-platform` / `publish-main`）与「是否把 CLI 裸二进制留在 Release 里」
+都由**同一个仓库变量**控制：Settings → Secrets and variables → Actions → **Variables** → `PUBLISH_NPM`。
+
+| `PUBLISH_NPM` | npm job | Release 里的 `buddy-switch-*` 裸二进制 |
+| --- | --- | --- |
+| 未配置 / 非 `true`（**当前**） | skipped（不红，不再需要 `NPM_TOKEN`） | **保留** —— webui 形态唯一的下载渠道 |
+| `true` | 正常运行（需要 `NPM_TOKEN`） | 剔除（已随平台包发到 npm，Release 只留桌面 App） |
+
+**为什么要有这个开关**：npmjs 账号注册/访问受限期间拿不到 token，此前每次 tag 都会红 4 个
+`npm platform *` job、`publish-main` 被 skip，而 Release 与安装包本身一直是 success ——
+那是噪音不是事故，却会让人误判「这次发版挂了」。恢复发布时**只改变量**，不用改 workflow。
+
+**关闭期间的 webui 分发方式**：从 GitHub Releases 下载对应平台的裸二进制直接跑
+（`buddy-switch` / `buddy-switch serve --port 57890` / `status` / `version`）。
+macOS 未签名会触发 Gatekeeper，先 `xattr -d com.apple.quarantine <路径>`；Windows 会有 SmartScreen 提示，选「仍要运行」。
 
 ### 在线演示（GitHub Pages）部署前提
 

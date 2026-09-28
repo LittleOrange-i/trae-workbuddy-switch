@@ -710,7 +710,7 @@ function demoTraeVariants(): TraeVariantsStatus {
     program: "trae_work" | "trae_code",
     labelKey: TranslationKey,
     nameAliasKey: TranslationKey,
-    variant: "trae_work" | "trae_cn" | "global" | null,
+    variant: "trae_work" | "trae_cn" | "global" | "global_trae_code",
     installed: boolean,
     running: boolean,
     path: string,
@@ -793,9 +793,20 @@ function demoTraeVariants(): TraeVariantsStatus {
             "C:\\Users\\demo\\AppData\\Local\\Programs\\TRAE SOLO\\TRAE SOLO.exe",
             "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO",
           ),
-          // 国际版 TraeCode 未安装也**未建模** ⇒ `variant: null`（按钮必须禁用，
-          // 不能拿同区域另一个客户端的标识顶替）。
-          program("trae_code", "shared.demo.trae.program.codeAi", "shared.demo.trae.program.codePending", null, false, false, "", ""),
+          // 国际版 TraeCode：**已建模但本机未安装**（issue #3 之前的形态是
+          // `variant: null` = 未建模 ⇒ 按钮禁用）。现在它有真实标识
+          // `global_trae_code`，只是 `installed: false` —— 演示数据保持
+          // 「未安装」以便截图里能看到禁用态，但**不再**用 `null` 表达。
+          program(
+            "trae_code",
+            "shared.demo.trae.program.codeAi",
+            "shared.demo.trae.program.codePending",
+            "global_trae_code",
+            false,
+            false,
+            "",
+            "",
+          ),
         ],
       },
     ],

@@ -454,7 +454,7 @@ fn cn_wrapper_binds_cn_region_and_leaves_global_untouched() {
     let global_before = fs::read_to_string(&global_auth).expect("read global auth");
 
     // (a) CN 薄包装必须能切换到 CN 库里的 `cn-only`。
-    let ok = switch::switch_account(None, "cn-only", false, false, &[])
+    let ok = switch::switch_account(None, "cn-only", false, &[])
         .expect("CN-only account must switch through the CN wrapper");
     assert!(
         ok.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -478,7 +478,7 @@ fn cn_wrapper_binds_cn_region_and_leaves_global_untouched() {
 
     // (b) 证伪关键：`global-only` 只存在于 Global 库，CN 包装必须报「账号不存在」。
     //     若薄包装错误地传了 `Region::Global`，这里会成功 → unwrap_err panic。
-    let err = switch::switch_account(None, "global-only", false, false, &[])
+    let err = switch::switch_account(None, "global-only", false, &[])
         .expect_err("CN wrapper must not resolve Global-only accounts");
     assert!(err.contains("账号不存在"), "unexpected error: {err}");
 
@@ -514,7 +514,7 @@ fn switch_account_for_global_binds_global_region_and_leaves_cn_untouched() {
     let cn_before = fs::read_to_string(&cn_auth).expect("read CN auth");
 
     // (c) `Region::Global` 必须能切换到 Global 库里的 `global-only`。
-    let ok = switch::switch_account_for(Region::Global, None, "global-only", false, false, &[])
+    let ok = switch::switch_account_for(Region::Global, None, "global-only", false, &[])
         .expect("global-only account must switch under Region::Global");
     assert!(
         ok.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -537,7 +537,7 @@ fn switch_account_for_global_binds_global_region_and_leaves_cn_untouched() {
     );
 
     // (d) 证伪关键：`cn-only` 只存在于 CN 库，Global 目标必须报「账号不存在」。
-    let err = switch::switch_account_for(Region::Global, None, "cn-only", false, false, &[])
+    let err = switch::switch_account_for(Region::Global, None, "cn-only", false, &[])
         .expect_err("Region::Global must not resolve CN-only accounts");
     assert!(err.contains("账号不存在"), "unexpected error: {err}");
 

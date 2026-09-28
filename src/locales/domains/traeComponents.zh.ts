@@ -20,7 +20,7 @@ export const zh = {
   "trae.program.traeWork": "TraeWork",
   "trae.program.traeCode": "TraeCode",
   "trae.program.traeWorkGlobal": "TraeWork AI",
-  "trae.program.traeCodePending": "TraeCode（待实测）",
+  "trae.program.traeCodeGlobal": "Trae AI",
 
   // =====================================================================
   // trae-account-card.tsx —— Trae 账号卡片

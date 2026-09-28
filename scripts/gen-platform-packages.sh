@@ -24,7 +24,7 @@ gen() {
   "os": ["$os"],
   "cpu": ["$cpu"],
   "files": ["bin"],
-  "license": "MIT"
+  "license": "PolyForm-Noncommercial-1.0.0"
 }
 JSON
   echo "生成 $dir (包名 @nextagentx/buddy-switch-$tag, bin=$binfile)"

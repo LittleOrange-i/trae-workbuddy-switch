@@ -62,8 +62,17 @@ export type TraeProgramId = "trae_work" | "trae_code";
  * `trae_work` / `trae_cn` 是改造前的产品线标识，现在表示**国内区域下的两个程序位**
  * （`trae_work`＝TraeWork 客户端、`trae_cn`＝TraeCode 客户端）。保留它们是为了：
  * 账号类接口按区域取库（两者都落国内库），而切换/快照类接口能据此确定**客户端**。
+ *
+ * `global_trae_code` 是**国际版 TraeCode**（与 `global`＝国际版 TraeWork 分家，
+ * 见 `TraeVariant::GlobalTraeCode`）。它必须与 `global` 分开：
+ * 两者只差一个后缀，混用会把登录态写进错的客户端。
  */
-export type TraeVariantId = TraeRegionId | "trae_work" | "trae_cn" | TraeProgramId;
+export type TraeVariantId =
+  | TraeRegionId
+  | "trae_work"
+  | "trae_cn"
+  | "global_trae_code"
+  | TraeProgramId;
 
 /**
  * 程序位的展示名（`TraeWork` / `TraeCode`）。
@@ -95,6 +104,9 @@ export function traeVariantLabel(variant: TraeVariantId): string {
     case "trae_cn":
     case "trae_code":
       return t("trae.program.traeCode");
+    // 国际版 TraeCode：**不是** `trae_code` 那条（那是国内），见 `TraeVariantId`。
+    case "global_trae_code":
+      return t("trae.program.traeCodeGlobal");
     default:
       return t("trae.program.traeWork");
   }
@@ -119,6 +131,8 @@ export function traeVariantLabel(variant: TraeVariantId): string {
 export function traeRegionLabelOf(variant: TraeVariantId): string {
   switch (variant) {
     case "global":
+    // 国际版 TraeCode 也落国际区域（它与 `global` 是同一区域的两条程序）。
+    case "global_trae_code":
       return t("shared.region.version.global");
     case "cn":
     case "trae_work":
@@ -143,10 +157,14 @@ export interface TraeProgramStatus {
   /** 客户端 `product.json` 的官方别名（诊断与核对用）。 */
   nameAlias: string;
   /**
-   * 切换时回传的标识；`null` = 该程序位**尚未建模**（例如国际版 TraeCode 本机未安装），
-   * 此时按钮必须禁用 —— 不能拿同区域另一个客户端的标识顶替。
+   * 切换时回传的标识。
+   *
+   * 自 2026-09-28（issue #3）起**四个程序位都有值**：此前 `(国际版, TraeCode)`
+   * 未建模，后端回 `null`、按钮必须禁用。现在四个组合都已建模，
+   * `null` 这个形态不再出现 —— 类型收成非空，是为了让「忘了建模」在编译期暴露，
+   * 而不是在界面上表现成一枚灰按钮。
    */
-  variant: TraeVariantId | null;
+  variant: TraeVariantId;
   installed: boolean;
   running: boolean;
   version: string | null;

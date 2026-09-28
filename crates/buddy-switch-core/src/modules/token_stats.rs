@@ -609,25 +609,38 @@ fn ide_project_by_session() -> HashMap<String, String> {
     map
 }
 
-fn ide_workspace_meta(conv_index: &Path, conv_id: &str) -> (Option<String>, String) {
-    let Some(ws_index) = conv_index
-        .parent()
-        .and_then(|parent| parent.parent())
-        .map(|parent| parent.join("index.json"))
-    else {
-        return (None, "未知模型".to_string());
-    };
+/// 会话文件所在 workspace 的 `index.json` 路径。
+///
+/// 布局：`<workspace>/<会话目录>/<文件>` ⇒ `<workspace>/index.json`。
+fn workspace_index_path(conv_index: &Path) -> Option<PathBuf> {
+    Some(conv_index.parent()?.parent()?.join("index.json"))
+}
+
+/// 解析一份 workspace `index.json`，产出 `会话 id → (标题, 模型)` 查表。
+///
+/// 解析失败 / 无 `conversations` ⇒ 返回**空表**；调用方据此回落
+/// `(None, "未知模型")`，与逐次调用时代的语义一致。
+///
+/// **同名 id 取首次出现**：改造前是「线性扫描、返回第一个匹配」，
+/// 因此这里必须用 `entry().or_insert()` 而不是 `insert()` —— 后者会变成「最后一个赢」。
+fn workspace_meta_index(ws_index: &Path) -> HashMap<String, (Option<String>, String)> {
+    let mut table = HashMap::new();
     let Ok(text) = std::fs::read_to_string(ws_index) else {
-        return (None, "未知模型".to_string());
+        return table;
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        return (None, "未知模型".to_string());
+        return table;
     };
     let Some(conversations) = value.get("conversations").and_then(Value::as_array) else {
-        return (None, "未知模型".to_string());
+        return table;
     };
     for conversation in conversations {
-        if conversation.get("id").and_then(Value::as_str) != Some(conv_id) {
+        // 无 `id` 或 `id` 为空串的条目**永远匹配不上**（调用方传的是会话**目录名**，
+        // 空目录名会先被 `.filter(|name| !name.is_empty())` 换成 "未知会话"）⇒ 直接跳过。
+        let Some(id) = conversation.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if id.is_empty() {
             continue;
         }
         let title = non_empty_text(conversation.get("name"))
@@ -636,10 +649,53 @@ fn ide_workspace_meta(conv_index: &Path, conv_id: &str) -> (Option<String>, Stri
             .or_else(|| non_empty_text(conversation.get("modelId")))
             .or_else(|| non_empty_text(conversation.get("model")))
             .unwrap_or_else(|| "未知模型".to_string());
-        return (title, model);
+        table.entry(id.to_string()).or_insert((title, model));
     }
-    (None, "未知模型".to_string())
+    table
 }
+
+/// 按 workspace `index.json` 路径缓存查表，**同一份索引只读解析一次**。
+///
+/// ## 为什么需要（`docs/perf-audit-2026-09-24.md` 的 P0-4「无争议的那一半」）
+///
+/// 改造前 `ide_workspace_meta` 被调在**每个会话文件**的循环体内
+/// （见 [`ide_source`]），而同一 workspace 下的 N 个会话指向**同一份** `index.json`
+/// ⇒ 同一份索引被 `read_to_string` + `serde_json::from_str` **N 次**。
+/// 这是**纯冗余**：与「是否缓存聚合结果」无关（后者才需要向作者确认）。
+///
+/// 本改动**不改变任何输出语义** —— 只是把「N 次解析」变成「1 次解析 + N 次查表」，
+/// 故风险与收益不成比例的「全量结果缓存」不同，可以直接做。
+#[derive(Default)]
+struct WorkspaceMetaCache {
+    tables: HashMap<PathBuf, HashMap<String, (Option<String>, String)>>,
+    /// 只用于测试断言「同一份索引确实只解析一次」。
+    ///
+    /// 这是一个**可观测缝**：没有它就只能靠计时或读盘计数去间接推断，
+    /// 两者都不可靠。`#[cfg(test)]` 保证发布构建零成本。
+    #[cfg(test)]
+    parses: usize,
+}
+
+impl WorkspaceMetaCache {
+    /// 查某会话的 `(标题, 模型)`；查不到回落 `(None, "未知模型")`。
+    fn lookup(&mut self, conv_index: &Path, conv_id: &str) -> (Option<String>, String) {
+        let Some(ws_index) = workspace_index_path(conv_index) else {
+            return (None, "未知模型".to_string());
+        };
+        let table = self.tables.entry(ws_index.clone()).or_insert_with(|| {
+            #[cfg(test)]
+            {
+                self.parses += 1;
+            }
+            workspace_meta_index(&ws_index)
+        });
+        table
+            .get(conv_id)
+            .cloned()
+            .unwrap_or_else(|| (None, "未知模型".to_string()))
+    }
+}
+
 
 fn ide_request_usage(request: &Value) -> Option<Usage> {
     let object = request.get("usage")?.as_object()?;
@@ -696,6 +752,8 @@ fn ide_source(
     ide_index_files(&root, &mut paths);
     paths.sort();
     let mut collector = SourceCollector::default();
+    // 同一 workspace 下的多个会话共用一份 `index.json`：提到循环外按路径解析一次。
+    let mut workspace_meta = WorkspaceMetaCache::default();
 
     for path in &paths {
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -716,7 +774,7 @@ fn ide_source(
             .filter(|name| !name.is_empty())
             .unwrap_or("未知会话")
             .to_string();
-        let (title, model_name) = ide_workspace_meta(path, &session_id);
+        let (title, model_name) = workspace_meta.lookup(path, &session_id);
         let fallback_project = project_by_session
             .get(&session_id)
             .cloned()
@@ -1371,6 +1429,133 @@ mod tests {
         assert_ne!(by_id("session-a")["key"], by_id("session-e")["key"]);
 
         fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    /// P0-4「无争议的那一半」：同一 workspace 下的 N 个会话**只解析一次** `index.json`。
+    ///
+    /// 断言三件事：
+    /// ① 每个会话拿到**自己**的标题/模型（证明查表按 conv id 分键，不是「第一条赢」）；
+    /// ② 解析次数恰好 **1**（这是本改动的全部意义，且是**直接**断言、不靠计时推断）；
+    /// ③ 改造前是 N 次 —— 该断言在改造前必红。
+    #[test]
+    fn workspace_meta_cache_parses_each_index_once() {
+        let root = std::env::temp_dir().join(format!(
+            "buddy-switch-wsmeta-{}-{}",
+            std::process::id(),
+            crate::modules::config::now_ms()
+        ));
+        let workspace = root.join("workspace-hash");
+        for id in ["conv-a", "conv-b", "conv-c"] {
+            fs::create_dir_all(workspace.join(id)).expect("create conv dir");
+        }
+        fs::write(
+            workspace.join("index.json"),
+            json!({
+                "conversations": [
+                    { "id": "conv-a", "name": "标题 A", "selectedModelId": "model-a" },
+                    { "id": "conv-b", "title": "标题 B", "modelId": "model-b" },
+                    { "id": "conv-c", "model": "model-c" }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write workspace index");
+
+        let mut cache = WorkspaceMetaCache::default();
+        let a = cache.lookup(&workspace.join("conv-a").join("index.json"), "conv-a");
+        let b = cache.lookup(&workspace.join("conv-b").join("index.json"), "conv-b");
+        let c = cache.lookup(&workspace.join("conv-c").join("index.json"), "conv-c");
+
+        assert_eq!(a, (Some("标题 A".to_string()), "model-a".to_string()));
+        // `title` 是 `name` 缺失时的第二优先
+        assert_eq!(b, (Some("标题 B".to_string()), "model-b".to_string()));
+        // `model` 是第三优先；三个标题字段都缺 ⇒ 标题为 None，模型仍取自 model
+        assert_eq!(c, (None, "model-c".to_string()));
+
+        assert_eq!(
+            cache.parses, 1,
+            "同一份 index.json 三个会话只应解析一次（改造前是 3 次）"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 查不到会话时的回落必须与逐次调用时代**逐字相同**：`(None, "未知模型")`。
+    #[test]
+    fn workspace_meta_cache_falls_back_exactly_like_the_linear_scan() {
+        let root = std::env::temp_dir().join(format!(
+            "buddy-switch-wsmeta-miss-{}-{}",
+            std::process::id(),
+            crate::modules::config::now_ms()
+        ));
+        let workspace = root.join("ws");
+        fs::create_dir_all(workspace.join("conv-x")).expect("create conv dir");
+
+        // ① index.json 不存在
+        let mut cache = WorkspaceMetaCache::default();
+        assert_eq!(
+            cache.lookup(&workspace.join("conv-x").join("index.json"), "conv-x"),
+            (None, "未知模型".to_string()),
+            "索引缺失时必须回落"
+        );
+
+        // ② 索引存在但没有该会话
+        fs::write(
+            workspace.join("index.json"),
+            json!({ "conversations": [{ "id": "other", "name": "别的会话" }] }).to_string(),
+        )
+        .expect("write index");
+        let mut cache = WorkspaceMetaCache::default();
+        assert_eq!(
+            cache.lookup(&workspace.join("conv-x").join("index.json"), "conv-x"),
+            (None, "未知模型".to_string()),
+            "会话不在索引里时必须回落"
+        );
+
+        // ③ 索引是坏 JSON（解析失败也要回落，不得 panic）
+        fs::write(workspace.join("index.json"), "{ not json").expect("write bad index");
+        let mut cache = WorkspaceMetaCache::default();
+        assert_eq!(
+            cache.lookup(&workspace.join("conv-x").join("index.json"), "conv-x"),
+            (None, "未知模型".to_string()),
+            "索引损坏时必须回落"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 同名 id **取首次出现** —— 改造前是「线性扫描返回第一个匹配」。
+    ///
+    /// 若把 `entry().or_insert()` 写成 `insert()`，本用例立刻变红（会拿到「后一条」）。
+    #[test]
+    fn workspace_meta_index_keeps_the_first_duplicate_id() {
+        let root = std::env::temp_dir().join(format!(
+            "buddy-switch-wsmeta-dup-{}-{}",
+            std::process::id(),
+            crate::modules::config::now_ms()
+        ));
+        let workspace = root.join("ws");
+        fs::create_dir_all(workspace.join("conv-dup")).expect("create conv dir");
+        fs::write(
+            workspace.join("index.json"),
+            json!({
+                "conversations": [
+                    { "id": "conv-dup", "name": "第一条", "selectedModelId": "first-model" },
+                    { "id": "conv-dup", "name": "第二条", "selectedModelId": "second-model" }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write index");
+
+        let mut cache = WorkspaceMetaCache::default();
+        assert_eq!(
+            cache.lookup(&workspace.join("conv-dup").join("index.json"), "conv-dup"),
+            (Some("第一条".to_string()), "first-model".to_string()),
+            "同名 id 必须取首次出现"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

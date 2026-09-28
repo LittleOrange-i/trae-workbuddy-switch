@@ -2883,8 +2883,12 @@ mod tests {
 
         let work_uids = fixture_uids(&fixtures, TraeVariant::TraeWork);
         let cn_uids = fixture_uids(&fixtures, TraeVariant::Trae);
+        // 候选目录数 = 该程序位的 userData 名候选数。
+        // TraeWork 仍是 2（`TRAE SOLO CN` + 国际版那条 `TRAE SOLO`，登记的待修重叠）；
+        // **Trae CN 从 2 变成 1**（2026-09-28，issue #3）：裸名 `Trae` 已归国际版
+        // TraeCode，不再是国内 TraeCode 的次候选 —— 见 `variant::TRAE_CN_SPEC`。
         assert_eq!(work_uids.len(), 2, "Trae Work 应有两个候选目录");
-        assert_eq!(cn_uids.len(), 2, "Trae CN 应有两个候选目录");
+        assert_eq!(cn_uids.len(), 1, "Trae CN 只有一个候选目录（Trae CN）");
 
         let (work_uid, work_header) =
             extract_local_jwt_for(TraeVariant::TraeWork).expect("Trae Work 必须能从 tc 信封导入");

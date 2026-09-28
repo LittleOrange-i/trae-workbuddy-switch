@@ -133,7 +133,13 @@ export function StatusDot({ on, className }: { on: boolean; className?: string }
  * 刻意**不复用** `TraeVariantId` 的导入：本文件是纯展示组件，
  * 不依赖任何业务类型模块，避免「改一个类型定义要连带动画图标组件」。
  */
-type TraeVariantKey = "trae_work" | "trae_cn" | "trae_code" | "cn" | "global";
+type TraeVariantKey =
+  | "trae_work"
+  | "trae_cn"
+  | "trae_code"
+  | "global"
+  | "global_trae_code"
+  | "cn";
 
 /**
  * Trae 产品线图标（按变体区分）。

@@ -1,4 +1,15 @@
 //! 网关配置（持久化到 `~/.buddy-switch/gateway_config.json`）与可 Arc 共享的运行状态。
+//!
+//! ## 已移除的配置位（保留设计意图，避免后人重复踩坑）
+//!
+//! **`dual_port`（2026-09-28 移除）** —— 「按 region 分别监听独立端口」的配置位。
+//! 它长期**只有字段、没有任何读取方**：设置页曾据此渲染一个开关，但打开与否对监听行为
+//! 毫无影响（典型的假控件），UI 早已摘掉，只剩字段本身。保留的两条理由都不成立：
+//! ① 「契约测试钉死键集合」是我们自己维护的测试，不是外部约束；② 「老配置文件里可能有该键」
+//! —— serde 默认忽略未知字段，删字段不会让旧配置加载失败。故按「不保留死代码」整条移除。
+//!
+//! 若日后确要实现该能力，需要一并补：第二端口的配置位、监听生命周期、按 region 的路由分发。
+//! 那时应按新需求重新设计，**不要只是把字段加回来**（加回来又是一个空开关）。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -37,16 +48,6 @@ pub struct GatewayConfig {
     /// 是否允许非回环监听（默认 false）。
     #[serde(alias = "allowNonLoopback")]
     pub allow_non_loopback: bool,
-    /// 双端口模式（P1，**未实现**，默认 false）。
-    ///
-    /// ⚠️ 本字段只有配置位、**没有任何读取方**：设置页曾据此渲染一个开关，但打开与否
-    /// 对监听行为毫无影响（典型的假控件），故 UI 已移除。之所以保留字段本身，是因为
-    /// `/api/gateway/config` 的返回键集合被契约测试钉死（见 `buddy-switch-server`
-    /// 的 `gateway_read_only_routes_expose_pinned_contracts`），且老配置文件里可能已存在该键。
-    /// 真要实现「按 region 分别监听独立端口」时，需一并补：第二端口的配置位、
-    /// 监听生命周期与按 region 的路由分发。
-    #[serde(alias = "dualPort")]
-    pub dual_port: bool,
     /// 请求日志保留条数，默认 200。
     #[serde(alias = "logKeep")]
     pub log_keep: usize,
@@ -99,7 +100,6 @@ impl Default for GatewayConfig {
             bind_addr: "127.0.0.1".to_string(),
             port: 57891,
             allow_non_loopback: false,
-            dual_port: false,
             log_keep: 200,
             log_bodies: false,
             per_key_rate_limit: None,
@@ -454,7 +454,6 @@ mod tests {
             "bind_addr",
             "port",
             "allow_non_loopback",
-            "dual_port",
             "log_keep",
             "log_bodies",
             "per_key_rate_limit",
@@ -480,7 +479,6 @@ mod tests {
         assert_eq!(config.bind_addr, default.bind_addr);
         assert_eq!(config.port, default.port);
         assert_eq!(config.allow_non_loopback, default.allow_non_loopback);
-        assert_eq!(config.dual_port, default.dual_port);
         assert_eq!(config.log_keep, default.log_keep);
         assert_eq!(config.log_bodies, default.log_bodies);
         assert_eq!(config.per_key_rate_limit, default.per_key_rate_limit);
@@ -494,7 +492,6 @@ mod tests {
                 "bindAddr": "0.0.0.0",
                 "port": 60000,
                 "allowNonLoopback": true,
-                "dualPort": true,
                 "logKeep": 10,
                 "logBodies": true,
                 "perKeyRateLimit": 5
@@ -505,10 +502,32 @@ mod tests {
         assert_eq!(config.bind_addr, "0.0.0.0");
         assert_eq!(config.port, 60000);
         assert!(config.allow_non_loopback);
-        assert!(config.dual_port);
         assert_eq!(config.log_keep, 10);
         assert!(config.log_bodies);
         assert_eq!(config.per_key_rate_limit, Some(5));
+    }
+
+    /// 移除 `dual_port` 后，**老配置文件仍必须能加载**。
+    ///
+    /// 这是「删字段会不会让升级用户炸掉」的直接证据：serde 默认忽略未知字段，
+    /// 因此老配置里的 `dualPort` / `dual_port` 只是被丢掉，不会反序列化失败。
+    /// 若有人给 `GatewayConfig` 加上 `deny_unknown_fields`，本用例立刻变红。
+    #[test]
+    fn legacy_dual_port_key_is_ignored_not_rejected() {
+        for body in [
+            r#"{"port":60000,"dualPort":true}"#,
+            r#"{"port":60000,"dual_port":true}"#,
+        ] {
+            let config: GatewayConfig =
+                serde_json::from_str(body).unwrap_or_else(|e| panic!("老配置必须能加载 {body}: {e}"));
+            assert_eq!(config.port, 60000, "其余字段不受影响");
+        }
+        // 序列化出口也不得再出现该键（契约测试另行钉死键集合）
+        let value = serde_json::to_value(GatewayConfig::default()).expect("serialize config");
+        assert!(
+            value.get("dual_port").is_none(),
+            "已移除的字段不得重新出现在序列化出口"
+        );
     }
 
     #[test]

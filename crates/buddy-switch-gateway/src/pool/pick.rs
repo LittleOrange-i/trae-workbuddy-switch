@@ -103,6 +103,34 @@ fn idle_weight(last_used_ms: i64, now_ms: i64, policy: &PickPolicy) -> f64 {
 }
 
 /// 该账号是否已占满在途额度。
+/// 单条目的可用性判据 —— **唯一来源**。
+///
+/// [`pick`] 的候选过滤走这里；日后若要接「会话粘性」，粘性的可用性检查**也必须**走这里。
+///
+/// ★ 为什么要有这个名字：粘性要回答「上次那个账号现在还能不能用」。若它另写一套判据
+/// 且比 `pick` 宽松，就会把请求钉到一个 `pick` 认为不可用的账号上
+/// （症状：**明明有别的号可用却一直失败**）。两处判据一旦分家，这种缺陷不会报错、
+/// 只会表现成「偶发失败」。抽成一个函数是唯一可靠的做法。
+fn entry_usable(entry: &PoolEntry, policy: &PickPolicy, now_ms: i64, model: &str) -> bool {
+    entry.healthy_for_request(now_ms, model) && !in_flight_full(entry, policy)
+}
+
+/// 指定 uid 此刻是否可用于该请求（**与 [`pick`] 同一套判据**，见 [`entry_usable`]）。
+///
+/// 供**会话粘性**使用：粘性会先问「上次那个账号还能不能用」，能用就复用、不能用就解绑换号。
+pub fn is_usable(
+    entries: &BTreeMap<String, PoolEntry>,
+    policy: &PickPolicy,
+    uid: &str,
+    now_ms: i64,
+    model: &str,
+) -> bool {
+    entries
+        .get(uid)
+        .map(|entry| entry_usable(entry, policy, now_ms, model))
+        .unwrap_or(false)
+}
+
 fn in_flight_full(entry: &PoolEntry, policy: &PickPolicy) -> bool {
     let limit = match entry.realm {
         Some(RealmTag::Global) if policy.max_in_flight_global > 0 => policy.max_in_flight_global,
@@ -135,9 +163,8 @@ pub fn pick(
         .values()
         .filter(|entry| {
             !tried.contains(&entry.uid)
-                && entry.healthy_for_request(now_ms, model)
+                && entry_usable(entry, policy, now_ms, model)
                 && realm.map(|wanted| entry.realm == Some(wanted)).unwrap_or(true)
-                && !in_flight_full(entry, policy)
         })
         .map(|entry| entry.uid.clone())
         .collect();
@@ -316,6 +343,7 @@ fn pick_earliest_expiry(
 mod tests {
     use super::*;
     use crate::pool::entry::PoolEntry;
+    use crate::pool::ModelCooldown;
 
     fn policy() -> PickPolicy {
         PickPolicy {
@@ -685,6 +713,105 @@ mod tests {
             draw_weighted(&items, &mut rng).map(|item| item.uid.as_str()),
             Some("z"),
             "零权重也应能被选中（下界 1），避免死锁"
+        );
+    }
+
+    /// ★★ 护栏：`is_usable` 与 `pick` 的可用性判断**必须一致**。
+    ///
+    /// 会话粘性用 `is_usable` 回答「上次那个账号现在还能不能用」。若两者分家、
+    /// 且 `is_usable` 更宽松，粘性就会把请求钉到一个 `pick` 认为不可用的账号上 ——
+    /// 症状是「明明有别的号可用却一直失败」，而且**不报错**、只表现为偶发失败。
+    ///
+    /// 两处现在共用 `entry_usable`；本用例是它的**行为级**印证（改坏任一侧都会红）。
+    #[test]
+    fn is_usable_agrees_with_pick_on_each_state() {
+        let policy = policy();
+
+        let healthy = base_entry("healthy");
+        let mut saturated = base_entry("saturated");
+        saturated.in_flight = 3; // 与 `in_flight_full_blocks_candidate` 同款：占满在途
+        let mut cooling = base_entry("cooling");
+        cooling.until_ms = NOW + 60_000;
+
+        let map = pool_of(vec![healthy, saturated, cooling]);
+
+        assert!(is_usable(&map, &policy, "healthy", NOW, ""), "健康账号应可用");
+        assert!(!is_usable(&map, &policy, "saturated", NOW, ""), "在途占满应不可用");
+        assert!(!is_usable(&map, &policy, "cooling", NOW, ""), "冷却中应不可用");
+        assert!(!is_usable(&map, &policy, "absent", NOW, ""), "不在池里应不可用");
+
+        // 同一组条目下 `pick` 必须只挑到 `healthy` —— 与上面三条否定断言互为印证。
+        let mut for_pick = map.clone();
+        let mut seq = 0;
+        assert_eq!(
+            pick(&mut for_pick, &mut seq, &policy, NOW, None, "", &HashSet::new(), 1).as_deref(),
+            Some("healthy"),
+            "pick 只能选到 `is_usable` 为 true 的那个"
+        );
+    }
+
+    /// 模型级冷却也必须被 `is_usable` 看到 —— 粘性传的是**模型名**，
+    /// 若这里漏看模型维度，粘性会把请求钉到一个「该模型正被限流」的账号上。
+    #[test]
+    fn is_usable_honours_model_scoped_cooldown() {
+        let policy = policy();
+        let mut blocked = base_entry("blocked");
+        blocked.model_cooldowns.insert(
+            "m1".to_string(),
+            ModelCooldown {
+                until_ms: NOW + 60_000,
+                reset_at_ms: 0,
+                reason: String::new(),
+                hits: 0,
+            },
+        );
+        let map = pool_of(vec![blocked]);
+
+        assert!(
+            !is_usable(&map, &policy, "blocked", NOW, "m1"),
+            "该模型正被冷却 ⇒ 粘性不得钉住它"
+        );
+        assert!(
+            is_usable(&map, &policy, "blocked", NOW, "m2"),
+            "换模型立即可用（模型级限流只封锁该模型）"
+        );
+    }
+
+    /// ★ 已**过期**的模型级冷却不得被当成不可用。
+    ///
+    /// 这一条专治「两套判据分家」的一个隐蔽入口：`pick` 在过滤前会
+    /// `prune_model_cooldowns`（把过期条目**删掉**），而 `is_usable` **不 prune**
+    /// （它只读、不持有写锁）。若判据本身不是「自带过期判断」的，两者就会分家 ——
+    /// 表现为「粘性认为该账号不可用，而 pick 认为可用」，或反之。
+    ///
+    /// 现在两者共用 `entry_usable` ⇒ `healthy_for_model` 自带 `now_ms >= until_ms`，
+    /// prune 只是清理。本用例把这个前提钉住。
+    #[test]
+    fn is_usable_treats_expired_model_cooldown_as_available() {
+        let policy = policy();
+        let mut recovered = base_entry("recovered");
+        recovered.model_cooldowns.insert(
+            "m1".to_string(),
+            ModelCooldown {
+                until_ms: NOW - 1, // 刚过期
+                reset_at_ms: 0,
+                reason: String::new(),
+                hits: 1,
+            },
+        );
+        let map = pool_of(vec![recovered.clone()]);
+
+        assert!(
+            is_usable(&map, &policy, "recovered", NOW, "m1"),
+            "已过期的模型级冷却不得判为不可用（is_usable 不 prune，判据必须自带过期判断）"
+        );
+
+        // 与 pick 的行为互为印证：只有这一个候选，必须能选到它。
+        let mut for_pick = pool_of(vec![recovered]);
+        let mut seq = 0;
+        assert_eq!(
+            pick(&mut for_pick, &mut seq, &policy, NOW, None, "m1", &HashSet::new(), 1).as_deref(),
+            Some("recovered")
         );
     }
 }

@@ -48,6 +48,7 @@ import {
 } from "@/lib/schedule-config";
 import { normalizeTraeGatewayLogs } from "@/lib/trae-gateway";
 import { isAutoDetected, traeProductLabel } from "@/lib/trae-client";
+import { useDocumentVisible } from "@/lib/use-document-visible";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 import {
   findRegionStatus,
@@ -159,12 +160,17 @@ function RuntimeLogsSection() {
 
   // 自动刷新只在「没有未提交的输入」时跑：否则用户正在输入关键字，
   // 每次刷新都会把列表换成旧条件的结果，看起来像在抖。
+  //
+  // 再加一道**可见性门控**：应用切到后台 / 窗口最小化时，2 秒一轮的轮询照跑没有意义
+  // （用户看不见），只是白打接口。**2 秒这个间隔本身是产品决定，不改**——
+  // 只决定「现在该不该跑」，见 `useDocumentVisible` 的文档。
   const dirty = keywordDraft !== keyword;
+  const documentVisible = useDocumentVisible();
   useEffect(() => {
-    if (!autoRefresh || dirty) return;
+    if (!autoRefresh || dirty || !documentVisible) return;
     const timer = setInterval(() => void refresh(), 2000);
     return () => clearInterval(timer);
-  }, [autoRefresh, dirty, refresh]);
+  }, [autoRefresh, dirty, documentVisible, refresh]);
 
   const entries = data?.entries ?? [];
   const counts = data?.counts;

@@ -16,7 +16,10 @@ pub mod pick;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+use chrono::{NaiveDate, TimeZone};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -216,9 +219,21 @@ const SESSION_DEAD_MARKERS: &[&str] = &["Offline user session not found", "12153
 
 /// 从响应体里尝试解析上游声明的重置时刻。
 ///
-/// 上游各端点字段名不统一，这里按候选键顺序做**宽容解析**：命中第一个可解析的数值
-/// 即返回。数值按量级判断单位（`> 1e12` 视为毫秒，否则视为秒）。
+/// 两条分支，**结构化优先**：
+///
+/// 1. [`parse_reset_at_ms_from_json`] —— 上游各端点字段名不统一，按候选键顺序做**宽容解析**，
+///    命中第一个可解析的数值即返回；数值按量级判断单位（`> 1e12` 视为毫秒，否则视为秒）。
+/// 2. [`parse_reset_at_ms_from_text`] —— **文案兜底**。真实上游把解冻时刻写在 `msg` 文本里
+///    （`… reset at 2026-09-16 16:34:24 UTC+8 …` / `… 将在 2026-09-17 14:18:44 UTC+8 重置 …`），
+///    一个 JSON 数值键都没有 ⇒ 只走分支 1 会恒 `None`（2026-09-28 修复）。
+///
+/// 解析失败一律 `None`：**不得**把「未知」伪装成「已恢复」（调用方据 `None` 决定是否退避）。
 pub fn parse_reset_at_ms(body: &str) -> Option<i64> {
+    parse_reset_at_ms_from_json(body).or_else(|| parse_reset_at_ms_from_text(body))
+}
+
+/// 结构化形态：JSON 里的数值键。
+fn parse_reset_at_ms_from_json(body: &str) -> Option<i64> {
     const CANDIDATE_KEYS: &[&str] = &[
         "\"resetTime\"",
         "\"reset_time\"",
@@ -253,6 +268,45 @@ pub fn parse_reset_at_ms(body: &str) -> Option<i64> {
         }
     }
     None
+}
+
+/// 文案兜底：从 `msg` 文本里抽出「`<时间戳>` + `UTC+8`」形态的重置时刻。
+///
+/// ## 为什么只锚时间戳形态，不锚周边文案
+///
+/// 实测（2026-09-28，本机客户端落盘数据）存在**两套真实模板**：
+///
+/// | 区域 | 真实原文 |
+/// |---|---|
+/// | 国际版 | `429 usage exceeds frequency limit, … your usage will reset at 2026-09-16 16:34:24 UTC+8, …` |
+/// | 国内版 | `429 您的使用量已超出频率限制，将在 2026-09-17 14:18:44 UTC+8 重置，…` |
+///
+/// ⇒ 若锚「将在 … 重置」（参考实现 `softRateResetPattern` 的写法），**国际版永不命中**；
+/// 若锚英文短语，**国内版永不命中**。两者都是**中文/英文文案**，上游随时可能再改。
+/// 因此这里**只锚稳定形态**：`YYYY-MM-DD HH:MM:SS` 紧跟 `UTC+8`。
+///
+/// ## 时区
+///
+/// `UTC+8` 是**文案自述**，因此时间戳本身就是 CST 墙上时间 —— 直接按 CST 解释，
+/// 复用 [`crate::timeutil::cst_offset`]（唯一时区来源，**不在此另写时区逻辑**）。
+fn parse_reset_at_ms_from_text(body: &str) -> Option<i64> {
+    // 上游 429 是高频路径，正则只编译一次。
+    static RESET_TEXT: OnceLock<Regex> = OnceLock::new();
+    let pattern = RESET_TEXT.get_or_init(|| {
+        // 允许 `T` 或空格分隔（ISO 风格也覆盖），并要求 UTC+8 标记紧跟在时刻之后。
+        Regex::new(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})\s*UTC\+8")
+            .expect("重置时刻正则是常量，必须可编译")
+    });
+    let caps = pattern.captures(body)?;
+    let part = |index: usize| caps[index].parse::<u32>().ok();
+    let (year, month, day) = (part(1)?, part(2)?, part(3)?);
+    let (hour, minute, second) = (part(4)?, part(5)?, part(6)?);
+    // 越界日期/时刻由 chrono 拒绝（`None`），不 panic —— 输入是不可信的上游文本。
+    let naive = NaiveDate::from_ymd_opt(year as i32, month, day)?.and_hms_opt(hour, minute, second)?;
+    crate::timeutil::cst_offset()
+        .from_local_datetime(&naive)
+        .single()
+        .map(|dt| dt.timestamp_millis())
 }
 
 /// 按 status + body 分类上游失败（判定顺序固定，与参考实现一致）。
@@ -545,6 +599,19 @@ impl Pool {
             tried,
             seed,
         )
+    }
+
+    /// 指定 uid 此刻是否可用于该请求。
+    ///
+    /// 供**会话粘性**使用：粘性先问「上次那个账号还能不能用」，能用就复用、不能用就解绑换号。
+    /// 粘性是**优化而非约束**，所以这里必须能明确判出「不可用」，绝不能因为粘性而拒绝服务。
+    ///
+    /// ★ 判据与 [`Self::pick_account`] **同源**（共用 `pick::entry_usable`）——
+    /// 若这里另写一套且更宽松，粘性就会把请求钉到 `pick` 认为不可用的账号上
+    /// （症状：明明有别的号可用却一直失败）。
+    pub fn is_usable_for(&self, uid: &str, now_ms: i64, model: &str) -> bool {
+        let policy = self.policy();
+        pick::is_usable(&self.entries, &policy, uid, now_ms, model)
     }
 
     /// 申请在途额度；返回是否成功（失败表示该号已占满）。
@@ -978,6 +1045,17 @@ mod tests {
 
     const NOW: i64 = 1_700_000_000_000;
 
+    /// 真实上游限流响应原文 —— **逐字取自本机客户端落盘数据**（2026-09-28 复核）。
+    ///
+    /// ⚠️ 这两个模板**都真实存在**，不是编造的 fixture：
+    /// - 国际版（`~/.workbuddy-ai/projects/**/*.jsonl`）：**英文**模板；
+    /// - 国内版（`~/.workbuddy/projects/**/*.jsonl`）：**中文**模板。
+    ///
+    /// ⇒ 解析**只能锚「时间戳 + UTC+8」形态**，不能锚周边文案（中英两套 + 未来还会漂移）。
+    /// 详见 `parse_reset_at_ms` 的文本分支。
+    const REAL_GLOBAL_BODY: &str = r#"{"code":6004,"message":"429 usage exceeds frequency limit, but don't worry, your usage will reset at 2026-09-16 16:34:24 UTC+8, alternatively, you can switch to the other models to continue using it. (96df0f39955b4b5db7f4ba9d6df1ab90/1d05a3d1-c8c1-4f0d-9c33-1234567890ab)"}"#;
+    const REAL_CN_BODY: &str = r#"{"code":6004,"message":"429 您的使用量已超出频率限制，将在 2026-09-17 14:18:44 UTC+8 重置，您也可以切换其他模型继续使用。 (a5684f88f6602e56/082521ff-3f6e-4f55-b75a-55608b2ac493)"}"#;
+
     fn temp_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("wb-pool-{tag}-{}", uuid::Uuid::new_v4()))
     }
@@ -1038,9 +1116,20 @@ mod tests {
             }
             other => panic!("应为 SoftRate，实际 {other:?}"),
         }
-        match classify_event(429, "{\"code\":6004,\"msg\":\"IsModelRateLimit\"}") {
-            UpstreamEvent::SoftRate { model_scoped, .. } => {
-                assert!(model_scoped, "6004 必须识别为模型级");
+        // ⚠️ fixture 必须**不含** `IsModelRateLimit`：原 fixture 两个标记同时存在，
+        // 无论 6004 分支是否工作 `model_scoped` 都为 true ⇒ **无法证伪**（2026-09-24 复核 A3）。
+        // 这里改用真实上游原文（英文模板），它本来就不含该词。
+        match classify_event(429, REAL_GLOBAL_BODY) {
+            UpstreamEvent::SoftRate {
+                model_scoped,
+                reset_at_ms,
+            } => {
+                assert!(model_scoped, "真实 body 里的 6004 必须识别为模型级");
+                assert_eq!(
+                    reset_at_ms,
+                    Some(1_789_547_664_000),
+                    "解冻时刻必须从 msg 文本解出（UTC+8）"
+                );
             }
             other => panic!("应为 SoftRate，实际 {other:?}"),
         }
@@ -1064,6 +1153,51 @@ mod tests {
         assert_eq!(parse_reset_at_ms("{}"), None);
         assert_eq!(parse_reset_at_ms("not json"), None);
         assert_eq!(parse_reset_at_ms("{\"resetTime\":0}"), None);
+    }
+
+    /// 文本兜底：上游把解冻时刻写在 `msg` 文本里，**JSON 数值键一个都没有**。
+    ///
+    /// 修前该用例必红（`parse_reset_at_ms` 只认 JSON 数值键 ⇒ 恒 `None`）。
+    #[test]
+    fn parse_reset_at_ms_reads_real_upstream_text_templates() {
+        // 国际版（英文模板）
+        assert_eq!(
+            parse_reset_at_ms(REAL_GLOBAL_BODY),
+            Some(1_789_547_664_000),
+            "英文模板 `reset at <ts> UTC+8` 必须解出"
+        );
+        // 国内版（中文模板）
+        assert_eq!(
+            parse_reset_at_ms(REAL_CN_BODY),
+            Some(1_789_625_924_000),
+            "中文模板 `将在 <ts> UTC+8 重置` 必须解出"
+        );
+
+        // ⚠️ 时区证伪：上面两个期望值是**按 UTC+8 硬编码**的 epoch 毫秒。
+        // 若把基准改成「系统本地时区」，在 CI（Ubuntu，UTC）上会得到相差 8 小时的值
+        // ⇒ 本断言变红。开发机在 UTC+8 时无法本地复现该证伪，故以 CI 为准。
+    }
+
+    /// 文本兜底**不得**劫持结构化形态，也不得对无时刻的文案瞎猜。
+    #[test]
+    fn parse_reset_at_ms_text_branch_does_not_overreach() {
+        // JSON 数值键优先，且不因文本分支存在而改变结果
+        assert_eq!(
+            parse_reset_at_ms("{\"resetTime\":1700000000}"),
+            Some(1_700_000_000_000)
+        );
+        // 有日期但**没有** UTC+8 标记 ⇒ 不猜（避免把「未知」伪装成「已恢复」）
+        assert_eq!(
+            parse_reset_at_ms(r#"{"msg":"429 rate limited at 2026-09-16 16:34:24"}"#),
+            None
+        );
+        // 文案漂移但没有时间戳 ⇒ 仍是 None（R4：解析失败不得静默改判）
+        assert_eq!(parse_reset_at_ms(r#"{"msg":"too many requests"}"#), None);
+        // 非法日期不得 panic
+        assert_eq!(
+            parse_reset_at_ms(r#"{"msg":"reset at 2026-13-45 99:99:99 UTC+8"}"#),
+            None
+        );
     }
 
     #[test]

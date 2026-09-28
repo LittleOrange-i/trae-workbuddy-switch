@@ -123,25 +123,33 @@ pub(crate) fn hidden_command(program: &str) -> std::process::Command {
 /// 各一份，`%APPDATA%` 下也各有一份 userData）。漏掉它就会出现
 /// 「明明装了却提示未安装」，以及「装的是 Trae CN、切换的却是 SOLO CN 的登录态」。
 ///
-/// ## 值来自变体表，顺序仍按「Trae Work 优先」
+/// ## 值来自**程序位表**（`region::all_program_specs`），顺序按「区域 → 程序」
 ///
-/// 具体名字由 [`super::variant`] 的 [`VariantSpec::exe_names`] 提供，
-/// 本函数只是把它们**按变体顺序摊平**成一个静态切片 —— 顺序与改造前的
-/// 硬编码列表逐字相同（`TRAE SOLO CN` → `TRAE SOLO` → `Trae CN` → `Trae`），
-/// 保证「一个候选都不存在」时的兜底选择不变。
+/// 摊平口径在 2026-09-28（issue #3）从 [`TraeVariant::all`]（**只含国内两条**）
+/// 换成 [`super::region::all_program_specs`]（**四个程序位全覆盖**）。
+/// 换口径的直接后果：国际版 TraeCode 的 `Trae.exe` / `Trae` 仍留在候选里，
+/// 却**不再**冒充国内 TraeCode 的次候选（那条静默跨区误判已修，见
+/// [`super::variant::GLOBAL_TRAE_CODE_SPEC`] 与 `TRAE_CN_SPEC` 的说明）。
 ///
+/// 顺序与改造前不再逐字相同（改造前是 `TRAE SOLO CN` → `TRAE SOLO` →
+/// `Trae CN` → `Trae`，现在按区域分组）。**首项仍是 `TRAE SOLO CN`**，
+/// 而它是唯一会被当作「一个候选都不存在」兜底值的元素 ⇒ 兜底行为不变；
+/// 其余顺序只在「多个候选同时存在」时参与活跃度排序，而那是按 mtime 排的，
+/// 与候选表顺序无关（`data_dir_names_by_activity`）。
+///
+/// [`TraeVariant::all`]: super::variant::TraeVariant::all
 /// [`VariantSpec::exe_names`]: super::variant::VariantSpec::exe_names
 #[cfg(windows)]
 const EXE_NAMES: &[&str] = &[
     "TRAE SOLO CN.exe",
-    "TRAE SOLO.exe",
     "Trae CN.exe",
+    "TRAE SOLO.exe",
     "Trae.exe",
 ];
 
 /// 非 Windows：可执行文件名不带 `.exe`（macOS 是 bundle 内的裸二进制名）。
 #[cfg(not(windows))]
-const EXE_NAMES: &[&str] = &["TRAE SOLO CN", "TRAE SOLO", "Trae CN", "Trae"];
+const EXE_NAMES: &[&str] = &["TRAE SOLO CN", "Trae CN", "TRAE SOLO", "Trae"];
 
 fn exe_names() -> &'static [&'static str] {
     EXE_NAMES
@@ -149,9 +157,9 @@ fn exe_names() -> &'static [&'static str] {
 
 /// userData 目录名候选（与 [`exe_names`] 一一对应，首项为兜底主候选）。
 ///
-/// 同 [`exe_names`]：值来自变体表，这里只做摊平。
+/// 同 [`exe_names`]：值来自程序位表，这里只做摊平。
 fn data_dir_names() -> &'static [&'static str] {
-    &["TRAE SOLO CN", "TRAE SOLO", "Trae CN", "Trae"]
+    &["TRAE SOLO CN", "Trae CN", "TRAE SOLO", "Trae"]
 }
 
 /// 取某个变体的可执行文件名候选（Windows 带 `.exe`）。
@@ -168,9 +176,11 @@ pub fn exe_names_for(variant: super::variant::TraeVariant) -> &'static [&'static
         // 因此这里用一个与表一一对应的静态切片。新增变体时要同步。
         match variant {
             super::variant::TraeVariant::TraeWork => &["TRAE SOLO CN", "TRAE SOLO"],
-            super::variant::TraeVariant::Trae => &["Trae CN", "Trae"],
+            super::variant::TraeVariant::Trae => &["Trae CN"],
             // 国际版区域：exe 名是国际版客户端自己的（`TRAE SOLO.exe`）。
             super::variant::TraeVariant::Global => &["TRAE SOLO"],
+            // 国际版 TraeCode：裸名（与 `TRAE SOLO` 同款「国内带 CN 后缀」规则）。
+            super::variant::TraeVariant::GlobalTraeCode => &["Trae"],
         }
     }
 }
@@ -345,41 +355,37 @@ fn region_status(region: super::region::TraeRegion) -> Value {
     let programs: Vec<Value> = super::region::programs_of(region)
         .iter()
         .map(|spec| {
-            let variant = variant_for_program(spec.region, spec.program);
-            let (installed, running, version, path, data_dir, write_data_dir) = match variant {
-                Some(target) => {
-                    let probe = detect_install_for(target);
-                    let dir = select_data_dir_for(target);
-                    // 写侧来源（`detect_data_dir_for`：候选表里**首个存在**的目录）。
-                    //
-                    // ★ 与 `dir`（读/展示侧：**最近活跃**）**可能不是同一个目录** ——
-                    // 本机就是：`TRAE SOLO CN` 有登录态却更旧、更活跃的是 `TRAE SOLO`。
-                    // 两者语义不同（见两个函数的文档），调用方必须自己选对：
-                    // 「客户端最近在用哪个」用 `dataDir`；「切换器正在操作哪个 / 登录态在哪个」
-                    // 用 `writeDataDir`（与 `profile::overview_for` 的 `dataDir` 同源）。
-                    let write_dir = detect_data_dir_for(target);
-                    (
-                        probe.installed,
-                        is_running_for(target),
-                        probe.version,
-                        probe.exe.as_ref().map(|p| p.to_string_lossy().to_string()),
-                        dir.as_ref().map(|p| p.to_string_lossy().to_string()),
-                        write_dir
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().to_string()),
-                    )
-                }
-                // 该程序位**没有对应的客户端建模**（例如国际版 TraeCode：本机未安装、
-                // 也尚未建模）⇒ 如实报「未安装」，**不猜目录**。
-                // 猜错目录的后果是"切换"把登录态写进另一个客户端的 userData。
-                None => (false, false, None, None, None, None),
-            };
+            // ★ 四个程序位**全部已建模**（2026-09-28，issue #3）：本函数不再有
+            //   「未建模 ⇒ 报未安装」的分支。所以探测结果就是事实，
+            //   不存在「程序位存在但拿不到标识」这种中间态。
+            let target = variant_for_program(spec.region, spec.program);
+            let probe = detect_install_for(target);
+            let dir = select_data_dir_for(target);
+            // 写侧来源（`detect_data_dir_for`：候选表里**首个存在**的目录）。
+            //
+            // ★ 与 `dir`（读/展示侧：**最近活跃**）**可能不是同一个目录** ——
+            // 本机就是：`TRAE SOLO CN` 有登录态却更旧、更活跃的是 `TRAE SOLO`。
+            // 两者语义不同（见两个函数的文档），调用方必须自己选对：
+            // 「客户端最近在用哪个」用 `dataDir`；「切换器正在操作哪个 / 登录态在哪个」
+            // 用 `writeDataDir`（与 `profile::overview_for` 的 `dataDir` 同源）。
+            let write_dir = detect_data_dir_for(target);
+            let (installed, running, version, path, data_dir, write_data_dir) = (
+                probe.installed,
+                is_running_for(target),
+                probe.version,
+                probe.exe.as_ref().map(|p| p.to_string_lossy().to_string()),
+                dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+                write_dir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+            );
             json!({
                 "program": spec.program.as_str(),
                 "label": spec.display_name,
                 "nameAlias": spec.name_alias,
-                // 前端「切换到此程序」时回传的标识；`null` = 该程序位当前不可操作。
-                "variant": variant.map(|target| target.as_str()),
+                // 前端「切换到此程序」时回传的标识。**四个程序位都有值**
+                // （`null` 只在「未建模」时代出现过，见上方说明）。
+                "variant": target.as_str(),
                 "installed": installed,
                 "running": running,
                 "version": version,
@@ -438,42 +444,58 @@ fn region_status(region: super::region::TraeRegion) -> Value {
     })
 }
 
-/// 程序位 → 客户端建模标识。`None` = 尚未建模，调用方必须显式处理（不得猜）。
+/// 程序位 → 客户端建模标识。
+///
+/// **四个程序位全部已建模**（2026-09-28，issue #3 收尾）：国际版 TraeCode 补上
+/// [`TraeVariant::GlobalTraeCode`] 之后，本函数不再返回 `None`。
+///
+/// ## 返回值为什么不是 `Option` 的旧形状
+///
+/// 曾经 `(Global, TraeCode) => None`，调用方据此把该程序位报成「未安装」。
+/// 那条分支现在没了 —— 留着它等于把「已建模」这件事降级成运行期判断。
+/// 若将来又出现未建模的程序位，**在编译期**让本函数返回 `Option` 更安全，
+/// 但当前四个组合已闭合，`match` 本身就把这件事钉住了（新增程序线会编译不过）。
 fn variant_for_program(
     region: super::region::TraeRegion,
     program: super::region::TraeProgram,
-) -> Option<super::variant::TraeVariant> {
+) -> super::variant::TraeVariant {
     use super::region::{TraeProgram, TraeRegion};
     use super::variant::TraeVariant;
     match (region, program) {
-        (TraeRegion::Cn, TraeProgram::TraeWork) => Some(TraeVariant::TraeWork),
-        (TraeRegion::Cn, TraeProgram::TraeCode) => Some(TraeVariant::Trae),
-        (TraeRegion::Global, TraeProgram::TraeWork) => Some(TraeVariant::Global),
-        // 国际版 TraeCode 未安装也未被建模 —— 不拿 TraeWork 的目录顶替。
-        (TraeRegion::Global, TraeProgram::TraeCode) => None,
+        (TraeRegion::Cn, TraeProgram::TraeWork) => TraeVariant::TraeWork,
+        (TraeRegion::Cn, TraeProgram::TraeCode) => TraeVariant::Trae,
+        (TraeRegion::Global, TraeProgram::TraeWork) => TraeVariant::Global,
+        (TraeRegion::Global, TraeProgram::TraeCode) => TraeVariant::GlobalTraeCode,
     }
 }
 
-/// 变体表与 [`exe_names`] / [`data_dir_names`] 的摊平结果是否一致。
+/// 程序位表与 [`exe_names`] / [`data_dir_names`] 的摊平结果是否一致。
 ///
 /// 这是防「表改了但摊平常量忘了同步」的护栏：两处写着同一份名字，
-/// 一旦漂移就会出现「某个变体的 exe 永远探测不到」这类静默故障。
+/// 一旦漂移就会出现「某个程序位的 exe 永远探测不到」这类静默故障。
 /// 编译期无法校验（`cfg` 分支 + 静态切片），故放一条测试。
+///
+/// ## 摊平基准是**程序位表**（4 个），不是 [`TraeVariant::all`]（2 个）
+///
+/// 2026-09-28（issue #3）换的基准：`all()` 只含国内两条程序位，
+/// 用它当基准会让两个国际程序位的名字（`TRAE SOLO.exe` / `Trae.exe`）
+/// **在跨变体探测里凭空消失** —— 症状是「国际版客户端在跑，'关闭全部 Trae'
+/// 却说没有」。程序位表才是完整口径。
+///
+/// [`TraeVariant::all`]: super::variant::TraeVariant::all
 #[cfg(test)]
 #[test]
 fn flattened_candidates_match_variant_table() {
     let mut from_table_exe: Vec<&str> = Vec::new();
     let mut from_table_dir: Vec<&str> = Vec::new();
-    for variant in super::variant::TraeVariant::all() {
-        from_table_dir.extend(super::variant::variant_spec(variant).data_dir_names.iter().copied());
+    for spec in super::region::all_program_specs() {
+        from_table_dir.extend(spec.data_dir_names.iter().copied());
+        from_table_exe.extend(spec.exe_names.iter().copied());
     }
-    assert_eq!(data_dir_names(), from_table_dir.as_slice(), "userData 目录名候选与变体表漂移");
+    assert_eq!(data_dir_names(), from_table_dir.as_slice(), "userData 目录名候选与程序位表漂移");
     // exe 名只在 Windows 上与表逐字相同（非 Windows 去过 `.exe`）。
     if cfg!(target_os = "windows") {
-        for variant in super::variant::TraeVariant::all() {
-            from_table_exe.extend(super::variant::variant_spec(variant).exe_names.iter().copied());
-        }
-        assert_eq!(exe_names(), from_table_exe.as_slice(), "exe 名候选与变体表漂移");
+        assert_eq!(exe_names(), from_table_exe.as_slice(), "exe 名候选与程序位表漂移");
     }
 }
 
@@ -2025,6 +2047,66 @@ mod tests {
             assert!(seen.contains(&expected), "缺少区域 {expected}");
         }
         assert_eq!(seen.len(), 2, "区域标识重复: {seen:?}");
+    }
+
+    /// ★★ 四个程序位**全部已建模**，且每个程序位回传的 `variant` 都能反解回
+    /// 「同一个区域 + 同一个程序」（2026-09-28，issue #3）。
+    ///
+    /// ## 这条是 issue #3 的直接验收
+    ///
+    /// 报障是「不支持 TraeCode」。当时的形状是：`(Global, TraeCode)` 返回 `None`
+    /// ⇒ 国际版页签上的 TraeCode 程序位 `variant: null`、`installed: false`，
+    /// 前端把它渲染成**禁用按钮**，用户看到的就是「不支持」。
+    ///
+    /// 现在四个组合都有值。断言三件事：
+    /// 1. **没有一个程序位的 `variant` 是 `null`**（这正是当时那条分支的痕迹）；
+    /// 2. 回传的 `variant` 反解后的**区域**等于它所在的区域条目；
+    /// 3. 回传的 `variant` 反解后的**程序**等于该程序位的 `program`。
+    ///
+    /// 第 2、3 条合起来才排得掉「值有、但指向另一个客户端」这种更坏的形态
+    /// （切换会把登录态写进错的 userData，而界面上一切正常）。
+    #[test]
+    fn 四个程序位全部已建模且自洽() {
+        use super::super::region::{TraeProgram, TraeRegion};
+        use super::super::variant::TraeVariant;
+
+        let value = variants_status();
+        let items = value.get("variants").and_then(|v| v.as_array()).unwrap();
+        let mut checked = 0usize;
+
+        for item in items {
+            let region = TraeRegion::parse(item.get("variant").and_then(|v| v.as_str()).unwrap())
+                .expect("区域标识必须能反解");
+            for program in item.get("programs").and_then(|v| v.as_array()).unwrap() {
+                checked += 1;
+                let program_id = program.get("program").and_then(|v| v.as_str()).unwrap();
+                let expected_program = TraeProgram::parse(program_id)
+                    .unwrap_or_else(|| panic!("程序位标识无法反解: {program_id}"));
+                let raw = program.get("variant").unwrap_or_else(|| {
+                    panic!("程序位 {region:?}/{program_id} 缺少 variant 键")
+                });
+                let raw = raw.as_str().unwrap_or_else(|| {
+                    panic!(
+                        "程序位 {region:?}/{program_id} 的 variant 为 null —— \
+                         即 issue #3 的「未建模」形态，必须已修"
+                    )
+                });
+                let target = TraeVariant::parse(raw)
+                    .unwrap_or_else(|| panic!("variant 值无法反解: {raw}"));
+                assert_eq!(
+                    target.region(),
+                    region,
+                    "程序位 {region:?}/{program_id} 的 variant={raw} 指向了别的区域"
+                );
+                assert_eq!(
+                    variant_for_program(region, expected_program),
+                    target,
+                    "程序位 {region:?}/{program_id} 的 variant={raw} 与程序位表不一致"
+                );
+            }
+        }
+        // 前置：必须真的把 4 个程序位都过了一遍，否则本用例会**恒真**。
+        assert_eq!(checked, 4, "应有 4 个程序位（2 区域 × 2 程序）");
     }
 
     /// 区域状态带出的「站点域」（`consoleBase`）必须**按区域分家**，且与授权页域**同源**。

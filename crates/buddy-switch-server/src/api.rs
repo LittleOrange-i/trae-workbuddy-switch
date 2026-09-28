@@ -625,10 +625,6 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
         .get("restart")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let share_sessions = body
-        .get("shareSessions")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     // ★ 非法条目**整包拒绝**，不静默丢弃（对照上游 `c614e1f7`）。
     //
     // 静默丢弃的后果不是报错而是**半成品**：切换照常执行、只是少复制几条会话，
@@ -680,7 +676,6 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
             Some(&progress),
             &account_id,
             restart,
-            share_sessions,
             &copy_ids,
         )
     })
@@ -1873,6 +1868,27 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
+/// 静态资源的缓存策略（按**被服务的资源名**判定，与 MIME 同源）。
+///
+/// - **`assets/*`** —— Vite 产物文件名带**内容哈希**（`index-C7PHZRwD.js`、
+///   `bricolage-grotesque-latin-wght-normal-DLoelf7F.woff2`）：内容一变文件名就变，
+///   所以可以放心长缓存 + `immutable`（连条件请求都省掉）。这是首屏 1.4 MB 里
+///   除 `index.html` 之外的全部体积，此前**一个缓存头都没有**，每次刷新都重传。
+/// - **其余（含 `index.html` 与 SPA 深链回退）** —— 必须 `no-cache`。
+///   `index.html` 里引用的是**带哈希的资源名**：一旦它被缓存住，用户会一直拿到旧 HTML，
+///   而旧 HTML 指向的旧哈希文件可能已被新构建删掉 ⇒ **白屏**。这与
+///   `embedded_index_html_references_only_embedded_assets` 是同一类事故的两个面。
+///
+/// 注意 `no-cache` 不是 `no-store`：语义是「用前必须回源校验」。这里没有 ETag/Last-Modified，
+/// 因此实际效果就是每次重新取（`index.html` 约 1 KB，代价可忽略），换取「永远不会陈旧」。
+fn cache_control_for(served_path: &str) -> &'static str {
+    if served_path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
+}
+
 async fn static_handler(uri: Uri) -> Response {
     let mut path = uri.path().trim_start_matches('/').to_string();
     if path.is_empty() || path == "index.html" {
@@ -1895,6 +1911,7 @@ async fn static_handler(uri: Uri) -> Response {
         Some(f) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, content_type(&served_path))
+            .header(header::CACHE_CONTROL, cache_control_for(&served_path))
             .body(Body::from(f.data.into_owned()))
             .unwrap(),
         None => Response::builder()
@@ -1907,8 +1924,8 @@ async fn static_handler(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_routes, checkin_status_item, parse_region, parse_region_filter, query_flag_enabled,
-        query_value, router, Assets,
+        api_routes, cache_control_for, checkin_status_item, parse_region, parse_region_filter,
+        query_flag_enabled, query_value, router, Assets,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Method, Request, StatusCode};
@@ -2042,6 +2059,24 @@ mod tests {
         (status, content_type, String::from_utf8_lossy(&bytes).to_string())
     }
 
+    /// 取响应的 `Cache-Control`（无该头时返回空串）。
+    async fn call_cache_control(uri: &str) -> (StatusCode, String) {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let response = router().oneshot(request).await.expect("router call");
+        let status = response.status();
+        let value = response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        (status, value)
+    }
+
     // -----------------------------------------------------------------------
     // 纯函数
     // -----------------------------------------------------------------------
@@ -2158,7 +2193,13 @@ mod tests {
         let (status, body) = call_api(Method::GET, "/api/checkin/status", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(exact_keys(&body), set_of(&["accounts"]));
-        assert_eq!(body["accounts"], json!([]));
+        // 空库上的 `== []` 无法证伪「账号 → 条目」的映射（`checkin_status_item` 拼的
+        // `accountId` / `email` 两个字段此前完全没被断言过），故此处仅断言形状；
+        // 映射由 `checkin_status_route_maps_seeded_account_identity` 播种账号后精确断言。
+        assert!(
+            body["accounts"].is_array(),
+            "checkin accounts must be a JSON array: {body}"
+        );
 
         let (status, body) = call_api(Method::GET, "/api/switch/progress", None).await;
         assert_eq!(status, StatusCode::OK);
@@ -2200,6 +2241,153 @@ mod tests {
         assert_eq!(accounts[0]["email"], json!("seeded@example.com"));
         assert_eq!(accounts[0]["nickname"], json!("Seeded CN"));
         assert_eq!(accounts[0]["needsRelogin"], json!(false));
+    }
+
+    /// 替换 `/api/checkin/status` 的空态断言：播种一个账号，断言**真实的映射**。
+    ///
+    /// ## 为什么用 Global 区域
+    ///
+    /// `checkin::get_checkin_status_for` 对 Global 是**不联网的短路分支**（直接返回
+    /// Unsupported）⇒ 既能断言「账号 → 条目」的映射，又**不会打真实上游**。
+    /// 这正是原注释里「播种会触发真实网络请求」的死结的出口：CN 才需要联网。
+    ///
+    /// 修前该用例无法存在（原断言是空库上的 `accounts == []`，恒真）——
+    /// `checkin_status_item` 拼的 `accountId` / `email` 两个字段此前**没有任何断言**，
+    /// 把它删掉也不会有测试变红。
+    #[tokio::test]
+    async fn checkin_status_route_maps_seeded_account_identity() {
+        let _guard = test_guard();
+        isolated_home();
+
+        seed_accounts(
+            Region::Global,
+            json!([{
+                "id": "global-checkin-1",
+                "uid": "uid-global-checkin",
+                "email": "gc@example.com"
+            }]),
+        );
+
+        let (status, body) =
+            call_api(Method::GET, "/api/checkin/status?region=global", None).await;
+        // 先清理再断言：即便断言失败也不把种子留给后续用例。
+        clear_accounts(Region::Global);
+
+        assert_eq!(status, StatusCode::OK);
+        let items = body["accounts"].as_array().expect("accounts array");
+        assert_eq!(items.len(), 1, "播种一个账号必须恰好回一条：{body}");
+
+        // `checkin_status_item` 的两个映射字段（`accountId` ← 账号 id、`email` ← 展示名）
+        assert_eq!(
+            items[0]["accountId"],
+            json!("global-checkin-1"),
+            "accountId 必须来自账号 id：{body}"
+        );
+        assert_eq!(
+            items[0]["email"],
+            json!("gc@example.com"),
+            "email 必须来自 account_display_name（email 优先）：{body}"
+        );
+
+        // Global 的短路分支必须**明确报不支持**，而不是伪造一个「已签到」。
+        assert_eq!(items[0]["ok"], json!(false), "Global 不得伪造成功：{body}");
+        assert!(
+            items[0]["error"].is_string(),
+            "Global 必须带明确错误文案：{body}"
+        );
+    }
+
+    /// 替换 `/api/gateway/logs` 的空态断言：写入一条日志，断言它能被读回。
+    ///
+    /// 原断言是空日志上的 `logs == []`（恒真）——把 `list()` 换成 `Vec::new()`、
+    /// 甚至把整个 handler 写死空数组，都不会有任何测试变红。
+    #[tokio::test]
+    async fn gateway_logs_route_returns_recorded_entries() {
+        let _guard = test_guard();
+        isolated_home();
+
+        let state = crate::gateway_host::shared_state();
+        // 共享状态是进程级 `OnceLock`，先清空避免受其它用例残留影响。
+        state.log.clear();
+        state.log.record(json!({
+            "ts": 1_700_000_000_000i64,
+            "endpoint": "/v1/chat/completions",
+            "method": "POST",
+            "region": "cn",
+            "account": "seeded-account",
+            "model": "hy4-preview",
+            "status": 200,
+            "latencyMs": 42,
+            "promptTokens": 7,
+            "completionTokens": 9,
+            "stream": false,
+        }));
+
+        let (status, body) = call_api(Method::GET, "/api/gateway/logs", None).await;
+        state.log.clear();
+
+        assert_eq!(status, StatusCode::OK);
+        let logs = body["logs"].as_array().expect("logs array");
+        assert_eq!(logs.len(), 1, "写入一条就必须读回一条：{body}");
+        assert_eq!(logs[0]["endpoint"], json!("/v1/chat/completions"));
+        assert_eq!(logs[0]["model"], json!("hy4-preview"));
+        assert_eq!(logs[0]["status"], json!(200));
+        assert_eq!(logs[0]["promptTokens"], json!(7));
+    }
+
+    /// 端到端证明「池治理状态确实会落盘」——补上此前**完全缺失**的那条路径。
+    ///
+    /// ## 回归背景（2026-09-28 实测发现）
+    ///
+    /// `Pool::flush_if_dirty` 存在、类型全对、单测全绿，但**生产上没有任何调用点**：
+    /// 唯一的包装 `GatewayState::persist_pool` 自身零调用者。而 `Pool::load` 在启动时
+    /// 读的正是它写的那个文件 ⇒ **文件永远是旧的**，冷却 / 熔断 / 成功率 EMA /
+    /// 余额读数 / `credits_refreshed_ms` 每次重启全部静默归零。
+    ///
+    /// 这与注册表文档里记的 `set_credits` 事故是**同一类**（「函数存在但没人调用」）。
+    /// 本用例走的就是后台 `BackgroundTask::PoolPersist` 循环调用的那条路：
+    /// 改池 → `persist_pool()` → 文件里真的出现该账号。
+    #[tokio::test]
+    async fn persist_pool_writes_governance_state_to_disk() {
+        let _guard = test_guard();
+        isolated_home();
+
+        let state = crate::gateway_host::shared_state();
+        let state_file = buddy_switch_gateway::state::gateway_state_file();
+        let _ = std::fs::remove_file(&state_file);
+
+        {
+            let mut pool = state.pool.write().await;
+            pool.sync_accounts(
+                &[json!({
+                    "uid": "persist-probe",
+                    "email": "persist@example.com",
+                    "jwt": "jwt-persist-probe"
+                })],
+                None,
+            );
+            // 制造一次真实治理改动（`apply_upstream_error` 会置 `dirty`）。
+            pool.apply_upstream_error(
+                "persist-probe",
+                "hy4-preview",
+                &buddy_switch_gateway::pool::UpstreamEvent::SoftRate {
+                    reset_at_ms: None,
+                    model_scoped: false,
+                },
+                1_700_000_000_000,
+            );
+        }
+
+        state.persist_pool().await;
+
+        let text = std::fs::read_to_string(&state_file)
+            .unwrap_or_else(|error| panic!("落盘后 {state_file:?} 必须存在: {error}"));
+        assert!(
+            text.contains("persist-probe"),
+            "状态文件必须含被治理过的账号（否则 `Pool::load` 读到的永远是旧内容）：{text}"
+        );
+
+        let _ = std::fs::remove_file(&state_file);
     }
 
     /// 回归护栏（issue #2 / win11）：**展示字段若不是字符串，接口不得原样透出**。
@@ -2580,7 +2768,6 @@ mod tests {
                 "bind_addr",
                 "port",
                 "allow_non_loopback",
-                "dual_port",
                 "log_keep",
                 "log_bodies",
                 "per_key_rate_limit",
@@ -2613,7 +2800,9 @@ mod tests {
         let (status, body) = call_api(Method::GET, "/api/gateway/logs", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(exact_keys(&body), set_of(&["logs"]));
-        assert_eq!(body["logs"], json!([]));
+        // 空日志上的 `== []` 无法证伪「写入 → 读出」这条链路，故此处仅断言形状；
+        // 内容由 `gateway_logs_route_returns_recorded_entries` 写入一条后精确断言。
+        assert!(body["logs"].is_array(), "gateway logs must be a JSON array: {body}");
 
         // strategy
         let (status, body) = call_api(Method::GET, "/api/gateway/strategy", None).await;
@@ -2742,6 +2931,61 @@ mod tests {
         assert_eq!(content_type, "text/javascript", "asset {js} mime");
     }
 
+    /// P0-5 护栏：**哈希产物可长缓存，`index.html` 必须回源校验**。
+    ///
+    /// 修前这条必红——所有静态响应都没有 `Cache-Control`（实测全仓零匹配）。
+    ///
+    /// 为什么两边都不能放松：
+    /// - 若 `index.html` 也给了 `immutable`，用户会被钉在旧 HTML 上，而它引用的
+    ///   旧哈希资源在新构建里已不存在 ⇒ **白屏**（正是 `embedded_index_html_*` 那条护栏的同族事故）。
+    /// - 若 `assets/*` 不给长缓存，首屏 1.4 MB 每次刷新都重传（本地/局域网虽快，但纯属浪费）。
+    #[tokio::test]
+    async fn static_assets_are_immutable_but_index_must_revalidate() {
+        let _guard = test_guard();
+        isolated_home();
+
+        // index.html：no-cache（且明确**不是** immutable）
+        let (status, cache) = call_cache_control("/index.html").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cache, "no-cache", "index.html 必须回源校验");
+
+        // SPA 深链回退的也是 index.html ⇒ 同策略
+        for deep_link in ["/accounts", "/gateway", "/settings/nested/deep", "/"] {
+            let (status, cache) = call_cache_control(deep_link).await;
+            assert_eq!(status, StatusCode::OK, "SPA 深链 {deep_link}");
+            assert_eq!(cache, "no-cache", "SPA 深链 {deep_link} 回退 index.html，必须同策略");
+        }
+
+        // 哈希产物：immutable 长缓存。从嵌入清单取**真实**路径，避免硬编码哈希名失稳。
+        let hashed = Assets::iter()
+            .find(|path| path.starts_with("assets/") && path.ends_with(".js"))
+            .expect("dist must embed a hashed assets/*.js");
+        let (status, cache) = call_cache_control(&format!("/{hashed}")).await;
+        assert_eq!(status, StatusCode::OK, "embedded asset {hashed}");
+        assert!(
+            cache.contains("immutable") && cache.contains("max-age=31536000"),
+            "哈希产物 {hashed} 必须长缓存，实际 Cache-Control = `{cache}`"
+        );
+
+        // 根目录下的**非**哈希文件（favicon 等）不得被当成不可变资源
+        let (status, cache) = call_cache_control("/icon.png").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cache, "no-cache", "非哈希根文件必须回源校验");
+    }
+
+    /// `cache_control_for` 的纯函数边界：只看前缀，`assets/` 之外的任何路径都必须 `no-cache`。
+    #[test]
+    fn cache_control_only_relaxes_inside_the_hashed_assets_dir() {
+        assert!(cache_control_for("assets/index-abc123.js").contains("immutable"));
+        assert!(cache_control_for("assets/x.woff2").contains("immutable"));
+        assert_eq!(cache_control_for("index.html"), "no-cache");
+        assert_eq!(cache_control_for("icon.png"), "no-cache");
+        assert_eq!(cache_control_for("vite.svg"), "no-cache");
+        // 形似但不在目录内的路径不得被误判（前缀必须带斜杠）
+        assert_eq!(cache_control_for("assetsfoo/x.js"), "no-cache");
+        assert_eq!(cache_control_for("assets"), "no-cache");
+    }
+
     /// Q2 边界：SPA 回退 MIME 与请求**大小写 / query** 无关——`uri.path()` 已剥离 query，
     /// 大小写不同的深链同样「embed 落空 → index.html」回退，仍必须是 HTML。
     #[tokio::test]
@@ -2800,6 +3044,31 @@ mod tests {
         refs
     }
 
+    /// 取出 JS 产物里所有**引号包裹的** `assets/<name>.js|.css` 资源名。
+    ///
+    /// Vite 把「动态 import 的文件清单」放在入口 chunk 的 `__vite__mapDeps` 数组里，
+    /// 形如 `["assets/AccountsPage-C5GdpMAe.js","assets/chart-DDcOHMGW.js",…]`。
+    /// 这里只认「引号包起来、以 `assets/` 开头、以 `.js`/`.css` 结尾」的整串，
+    /// 因此不会把恰好出现在字符串里的普通文本误判成资源名。
+    fn quoted_asset_names_in(js: &str) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for quote in ['"', '\''] {
+            let mut rest = js;
+            while let Some(found) = rest.find(quote) {
+                let tail = &rest[found + 1..];
+                let Some(end) = tail.find(quote) else { break };
+                let value = &tail[..end];
+                if value.starts_with("assets/") && (value.ends_with(".js") || value.ends_with(".css")) {
+                    names.push(value.to_string());
+                }
+                rest = &tail[end..];
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
     #[test]
     fn asset_refs_in_extracts_only_root_absolute_paths() {
         let html = concat!(
@@ -2850,6 +3119,77 @@ mod tests {
             files.iter().any(|f| f.starts_with("assets/")),
             "dist must embed at least one assets/* file, got {files:?}"
         );
+    }
+
+    /// ★ 护栏（B2 路由懒加载配套）：入口 chunk 里列出的**每个动态 chunk** 都必须也在 embed 中。
+    ///
+    /// ## 为什么必须补这一条
+    ///
+    /// `embedded_index_html_references_only_embedded_assets` 只校验 `index.html` 里的
+    /// **根绝对引用**。启用路由懒加载后，绝大多数资源改由**入口 JS** 动态 import
+    /// （Vite 的 `__vite__mapDeps` 清单），`index.html` 里**根本看不见它们**
+    /// ⇒ 那条护栏对懒加载 chunk **零覆盖**。
+    ///
+    /// ## 它防的是什么事故
+    ///
+    /// 与它守护的同一类：`dist/` 与 embed 不同步（改前端后未重编宿主），
+    /// 或 `dist/` 被演示构建覆盖。症状比原来**更隐蔽** —— 首屏照常打开，
+    /// 一点侧栏那个 chunk 就 404 ⇒ 页面**永久停在 `Suspense` 的 fallback 骨架**上，
+    /// 用户看到的是「点了没反应」，而不是白屏。
+    ///
+    /// ## 不许空转
+    ///
+    /// 若提取器失效（比如 Vite 换了输出格式），`referenced` 会变成空集、
+    /// 本测试就会恒真。故先断言它非空。
+    #[test]
+    fn embedded_entry_chunk_references_only_embedded_lazy_chunks() {
+        let index = Assets::get("index.html").expect("dist/index.html must be embedded");
+        let html = String::from_utf8_lossy(&index.data).to_string();
+        let entry = asset_refs_in(&html)
+            .into_iter()
+            .find(|reference| reference.starts_with("/assets/") && reference.ends_with(".js"))
+            .expect("index.html 必须引用一个入口脚本");
+        let key = entry.trim_start_matches('/');
+        let chunk = Assets::get(key).expect("入口脚本必须在 embed 中");
+        let source = String::from_utf8_lossy(&chunk.data).to_string();
+
+        let referenced = quoted_asset_names_in(&source);
+        assert!(
+            !referenced.is_empty(),
+            "入口脚本 {key} 里没找到任何 assets/* 引用 —— 要么懒加载被移除、\
+             要么提取器失效。本护栏**不得空转**：请先修提取器再放行。"
+        );
+
+        let embedded: Vec<String> = Assets::iter().map(|path| path.to_string()).collect();
+        for name in &referenced {
+            assert!(
+                embedded.iter().any(|entry| entry == name),
+                "入口脚本引用了 `{name}`，但它不在 embed 中。\
+                 `dist/` 与 embed 不同步（改前端后未重编宿主），或 `dist/` 被演示构建覆盖。\n\
+                 已嵌入的 assets/*：{:?}",
+                embedded
+                    .iter()
+                    .filter(|entry| entry.starts_with("assets/"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_asset_names_in_extracts_only_real_bundle_names() {
+        let js = concat!(
+            r#"const d=["assets/AccountsPage-C5GdpMAe.js","assets/chart-DDcOHMGW.js"];"#,
+            r#"import("./index-BOrx8Cn2.js");"#,
+            r#"const note="assets/not-a-file.txt";"#,
+            r#"const other="src/components/foo.js";"#,
+            r#"const cdn="https://cdn.example.com/assets/x.js";"#,
+        );
+        assert_eq!(
+            quoted_asset_names_in(js),
+            vec!["assets/AccountsPage-C5GdpMAe.js", "assets/chart-DDcOHMGW.js"],
+            "只收「引号包裹 + assets/ 前缀 + .js/.css 结尾」的整串"
+        );
+        assert!(quoted_asset_names_in("no assets here").is_empty());
     }
 
     /// Q2 独立证明：F2 护栏要求覆盖目录**已存在**，否则 `set_var` 会被静默忽略

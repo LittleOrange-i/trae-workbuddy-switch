@@ -47,9 +47,19 @@ enum BackgroundTask {
     AutoRotate,
     /// 账号池余额刷新（真实余额回填选号权重）。
     CreditsRefresh,
+    /// 账号池**治理状态落盘**（冷却 / 熔断 / 成功率 EMA / 余额读数）。
+    PoolPersist,
     /// 六类积分定时任务之一（各自独立排程）。
     Scheduled(schedule::ScheduleTask),
 }
+
+/// 账号池状态落盘周期（毫秒）。
+///
+/// 取值理由：[`buddy_switch_gateway::pool::Pool::flush_if_dirty`] 只在**有改动**时
+/// 才真正写盘，所以这里定的是「最坏情况下最多丢多少治理状态」。30 秒足够短
+/// （冷却 / 熔断的时效是分钟级，丢 30 秒不会造成错误决策），又远长于一次请求，
+/// 不会给请求路径加负担。
+const POOL_PERSIST_INTERVAL_MS: u64 = 30_000;
 
 /// 后台任务注册表：列出所有应启动的后台任务。
 ///
@@ -60,6 +70,7 @@ fn background_tasks() -> Vec<BackgroundTask> {
         BackgroundTask::StartupMaintenance,
         BackgroundTask::AutoRotate,
         BackgroundTask::CreditsRefresh,
+        BackgroundTask::PoolPersist,
     ];
     tasks.extend(
         schedule::ScheduleTask::all()
@@ -133,6 +144,30 @@ fn spawn_background_task(task: BackgroundTask) {
         }
         // 六类积分任务各自独立排程。
         BackgroundTask::Scheduled(task) => spawn_scheduled_task(task),
+        // 账号池治理状态落盘：**周期**刷新，且只在有改动时写（`flush_if_dirty`）。
+        //
+        // ★ 为什么必须有它：`Pool::flush_if_dirty` 此前**没有任何生产调用点** ——
+        //   唯一的包装 `GatewayState::persist_pool` 自身零调用者，而 `Pool::load`
+        //   读的那个文件因此**永远是旧的**。后果不是崩溃而是**静默遗忘**：
+        //   冷却 / 熔断 / 成功率 EMA / 余额读数 / `credits_refreshed_ms`
+        //   全部只在内存里，每次重启从零开始（例如刚判定 SessionDead 的账号
+        //   重启后立刻又被选中、再撞一次同样的墙）。
+        //
+        //   这与本注册表文档里记的 `set_credits` 事故是**同一类**：
+        //   「函数存在、类型全对、构建全绿、测试全绿，但生产上没人调用」。
+        //   登记进注册表后，`background_task_registry_includes_pool_persist` 守住它不被删除。
+        BackgroundTask::PoolPersist => {
+            tokio::spawn(async move {
+                let state = gateway_host::shared_state();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        POOL_PERSIST_INTERVAL_MS,
+                    ))
+                    .await;
+                    state.persist_pool().await;
+                }
+            });
+        }
     }
 }
 
@@ -278,6 +313,26 @@ mod tests {
             tasks.contains(&BackgroundTask::CreditsRefresh),
             "后台任务注册表必须登记 CreditsRefresh（账号池余额刷新）；缺了它生产上余额永远为 0，\
              四因子加权会静默退化为两因子。当前注册表：{tasks:?}"
+        );
+    }
+
+    /// 护栏：账号池**落盘**任务必须登记在注册表里。
+    ///
+    /// 回归背景（2026-09-28 实测发现，与上面 `set_credits` 那条是**同一类**事故）：
+    /// `Pool::flush_if_dirty` 存在、类型全对、单测全绿，但**生产上没有任何调用点** ——
+    /// 唯一的包装 `GatewayState::persist_pool` 自身零调用者。
+    /// 而 `Pool::load` 在启动时读的正是它写的那个文件 ⇒ **文件永远是旧的**：
+    /// 冷却 / 熔断 / 成功率 EMA / 余额读数 / `credits_refreshed_ms` 每次重启全部归零。
+    ///
+    /// 从 [`background_tasks`] 移除 [`BackgroundTask::PoolPersist`] 会让本用例变红。
+    #[test]
+    fn background_task_registry_includes_pool_persist() {
+        let tasks = background_tasks();
+        assert!(
+            tasks.contains(&BackgroundTask::PoolPersist),
+            "后台任务注册表必须登记 PoolPersist（账号池治理状态落盘）；缺了它 \
+             `flush_if_dirty` 就没有任何生产调用点，冷却 / 熔断 / 成功率 / 余额读数 \
+             全部只在内存里、每次重启静默归零。当前注册表：{tasks:?}"
         );
     }
 

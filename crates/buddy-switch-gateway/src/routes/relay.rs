@@ -27,6 +27,7 @@ use crate::outbound::{self, DegradeGate, OutboundMeta};
 use crate::pool::{classify_event, RealmTag, UpstreamEvent};
 use crate::session_headers::{self, ConversationContext};
 use crate::state::GatewayState;
+use crate::sticky;
 use crate::timeutil;
 
 /// 本轮中继的输入。
@@ -96,7 +97,20 @@ pub async fn relay(
     let mut tried: HashSet<String> = HashSet::new();
     let mut last: Option<RelayFailure> = None;
 
+    // 会话粘性键；客户端没给会话 id 时为 `None`（整段跳过粘性，保持原行为）。
+    let sticky_key = sticky_key_of(&request);
+
     for attempt in 0..tries {
+        // 粘性只是**偏好**：查不到就按原逻辑选号（读锁，不占选号要用的写锁）。
+        let preferred_uid = match sticky_key.as_deref() {
+            Some(key) => state
+                .sticky
+                .read()
+                .await
+                .get(key, now_ms)
+                .map(str::to_string),
+            None => None,
+        };
         let selected = select_account(
             state,
             request.region,
@@ -105,6 +119,7 @@ pub async fn relay(
             &tried,
             now_ms,
             attempt,
+            preferred_uid.as_deref(),
         )
         .await;
 
@@ -157,6 +172,10 @@ pub async fn relay(
                         .write()
                         .await
                         .note_success(&uid, &request.model, 0.0, 0, now_ms);
+                    // 会话粘性：**只在成功之后**绑定，让下一轮优先复用这个账号。
+                    if let Some(key) = sticky_key.as_deref() {
+                        state.sticky.write().await.bind(key, &uid, now_ms);
+                    }
                 }
                 return Ok(RelayOutcome::Ok {
                     response: ok.response,
@@ -179,6 +198,11 @@ pub async fn relay(
                 };
                 if !uid.is_empty() {
                     tried.insert(uid);
+                    // 会话粘性：这个账号刚失败 ⇒ 立刻**解绑**，下一轮换号重新绑。
+                    // 粘性是优化而非约束，绝不能因为粘性而反复撞同一堵墙。
+                    if let Some(key) = sticky_key.as_deref() {
+                        state.sticky.write().await.unbind(key);
+                    }
                 }
 
                 last = Some(RelayFailure {
@@ -215,6 +239,41 @@ pub async fn relay(
 }
 
 /// 选号：优先账号池（有治理状态），池给不出时回落既有策略。
+/// 由请求推导**会话粘性键**；客户端未给会话 id ⇒ `None`（整段跳过粘性）。
+///
+/// ★ 缺失时必须返回 `None`，**不得**退化成轮主键（`conversation_request_id` 每轮都换
+/// ⇒ 绑定永不命中，接线等于没接；详见 [`sticky::sticky_key`] 的文档）。
+///
+/// 区域与模型都进键：跨区域的账号库本就分家；同一会话切模型时应允许落到各自最合适的账号
+/// （否则「模型级限流只封锁该模型」的优势会被粘性抵消）。
+fn sticky_key_of(request: &RelayRequest) -> Option<String> {
+    request
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| sticky::sticky_key(request.region.as_str(), &request.model, value))
+}
+
+/// 是否采用粘性偏好账号：`Some(uid)` = 就用它，`None` = 放弃粘性、按原逻辑选号。
+///
+/// ★★ **本函数无法表达「失败」** —— 粘性是优化而非约束。只要有一条不满足
+/// （uid 为空 / 本请求已试过 / 此刻不可用），就必须放弃并落回正常选号。
+///
+/// 抽成纯函数就是为了让这条性质能被**直接**测到：漏判任何一条，粘性都会退化成
+/// 「把请求钉死在不可用账号上」—— 而那种缺陷**不报错**，只表现为偶发失败。
+///
+/// `usable` 由调用方传入 `Pool::is_usable_for`（与 `pick_account` **同源**的判据），
+/// 这样「粘性认为可用」与「选号认为可用」不会分家。
+fn sticky_choice(
+    preferred_uid: Option<&str>,
+    tried: &HashSet<String>,
+    usable: impl FnOnce(&str) -> bool,
+) -> Option<String> {
+    let uid = preferred_uid.filter(|uid| !uid.is_empty() && !tried.contains(*uid))?;
+    usable(uid).then(|| uid.to_string())
+}
+
 async fn select_account(
     state: &GatewayState,
     region: Region,
@@ -223,7 +282,25 @@ async fn select_account(
     tried: &HashSet<String>,
     now_ms: i64,
     attempt: usize,
+    preferred_uid: Option<&str>,
 ) -> Option<Value> {
+    // ★ 会话粘性：优先复用上次成功的账号，**但只在它此刻确实可用时**（见 [`sticky_choice`]）。
+    let sticky_uid = match preferred_uid {
+        Some(_) => {
+            let pool = state.pool.read().await;
+            sticky_choice(preferred_uid, tried, |uid| {
+                pool.is_usable_for(uid, now_ms, model)
+            })
+        }
+        None => None,
+    };
+    if let Some(uid) = sticky_uid.as_deref() {
+        // 池里有但账号库已删除 ⇒ 该 uid 无凭据可用，落回策略选择。
+        if let Some(account_value) = account::find_account_for(region, uid) {
+            return Some(account_value);
+        }
+    }
+
     let picked_uid = {
         let mut pool = state.pool.write().await;
         if pool.is_empty() {
@@ -464,5 +541,105 @@ mod tests {
         assert_eq!(meta.uid, "u1");
         assert_eq!(meta.conversation_id.as_deref(), Some("c1"));
         assert!(outbound_meta("u1", None).conversation_id.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 会话粘性（B8 接线）
+    // -----------------------------------------------------------------------
+
+    fn relay_request(conversation_id: Option<&str>, model: &str, region: Region) -> RelayRequest {
+        RelayRequest {
+            region,
+            model: model.to_string(),
+            prepared_body: String::new(),
+            conversation_request_id: "turn-1".to_string(),
+            conversation_id: conversation_id.map(str::to_string),
+            trace_id: None,
+        }
+    }
+
+    /// ★ **不破坏既有使用**：客户端没给会话 id（或只给空白）⇒ 粘性整段跳过。
+    ///
+    /// 这条最重要：绝大多数既有调用点不带 `metadata.conversation_id`，
+    /// 它们的行为必须与接线前**逐字相同**（不查表、不绑定）。
+    #[test]
+    fn sticky_key_is_none_without_a_conversation_id() {
+        assert_eq!(sticky_key_of(&relay_request(None, "m", Region::Cn)), None);
+        assert_eq!(
+            sticky_key_of(&relay_request(Some(""), "m", Region::Cn)),
+            None,
+            "空串不得当作有效会话 id"
+        );
+        assert_eq!(
+            sticky_key_of(&relay_request(Some("   "), "m", Region::Cn)),
+            None,
+            "纯空白不得当作有效会话 id（前后空白也要 trim）"
+        );
+    }
+
+    /// 有会话 id ⇒ 键含**区域与模型**。
+    ///
+    /// 模型必须进键：同一会话切模型时应允许落到各自最合适的账号，
+    /// 否则「模型级限流只封锁该模型」的优势会被粘性抵消。
+    #[test]
+    fn sticky_key_carries_region_and_model() {
+        let cn = sticky_key_of(&relay_request(Some("conv-1"), "hy4", Region::Cn)).unwrap();
+        assert_eq!(cn, "cn|hy4|conv-1");
+        assert_eq!(
+            sticky_key_of(&relay_request(Some("conv-1"), "hy4", Region::Global)).unwrap(),
+            "global|hy4|conv-1",
+            "区域必须进键（CN/Global 账号库本就分家）"
+        );
+        assert_ne!(
+            cn,
+            sticky_key_of(&relay_request(Some("conv-1"), "other-model", Region::Cn)).unwrap(),
+            "模型必须进键"
+        );
+        assert_eq!(
+            sticky_key_of(&relay_request(Some("  conv-1  "), "hy4", Region::Cn)).unwrap(),
+            "cn|hy4|conv-1",
+            "会话 id 前后空白要 trim（否则同一会话会派生出两个键）"
+        );
+    }
+
+    /// ★★ **粘性绝不导致失败**：任何一条不满足都返回 `None`（= 落回正常选号）。
+    ///
+    /// 这是本次接线最需要守的性质。漏判任一条，粘性就会退化成
+    /// 「把请求钉死在不可用账号上」，而且**不报错**、只表现为偶发失败。
+    #[test]
+    fn sticky_choice_falls_back_instead_of_pinning_an_unusable_account() {
+        let empty: HashSet<String> = HashSet::new();
+
+        // 没有偏好 ⇒ 放弃（不引入任何行为变化）
+        assert_eq!(sticky_choice(None, &empty, |_| true), None);
+        // uid 为空 ⇒ 放弃
+        assert_eq!(sticky_choice(Some(""), &empty, |_| true), None);
+        // 本请求已试过 ⇒ 放弃（否则会在同一个请求里重复撞同一个账号）
+        let tried: HashSet<String> = ["u1".to_string()].into_iter().collect();
+        assert_eq!(sticky_choice(Some("u1"), &tried, |_| true), None);
+        // ★ 此刻不可用（冷却 / 在途占满 / 熔断）⇒ 放弃
+        assert_eq!(
+            sticky_choice(Some("u1"), &empty, |_| false),
+            None,
+            "账号不可用时必须放弃粘性，绝不能钉死"
+        );
+        // 唯一采用的情形：有偏好 + 未试过 + 可用
+        assert_eq!(
+            sticky_choice(Some("u1"), &empty, |_| true),
+            Some("u1".to_string())
+        );
+    }
+
+    /// 可用性判据只被问一次，且只问被选中的那个 uid（防止误传别人）。
+    #[test]
+    fn sticky_choice_probes_exactly_the_preferred_uid() {
+        let empty: HashSet<String> = HashSet::new();
+        let mut probed: Vec<String> = Vec::new();
+        let chosen = sticky_choice(Some("u7"), &empty, |uid| {
+            probed.push(uid.to_string());
+            true
+        });
+        assert_eq!(chosen, Some("u7".to_string()));
+        assert_eq!(probed, vec!["u7".to_string()]);
     }
 }

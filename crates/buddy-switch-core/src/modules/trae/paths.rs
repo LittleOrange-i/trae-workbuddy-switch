@@ -651,9 +651,20 @@ mod tests {
     /// 现在改成断言**真实不变式**，并显式覆盖「同区域共用」这个此前无人断言的方向。
     #[test]
     fn 同区域两条程序共用数据文件而快照按程序分家() {
-        // 同 [`Self::两个区域的数据文件互不相同`]：下面每一对都各自**独立**读取进程级
-        // `BUDDY_SWITCH_HOME`，并发用例中途换 home 会让两侧取到不同根目录 ⇒ 整段持 env 锁。
-        let _lock = crate::modules::config::env_lock();
+        // 本用例会取快照目录（`profiles_dir_for` 内部 `create_dir_all`），
+        // 必须把 home 指到临时目录 —— 否则会在用户真实 `~/.buddy-switch/trae/` 下建目录。
+        //
+        // ⚠️ **不要再单独 `env_lock()`**：`HomeOverrideGuard::set` 内部已经取它，
+        // 而 `std::sync::Mutex` **不可重入** ⇒ 先取锁再 `set` 会**自己把自己锁死**
+        // （症状：本用例与其它所有用 `HomeOverrideGuard` 的用例一起挂住、超时；
+        // 2026-09-28 实测 4 条用例同时卡在 "running for over 60 seconds"）。
+        // 需要 env 锁时，**靠 guard 持有即可**。
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-paths-split-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&home).expect("临时 home 应能创建");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
 
         let work = TraeVariant::TraeWork; // 国内 · 默认变体
         let code = TraeVariant::Trae; // 国内 · 另一条程序（Trae CN）
@@ -698,6 +709,50 @@ mod tests {
             );
         }
 
+        // 1b) **国际区域**的两条程序同理必须共用（2026-09-28，issue #3 新增第 4 个程序位）。
+        //     漏了它就会出现「国际版 TraeCode 的账号进了另一本库」——
+        //     而那正是「账号库按区域分家」这条设计要防的事。
+        let global_work = TraeVariant::Global;
+        let global_code = TraeVariant::GlobalTraeCode;
+        let shared_global: [(&str, PathBuf, PathBuf); 4] = [
+            (
+                "账号库",
+                accounts_file_for(global_work),
+                accounts_file_for(global_code),
+            ),
+            (
+                "分组",
+                groups_file_for(global_work),
+                groups_file_for(global_code),
+            ),
+            (
+                "签到明细",
+                credits_history_file_for(global_work),
+                credits_history_file_for(global_code),
+            ),
+            (
+                "签到日志",
+                checkin_log_file_for(global_work),
+                checkin_log_file_for(global_code),
+            ),
+        ];
+        for (label, a, b) in shared_global {
+            assert_eq!(
+                a, b,
+                "国际区域的{label}应被两条程序共用，却分家了: {a:?} vs {b:?}"
+            );
+        }
+        // 且必须带上 `.global` 中缀（落到国际版那一套文件，而不是国内主库）。
+        let global_accounts = accounts_file_for(global_code)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string);
+        assert_eq!(
+            global_accounts.as_deref(),
+            Some("checkin_accounts.global.json"),
+            "国际版 TraeCode 的账号库必须落 .global 那一套"
+        );
+
         // 2) 但**跨区域**必须不同 —— 否则两套互不相通的账号体系会混库。
         //    （与 `两个区域的数据文件互不相同` 互补：那条走 `*_for_region` 入口，这条走 `*_for` 入口。）
         assert_ne!(
@@ -707,12 +762,19 @@ mod tests {
         );
 
         // 3) 快照目录按**程序**分家 —— 把 CN TraeWork 的快照灌进 TraeCode，等于把一个
-        //    未知格式的登录态写进另一个客户端。
-        assert_ne!(
-            profiles_dir_for(work),
-            profiles_dir_for(code),
-            "快照目录被两条程序共用"
-        );
+        //    未知格式的登录态写进另一个客户端。**四个程序位两两不同**（issue #3 之后
+        //    才凑齐四个），逐个比而不是只比一对，否则新加的那个漏检。
+        let snapshots = [
+            ("国内 TraeWork", profiles_dir_for(work)),
+            ("国内 TraeCode", profiles_dir_for(code)),
+            ("国际版 TraeWork", profiles_dir_for(global_work)),
+            ("国际版 TraeCode", profiles_dir_for(global_code)),
+        ];
+        for (i, (label_a, a)) in snapshots.iter().enumerate() {
+            for (label_b, b) in snapshots.iter().skip(i + 1) {
+                assert_ne!(a, b, "快照目录被 {label_a} 与 {label_b} 共用");
+            }
+        }
     }
 
     /// 变体后缀必须插在**扩展名之前**，而不是简单追加。
@@ -1008,6 +1070,52 @@ mod tests {
         assert!(profile_dir_for_program(TraeRegion::Global, TraeProgram::TraeWork, "1234").is_some());
         assert!(profile_dir_for_program(TraeRegion::Global, TraeProgram::TraeWork, "../escape").is_none());
         assert!(profile_dir_for_program(TraeRegion::Cn, TraeProgram::TraeCode, "a/b").is_none());
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★ 国际版 TraeCode 的快照目录名必须与 `_for_program` 家族**逐字相同**
+    /// （2026-09-28，issue #3 新增第 4 个程序位）。
+    ///
+    /// ## 为什么这条非钉不可
+    ///
+    /// 快照目录有**两套命名入口**：
+    /// - 线上路径 `profile.rs` → [`profiles_dir_for`]（按**变体**，`profiles_<as_str>` 规则）；
+    /// - `_for_program` 家族 → [`profiles_dir_for_program`]（按**区域 × 程序**）。
+    ///
+    /// 两者对 `(Global, TraeCode)` 必须给出**同一个目录**，否则「按区域×程序算出来的
+    /// 槽位」与「切换/备份实际写入的槽位」会分叉 —— 症状是「快照明明备份了，
+    /// 恢复时却说没有」，而且只在国际版 TraeCode 上出现（前三个槽位恰好一致）。
+    ///
+    /// ⚠️ 已知**不一致**的一格：`(Global, TraeWork)` 走变体路径得 `profiles_global`、
+    /// 走 `_for_program` 得 `profiles_global_trae_work`。那是登记在案的过渡态分歧
+    /// （`_for_program` 家族目前**只被测试使用**），不在本轮范围内 ——
+    /// 本用例因此**只**钉 TraeCode 那一格，不去替 TraeWork 做选择。
+    #[test]
+    fn 国际版traecode的快照目录两套命名一致() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-profile-gtc-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("临时 home 应能创建");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        let by_variant = profiles_dir_for(TraeVariant::GlobalTraeCode)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string);
+        let by_program =
+            profiles_dir_for_program(TraeRegion::Global, TraeProgram::TraeCode)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string);
+
+        assert_eq!(by_variant.as_deref(), Some("profiles_global_trae_code"));
+        assert_eq!(
+            by_variant, by_program,
+            "变体路径与区域×程序路径必须指向同一个快照目录"
+        );
 
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);

@@ -46,12 +46,16 @@
   npx vite build --outDir dist-demo
   Remove-Item Env:VITE_DEMO_MODE, Env:VITE_PAGES_DEMO
   ```
-- **rust-embed 不会因 `dist` 变化自动重编**：实测 `vite build` 之后 `cargo build -p buddy-switch-server` 输出 `Finished in 0.56s` 且**没有** `Compiling` 行，二进制保持嵌入旧前端。改前端后必须强制重编（`cargo clean -p buddy-switch-server`，或触碰 crate 源码 mtime）才能生效。上面的 `embedded_index_html_references_only_embedded_assets` 护栏也是这一点的补偿：只要重编发生在正确产物之后，它就守住底线。
+- **改前端后宿主必须重编才能生效**：`rust-embed` 是**编译期**嵌入 `dist`，判据是**构建顺序**（新 `dist` → 宿主 crate 重新 `Compiling`），别 grep 二进制。
+  - 手动 `cargo build -p buddy-switch-server` **不会**因 `dist` 变化自动重编（实测输出 `Finished in 0.56s` 且**没有** `Compiling` 行），二进制保持嵌入旧前端；此时需强制重编（`cargo clean -p buddy-switch-server`，或触碰 crate 源码 mtime）。
+  - **但走 `build-quick.cmd` / `build-exe.cmd`（= `scripts/package-windows.ps1`）会自动处理**：打包发生在 `vite build` 之后，宿主会重新 `Compiling`，前端改动天然进包（2026-09-24 实测），产物还会被自动收进 `deliverables/`。只有**手动** `npx tauri build` 时才需要自己管顺序。
+  - `embedded_index_html_references_only_embedded_assets` 护栏是这一点的补偿：只要重编发生在正确产物之后，它就守住底线。
 - **`/api/checkin/status` 与 `/api/gateway/logs` 仍是空态断言**（P2）：播种前者会触发真实上游网络请求，故未补实；这两条断言当前只能验证 shape。
 - **`/api/checkin/status` 是只读 GET 却会触发上游网络调用**（P3，设计层面，非本轮引入）。注意 `buddy-switch serve` 启动时 `spawn_background_loops()` 会执行一次 `checkin::run_checkin_cycle(StartupVerify)`，并会改动 `~/.buddy-switch/` 下的账号与缓存文件——本地做实验时务必先用 `BUDDY_SWITCH_HOME` 指向**已存在**的目录隔离。
 - **前端无单测框架**，故未跑前端单测，仅以 `tsc` + 生产构建作为门禁。
 - **未运行 Tauri 运行时验证**（仅保证其 crate 可编译）；未做并发压测（受 `CARGO_INCREMENTAL=0` + cargo 串行约束）。
-- **项目当前没有 Git 仓库**，建议初始化 Git 并建立基线提交，便于审计、回滚和后续协作。
+- **Git 仓库已建立并发布**（2026-09-24 起）：远端 `NextAgentX/trae-workbuddy-switch`，已打 tag `v2026.9.221126` / `v2026.9.241700` / `v2026.9.242126` 并发布 Release（四平台安装包 + 签名 + updater 清单）。
+  ⚠️ 遗留：release 工作流的 4 个 `npm platform *` job 因缺 `NPM_TOKEN` secret 持续失败 ⇒ **run 整体标 `failure`，但 Release 与安装包本身 success**（npm 是独立 job，不阻塞 Release）。判读 CI 结论必须看**具体 job**，不能只看 run 状态。
 
 ## 重要环境说明
 

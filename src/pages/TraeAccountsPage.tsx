@@ -580,18 +580,17 @@ export default function TraeAccountsPage() {
     // 程序位决定客户端（登录态写进谁、启动谁）。
     const entry = variantStatuses.find((item) => item.variant === variant);
     return (entry?.programs ?? []).map((program) => ({
-      // 尚未建模的程序位（如国际版 TraeCode）没有可回传的标识 ⇒ 用程序位标识占位；
-      // 它的 `installed` 必为 false，卡片会渲染成禁用按钮，不会被误点。
-      variant: program.variant ?? program.program,
+      // ★ 2026-09-28（issue #3）起，**四个程序位都有标识**（`variant` 类型已收成非空）：
+      // 此前国际版 TraeCode 未建模，后端回 `null`、这里用程序位标识占位并靠
+      // `installed: false` 把按钮禁用。现在那个 `?? program.program` 兜底已无对象，
+      // 删掉它 —— 留着会让「忘了建模」重新退化成静默的占位，而不是编译期错误。
+      variant: program.variant,
       label: program.label,
       installed: program.installed,
-      // 登录态是**客户端级**的：只有拿到程序位标识才能比较，
-      // 且两边都非空（`logins` 读不到时是 `null`，不能让 `null` 与空 userId 相互匹配）。
-      // 比的是 `userId`（身份）而不是 `name`（展示名）—— 后者改名即失配。
+      // 登录态是**客户端级**的：比的是 `userId`（身份）而不是 `name`（展示名）
+      // —— 后者改名即失配。`logins` 读不到时是 `null`，不能让 `null` 与空 userId 相互匹配。
       current:
-        program.variant !== null &&
-        Boolean(account.userId) &&
-        logins[program.variant]?.userId === account.userId,
+        Boolean(account.userId) && logins[program.variant]?.userId === account.userId,
     }));
   }
   /**

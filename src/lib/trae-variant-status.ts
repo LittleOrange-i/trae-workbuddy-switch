@@ -15,7 +15,7 @@ function programStub(
   program: TraeProgramStatus["program"],
   label: string,
   nameAliasKey: TranslationKey,
-  variant: TraeVariantId | null,
+  variant: TraeVariantId,
 ): TraeProgramStatus {
   return {
     program,
@@ -43,8 +43,13 @@ function programStub(
  * 各自维护一份占位表迟早漂移（曾经由 `TraeVariantBar` 私有持有）。
  *
  * 程序位的 `variant` 是**切换时要回传给后端的标识**：
- * 国内两个程序位有各自的历史标识（`trae_work` / `trae_cn`，后端据此选客户端），
- * 国际版 TraeCode 尚未建模 ⇒ `null`（按钮必须禁用，不能拿同区域另一个客户端顶替）。
+ * 国内两个程序位有各自的历史标识（`trae_work` / `trae_cn`），
+ * 国际版两个是 `global`（TraeWork）与 `global_trae_code`（TraeCode）。
+ *
+ * ⚠️ 2026-09-28（issue #3）之前，国际版 TraeCode 未建模 ⇒ 这里填 `null`、
+ * 按钮禁用。现在四个程序位都已建模，**四个占位都必须带标识** ——
+ * 留 `null` 会让「后端不可用」时的占位形态与正常形态不一致，
+ * 而 `variant` 的类型已收成非空（`TraeProgramStatus.variant`）。
  *
  * `consoleBase` 是本表里**唯一**「只在后端不可用时才用到」的域值 —— 正常路径一律由后端
  * `region_endpoints(region).console_base` 提供（`platform.rs` 有单测钉住按区域分家）。
@@ -90,7 +95,7 @@ export const TRAE_VARIANT_FALLBACK: TraeVariantStatus[] = [
     writeDataDirExists: false,
     programs: [
       programStub("trae_work", "TraeWork AI", "trae.program.traeWorkGlobal", "global"),
-      programStub("trae_code", "Trae AI", "trae.program.traeCodePending", null),
+      programStub("trae_code", "Trae AI", "trae.program.traeCodeGlobal", "global_trae_code"),
     ],
   },
 ];
@@ -169,10 +174,10 @@ export async function loadTraeVariantStatuses(): Promise<TraeVariantStatus[]> {
 export async function loadTraeVariantLogins(
   statuses: TraeVariantStatus[],
 ): Promise<TraeVariantLogins> {
-  const targets = statuses.flatMap((item) =>
-    item.programs
-      .map((program) => program.variant)
-      .filter((variant): variant is TraeVariantId => variant !== null),
+  // 每个程序位都带标识（2026-09-28 起 `TraeProgramStatus.variant` 非空），
+  // 因此这里不再有「跳过未建模程序位」的过滤 —— 四个程序位各取一次登录态。
+  const targets: TraeVariantId[] = statuses.flatMap((item) =>
+    item.programs.map((program) => program.variant),
   );
   const pairs = await Promise.all(
     targets.map(async (variant): Promise<[TraeVariantId, TraeVariantLogin | null]> => {

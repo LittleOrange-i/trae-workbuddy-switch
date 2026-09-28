@@ -22,7 +22,6 @@ pub fn switch_account(
     progress_fn: Option<&ProgressFn>,
     account_id: &str,
     restart: bool,
-    share_sessions: bool,
     copy_session_ids: &[String],
 ) -> Result<Value, String> {
     switch_account_for(
@@ -30,7 +29,6 @@ pub fn switch_account(
         progress_fn,
         account_id,
         restart,
-        share_sessions,
         copy_session_ids,
     )
 }
@@ -41,7 +39,6 @@ pub fn switch_account_for(
     progress_fn: Option<&ProgressFn>,
     account_id: &str,
     restart: bool,
-    share_sessions: bool,
     copy_session_ids: &[String],
 ) -> Result<Value, String> {
     switch_account_cross(
@@ -50,7 +47,6 @@ pub fn switch_account_for(
         progress_fn,
         account_id,
         restart,
-        share_sessions,
         copy_session_ids,
     )
 }
@@ -59,13 +55,20 @@ pub fn switch_account_for(
 ///
 /// 只有会话复制关心源版本 —— 记忆与连接器迁移走 `migrate_account_data_cross`，
 /// 由调用方单独传源 region（见 [`crate::modules::migrate`]）。
+///
+/// ## 关于旧的 `share_sessions`「全体转移」参数（2026-09-28 移除）
+///
+/// 该参数是 Python 版遗留的兼容位，Rust 版**从未实现**：原实现是「当它为真时，往**成功的**
+/// 报告里塞一个 `sessionShare: {error: …}`」。这比没有更坏 —— 调用方看到 `ok: true` 会以为
+/// 切换（含会话转移）都成功了。且经全仓核查，它**没有任何调用方**：前端 `api.ts` 只有类型声明、
+/// 无一处传值；无测试、无文档引用。⇒ 按「不保留死代码」整条移除，而非改成静默 no-op。
+/// 若日后确需「全体转移」，应按新需求重新设计，不要复活这个半成品。
 pub fn switch_account_cross(
     region: Region,
     source_region: Region,
     progress_fn: Option<&ProgressFn>,
     account_id: &str,
     restart: bool,
-    share_sessions: bool,
     copy_session_ids: &[String],
 ) -> Result<Value, String> {
     let progress = |message: &str| {
@@ -81,7 +84,6 @@ pub fn switch_account_cross(
     let backup = auth_file::backup_auth_file_for(region);
 
     let mut copy_report: Option<Value> = None;
-    let mut session_report: Option<Value> = None;
     if restart {
         progress("正在关闭 WorkBuddy…");
         close_workbuddy_for(region, 20)?;
@@ -94,10 +96,6 @@ pub fn switch_account_cross(
                 &acc,
                 copy_session_ids,
             );
-        }
-        if share_sessions {
-            // 旧的「全体转移」兼容路径（默认关闭），Rust 版暂未实现
-            session_report = Some(json!({"error": "share_sessions 兼容路径暂未在 Rust 版实现"}));
         }
     }
     progress("正在写入认证文件…");
@@ -116,9 +114,6 @@ pub fn switch_account_cross(
     if let Some(c) = copy_report {
         result["sessionCopy"] = c;
     }
-    if let Some(s) = session_report {
-        result["sessionShare"] = s;
-    }
     Ok(result)
 }
 
@@ -129,7 +124,7 @@ mod tests {
     #[test]
     fn switch_account_missing_id_returns_before_auth_side_effects() {
         let missing_id = "switch-test-account-that-does-not-exist";
-        let error = switch_account(None, missing_id, false, false, &[]).unwrap_err();
+        let error = switch_account(None, missing_id, false, &[]).unwrap_err();
         assert!(error.contains("账号不存在"));
         assert!(error.contains(missing_id));
         // This deliberately does not prove the CN wrapper's Region::Cn binding:

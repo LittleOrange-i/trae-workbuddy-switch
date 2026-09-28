@@ -5,10 +5,29 @@
 > 桌面 App（Tauri）请从 [GitHub Releases](https://github.com/NextAgentX/trae-workbuddy-switch/releases/latest) 下载安装包。
 > 在线只读演示：<https://nextagentx.github.io/trae-workbuddy-switch/>
 
-> **本包（`@nextagentx/buddy-switch`）尚未发布到 npm**：下面的安装命令现在还不可用，需要 webui 形态请先按仓库 README 从源码构建。
-> 发布后再以本页命令为准。
+> **本包（`@nextagentx/buddy-switch`）暂未发布到 npm**（npmjs 账号侧受限，通道已就绪但未开启）。
+> 在开启之前，请用下面的「从 GitHub Releases 直接下载」方式获取 webui 形态；通道开启后以 npm 命令为准。
 
 ## 安装与运行
+
+### 当前可用：从 GitHub Releases 下载裸二进制
+
+在 [Releases](https://github.com/NextAgentX/trae-workbuddy-switch/releases/latest) 资产里取对应平台的
+`buddy-switch-<platform>-<arch>`（Windows 带 `.exe`），直接运行即可：
+
+```bash
+# macOS / Linux
+chmod +x ./buddy-switch-darwin-arm64
+./buddy-switch-darwin-arm64          # 启动本地服务 + 自动打开浏览器
+./buddy-switch-darwin-arm64 serve    # 只起服务，不开浏览器（--port 指定端口）
+./buddy-switch-darwin-arm64 status   # 终端查看当前账号
+./buddy-switch-darwin-arm64 version  # 版本号
+```
+
+> macOS 未签名会触发 Gatekeeper：先执行 `xattr -d com.apple.quarantine <二进制路径>`。
+> Windows 会弹 SmartScreen，选「仍要运行」。
+
+### npm 安装（通道开启后可用）
 
 ```bash
 npm i -g @nextagentx/buddy-switch

@@ -110,10 +110,32 @@ pub enum TraeVariant {
     /// 在持久化轴翻到区域之后新增：它让「区域之间互不污染」这条**真契约**继续可表达
     /// （此前那批断言用的是两个国内产品线，而它们现在共用一本库，断言前提已消失）。
     ///
-    /// **刻意暂不列入 [`TraeVariant::all`]**：`all()` 是界面与网关遍历产品线的入口，
-    /// 而国际版尚未接入探测与登录，进了 `all()` 会让界面上凭空多出一条「未检测到」的线。
-    /// 等探测按程序位接好后（见 `.trellis/tasks/09-21-trae-region-program-model`）再纳入。
+    /// **刻意暂不列入 [`TraeVariant::all`]**：`all()` 是「两条国内程序位」的旧入口
+    /// （见该函数的说明），而本取值属于国际区域。
     Global,
+    /// **国际版 TraeCode**（客户端 `Trae` / `Trae.exe`，`nameAlias = TraeCode`）。
+    ///
+    /// ## 为什么它是最后一个被补上的程序位（issue #3）
+    ///
+    /// 四个程序位 = 区域 × 程序。前三个早就有了，唯独「国际版 × TraeCode」缺位：
+    /// `platform::variant_for_program(Global, TraeCode)` 当时返回 `None`，
+    /// 于是国际版页签上的 TraeCode 按钮永远显示「未检测到」——
+    /// 用户报的「不支持 TraeCode」正是这一格（issue #3）。
+    ///
+    /// ## 它同时修掉一个**跨区误判**（比缺位更危险）
+    ///
+    /// 补位之前，`TRAE_CN_SPEC`（国内 TraeCode）的候选名里混着 `Trae` / `Trae.exe`
+    /// —— 那是**国际版**客户端的名字。后果不是报错，而是**静默认错客户端**：
+    /// 只装了国际版 TraeCode 的机器上，国内版 TraeCode 的程序位会被判成「已安装」，
+    /// 并指向国际版的安装目录与 userData ⇒ 切账号会把登录态写进另一个客户端。
+    /// 本取值把 `Trae` / `Trae.exe` 收归自己名下，那条误判随之消失。
+    ///
+    /// ⚠️ **候选名（目录 / exe / 进程）是客户端通用命名**（`<名> CN` 是国内版、
+    /// 裸名是国际版，与 `TRAE SOLO CN` / `TRAE SOLO` 同款规则），风险可控；
+    /// 但本机未装国际版 TraeCode，`packageType` 与 `nameAlias` **未实测**，
+    /// 故 `package_type` 是显式标注的推断值（见 [`GLOBAL_TRAE_CODE_SPEC`]）。
+    #[serde(rename = "global_trae_code")]
+    GlobalTraeCode,
 }
 
 impl TraeVariant {
@@ -135,6 +157,10 @@ impl TraeVariant {
             TraeVariant::TraeWork => "trae_work",
             TraeVariant::Trae => "trae_cn",
             TraeVariant::Global => "global",
+            // 与 [`paths::profiles_dir_for`] 的 `profiles_<as_str>` 规则合成
+            // `profiles_global_trae_code` —— 与 `paths::profiles_dir_for_program`
+            // 给 `(Global, TraeCode)` 的名字**逐字相同**（有单测钉住）。
+            TraeVariant::GlobalTraeCode => "global_trae_code",
         }
     }
 
@@ -145,7 +171,7 @@ impl TraeVariant {
     pub fn region(self) -> super::region::TraeRegion {
         match self {
             TraeVariant::TraeWork | TraeVariant::Trae => super::region::TraeRegion::Cn,
-            TraeVariant::Global => super::region::TraeRegion::Global,
+            TraeVariant::Global | TraeVariant::GlobalTraeCode => super::region::TraeRegion::Global,
         }
     }
 
@@ -162,6 +188,9 @@ impl TraeVariant {
             TraeVariant::TraeWork => "Trae Work",
             TraeVariant::Trae => "Trae",
             TraeVariant::Global => "国际版",
+            // 与 `region::GLOBAL_TRAE_CODE.display_name` / 前端 `trae.program.traeCode`
+            // 的国际化写法同源（用户确认的约定：国际版带 `AI` 后缀）。
+            TraeVariant::GlobalTraeCode => "Trae AI",
         }
     }
 
@@ -178,16 +207,43 @@ impl TraeVariant {
             // 它曾作为 Trae 的宽容别名；但区域标识指向主程序才安全 ——
             // 否则「保存登录态」这类**程序级**操作会去读 TraeCode 客户端的 userData。
             "cn" => Some(TraeVariant::TraeWork),
-            "trae_cn" | "traecn" | "trae cn" | "ide" | "trae" => Some(TraeVariant::Trae),
+            // `trae_code` 是前端的**程序位**标识（`TraeProgramId`），不带区域。
+            // 收它并落**国内** TraeCode：这是唯一「不猜区域」的方向 ——
+            // 国内 TraeCode 是既有程序位，而国际版 TraeCode 另有专属标识
+            // `global_trae_code`（见下）。落成国际版才会把国内用户的登录态写错客户端。
+            "trae_cn" | "traecn" | "trae cn" | "ide" | "trae" | "trae_code" | "traecode" => {
+                Some(TraeVariant::Trae)
+            }
             // 国际版区域。**不放宽成 `global`/`intl` 之外的词**：区域标识是要落到
             // 文件名与落盘数据上的，认得太宽会让一个拼错的参数静默读到另一套账号库
             // （症状是"账号凭空消失"，极难定位）。
             "global" | "trae_global" | "intl" | "international" => Some(TraeVariant::Global),
+            // 国际版 TraeCode（issue #3）。**必须排在 `global` 之后**：
+            // `global` 是区域标识、落到该区域的**主程序**（TraeWork），
+            // 而本取值是同一区域里的**另一条程序**，两者不可互换 ——
+            // 混了会把登录态写进错的客户端。
+            //
+            // `trae_code_global` / `traecodeglobal` 是同一件事的另两种写法，
+            // 一并接受（前端历史值/手写参数都可能出现）。
+            "global_trae_code" | "global_traecode" | "trae_code_global" | "traecodeglobal"
+            | "trae global" => Some(TraeVariant::GlobalTraeCode),
             _ => None,
         }
     }
 
-    /// 全部已知变体，供遍历用。
+    /// **国内区域**的两条程序位，供遍历用。
+    ///
+    /// ## ⚠️ 它不是「全部变体」（要全部请用 [`all_specs`]）
+    ///
+    /// 本函数是改造前**单轴（产品线）**时代的遍历入口，只含国内两条线，
+    /// 而它被两类**只关心国内**的护栏消费：
+    /// `checkin_constants_stay_aligned_with_variant_table`、
+    /// `checkin_url_uses_trae_api_base`（都把 CN 端点写死）。
+    /// 把两个国际区域取值塞进来会让那些断言对国际端点变红 ——
+    /// 那不是缺陷被暴露，而是**遍历口径被换掉了**。
+    ///
+    /// ⇒ 区域轴上的完整遍历一律走 [`super::region::TraeRegion::all`]（界面/网关）
+    /// 或 [`all_specs`]（变体表）；本函数**只**表示「国内两条程序位」。
     pub fn all() -> [TraeVariant; 2] {
         [TraeVariant::TraeWork, TraeVariant::Trae]
     }
@@ -434,15 +490,28 @@ const TRAE_WORK_SPEC: VariantSpec = VariantSpec {
     global_endpoints: Some(GLOBAL_ENDPOINTS),
 };
 
-/// Trae CN 变体（`Trae` / `Trae CN`）。
+/// Trae CN 变体（**国内** TraeCode，客户端 `Trae CN`）。
+///
+/// ## ⚠️ 候选名里**不再**含裸名 `Trae`（2026-09-28，issue #3）
+///
+/// 它曾经是 `["Trae CN", "Trae"]`。那个 `Trae` 其实是**国际版** TraeCode 的
+/// userData 名（与 `TRAE SOLO CN` / `TRAE SOLO` 同款「国内带 CN 后缀」规则），
+/// 于是产生一条**静默跨区误判**：只装了国际版 TraeCode 的机器上，
+/// 国内版 TraeCode 的程序位会判成「已安装」并指向国际版的目录 ——
+/// 切账号会把登录态写进另一个客户端。
+///
+/// 裸名已移交 [`GLOBAL_TRAE_CODE_SPEC`]；本变体现在**只有一个候选**。
+/// 与 `TRAE_WORK_SPEC` 的 `TRAE SOLO` 重叠不同，这里的重叠**已修掉**
+/// （那边是登记在案的待修缺陷，必须连同约 20 条依赖「多变体多候选目录」的护栏
+/// 一起做，见该常量的说明）。
 const TRAE_CN_SPEC: VariantSpec = VariantSpec {
     variant: TraeVariant::Trae,
     display_name: "Trae CN",
     name_alias: "TraeCode CN",
     package_type: "TRAE_CN",
-    data_dir_names: &["Trae CN", "Trae"],
-    exe_names: &["Trae CN.exe", "Trae.exe"],
-    proc_names: &["Trae CN", "Trae"],
+    data_dir_names: &["Trae CN"],
+    exe_names: &["Trae CN.exe"],
+    proc_names: &["Trae CN"],
     cn_endpoints: EndpointSet {
         // 实测：与 Trae Work 变体**逐字相同** —— 产品线不改变端点，region 才改变。
         account_base: "https://api.trae.cn",
@@ -491,18 +560,63 @@ const GLOBAL_SPEC: VariantSpec = VariantSpec {
     global_endpoints: None,
 };
 
+/// **国际版 TraeCode**（客户端 `Trae` / `Trae.exe`）—— 第 4 个程序位（issue #3）。
+///
+/// ## 依据与「未实测」的边界（必须分清）
+///
+/// | 项 | 依据 | 可信度 |
+/// |:---|:---|:---|
+/// | userData / exe / 进程名 `Trae` | 同族命名规则：国内版带 `CN` 后缀、国际版用裸名（与 `TRAE SOLO CN` / `TRAE SOLO` 逐字同款） | 推断（本机未装国际版 TraeCode） |
+/// | 端点 | 国际版客户端自述值（与 `Global` 同源，**产品线不改变端点、region 才改变**） | 有实测依据 |
+/// | `packageType` | **未实测**。仅用于 [`OAuthLine::from_package_type`] 的产品线分派，而该分派只区分 `SOLO_*` 与非 `SOLO_*`（见 `from_package_type` 的 `else` 分支）⇒ 任何非 `SOLO_*` 取值都落 **TRAE 线**，这正是 IDE 该用的那条钥匙（`ono9krqynydwx5`） | 推断，但**后果被分派逻辑钉死** |
+///
+/// ⇒ 猜错 `packageType` 的后果**有界**：它不会让请求打到错的域（域由
+/// [`TraeVariant::region`] 决定），也不会换错产品线的钥匙（非 `SOLO_*` 一律 TRAE 线）。
+/// 真正的风险只剩「本机根本没有国际版 TraeCode 客户端可探测」——
+/// 那种情况下程序位显示「未检测到」，符合「绝不伪造成功」。
+const GLOBAL_TRAE_CODE_SPEC: VariantSpec = VariantSpec {
+    variant: TraeVariant::GlobalTraeCode,
+    display_name: "Trae AI",
+    // 与 `region::GLOBAL_TRAE_CODE.name_alias` 同源，**显式标注未实测**。
+    name_alias: "TraeCode（待实测）",
+    package_type: "TRAE_I18N",
+    data_dir_names: &["Trae"],
+    exe_names: &["Trae.exe"],
+    proc_names: &["Trae"],
+    // 国际版变体**没有「另一套」可切**：端点直接放在 `cn_endpoints` 槽
+    // （字段名是历史包袱），与 [`GLOBAL_SPEC`] 同款处理。
+    cn_endpoints: GLOBAL_ENDPOINTS,
+    global_endpoints: None,
+};
+
 /// 取变体的描述符。
 pub fn variant_spec(variant: TraeVariant) -> &'static VariantSpec {
     match variant {
         TraeVariant::TraeWork => &TRAE_WORK_SPEC,
         TraeVariant::Trae => &TRAE_CN_SPEC,
         TraeVariant::Global => &GLOBAL_SPEC,
+        TraeVariant::GlobalTraeCode => &GLOBAL_TRAE_CODE_SPEC,
     }
 }
 
-/// 全部变体的描述符（遍历用）。
-pub fn all_specs() -> [&'static VariantSpec; 2] {
-    [&TRAE_WORK_SPEC, &TRAE_CN_SPEC]
+/// 全部**变体**的描述符（4 个程序位），供**反查与不变式**遍历用。
+///
+/// ## 与 [`TraeVariant::all`] 的分工（别混用）
+///
+/// | 函数 | 口径 | 用途 |
+/// |:---|:---|:---|
+/// | [`all_specs`] | 4 个程序位（区域 × 程序全覆盖） | [`variant_of_name`] 反查、端点/授权线不变式 |
+/// | [`TraeVariant::all`] | **只**国内两条程序位 | 只关心 CN 的历史护栏与 fixture |
+///
+/// 两者并存是**过渡态**：单轴（产品线）时代的遍历入口还没删，而区域轴的完整
+/// 遍历入口是 [`super::region::TraeRegion::all`] / [`super::region::all_program_specs`]。
+pub fn all_specs() -> [&'static VariantSpec; 4] {
+    [
+        &TRAE_WORK_SPEC,
+        &TRAE_CN_SPEC,
+        &GLOBAL_SPEC,
+        &GLOBAL_TRAE_CODE_SPEC,
+    ]
 }
 
 /// 从 userData 目录名 / 安装目录名 / exe 名反查变体。
@@ -532,9 +646,12 @@ pub fn variant_of_name(name: &str) -> Option<TraeVariant> {
     // 再退化到包含关系。`solo` 是 Trae Work 的独有词根（`TRAE SOLO`），
     // 放在 `trae` 之前判定，否则 `TRAE SOLO CN` 会被 `trae` 抢先命中。
     //
-    // ⚠️ 已知后果（与 `TRAE_WORK_SPEC` 的候选名重叠同源）：`TRAE SOLO` 会落到
-    //   `TraeWork`，而它其实是**国际版**客户端的 userData 名。修它等于摘掉那条重叠，
-    //   见 `TRAE_WORK_SPEC` 的说明 —— 必须与那 20 条护栏一起单独一轮处理。
+    // ⚠️ 两条**已修**的重叠不再靠这里兜底：`Trae` / `Trae.exe` 现在精确命中
+    //   [`GLOBAL_TRAE_CODE_SPEC`]（国际版 TraeCode），不会再落回 `Trae`（国内）。
+    //
+    // ⚠️ 剩余的一处（与 `TRAE_WORK_SPEC` 的候选名重叠同源）：`TRAE SOLO` 会落到
+    //   `TraeWork`（国内），而它其实是**国际版**客户端的 userData 名。修它等于摘掉
+    //   那条重叠，见 `TRAE_WORK_SPEC` 的说明 —— 必须与那 20 条护栏一起单独一轮处理。
     if lowered.contains("solo") {
         return Some(TraeVariant::TraeWork);
     }
@@ -555,13 +672,91 @@ mod tests {
         // 它已写进用户的 Key 记录、网关日志与快照目录名，改名会断老数据。
         assert_eq!(TraeVariant::Trae.as_str(), "trae_cn");
         assert_eq!(TraeVariant::Global.as_str(), "global");
+        // ★ 国际版 TraeCode（issue #3）：字符串决定快照目录名
+        // （`paths::profiles_dir_for` 的 `profiles_<as_str>` 规则），
+        // 必须与 `paths::profiles_dir_for_program(Global, TraeCode)` 的取值一致。
+        assert_eq!(TraeVariant::GlobalTraeCode.as_str(), "global_trae_code");
         assert_eq!(TraeVariant::TraeWork.display_name(), "Trae Work");
         assert_eq!(TraeVariant::Trae.display_name(), "Trae");
         assert_eq!(TraeVariant::Global.display_name(), "国际版");
+        // 与 `region::GLOBAL_TRAE_CODE.display_name` / 前端国际化程序名同源。
+        assert_eq!(TraeVariant::GlobalTraeCode.display_name(), "Trae AI");
         assert_eq!(TraeVariant::default(), TraeVariant::TraeWork);
         // 标识符已正名为 `Trae`，但历史字符串仍可解析（两侧都可读）。
         assert_eq!(TraeVariant::parse("trae"), Some(TraeVariant::Trae));
         assert_eq!(TraeVariant::parse("trae_cn"), Some(TraeVariant::Trae));
+    }
+
+    /// ★ 四个程序位到「持久化区域」的映射必须两两正确（issue #3 新增第 4 个）。
+    ///
+    /// 这条是**跨区误判的总闸门**：`region()` 决定账号库 / 快照 / 冷却 / 端点落哪一套。
+    /// 把 `GlobalTraeCode` 误映射成 `Cn`，症状是「国际版 TraeCode 的账号进了国内库」，
+    /// 不报错、只是数据串了。
+    #[test]
+    fn 四个程序位映射到正确的区域() {
+        use super::super::region::TraeRegion;
+        assert_eq!(TraeVariant::TraeWork.region(), TraeRegion::Cn);
+        assert_eq!(TraeVariant::Trae.region(), TraeRegion::Cn);
+        assert_eq!(TraeVariant::Global.region(), TraeRegion::Global);
+        assert_eq!(TraeVariant::GlobalTraeCode.region(), TraeRegion::Global);
+        // `all_specs()` 的口径必须与 `region()` 自洽（每条 spec 的 `variant` 字段
+        // 与它自己的 region 对得上），否则「表里写着 A、跑起来落 B」。
+        for spec in all_specs() {
+            assert_eq!(
+                variant_spec(spec.variant).variant.region(),
+                spec.variant.region(),
+                "{} 的 region 与表不自洽",
+                spec.name_alias
+            );
+        }
+    }
+
+    /// ★ 国际版 TraeCode 的 `parse` 必须与**区域标识** `global` 分家（issue #3）。
+    ///
+    /// 两者只差一个后缀，混用会把「切到国际版主程序」变成「切到国际版 TraeCode」——
+    /// 登录态写进错的客户端，且界面上看不出异常。
+    #[test]
+    fn 国际版traecode与区域标识分家() {
+        for s in [
+            "global_trae_code",
+            "global_traecode",
+            "trae_code_global",
+            "traecodeglobal",
+            "trae global",
+            "GLOBAL_TRAE_CODE",
+        ] {
+            assert_eq!(
+                TraeVariant::parse(s),
+                Some(TraeVariant::GlobalTraeCode),
+                "解析失败: {s}"
+            );
+        }
+        // `global` 仍是**区域标识**，落该区域的主程序（TraeWork）。
+        for s in ["global", "intl", "international", "trae_global"] {
+            assert_eq!(TraeVariant::parse(s), Some(TraeVariant::Global), "解析失败: {s}");
+        }
+        // `trae_code`（无区域前缀）是**国内** TraeCode —— 不能顺手改成国际版。
+        assert_eq!(TraeVariant::parse("trae_code"), Some(TraeVariant::Trae));
+    }
+
+    /// ★ 裸名 `Trae` / `Trae.exe` 必须反查成**国际版** TraeCode（issue #3 的核心修复）。
+    ///
+    /// 反例（改坏会红）：把它留在 `TRAE_CN_SPEC` 的候选里 ⇒ 只装了国际版 TraeCode 的
+    /// 机器上，**国内版** TraeCode 的程序位会被判成「已安装」并指向国际版目录。
+    #[test]
+    fn 裸名反查落到国际版traecode() {
+        assert_eq!(variant_of_name("Trae"), Some(TraeVariant::GlobalTraeCode));
+        assert_eq!(variant_of_name("Trae.exe"), Some(TraeVariant::GlobalTraeCode));
+        assert_eq!(variant_of_name("trae"), Some(TraeVariant::GlobalTraeCode));
+        // 带 CN 后缀的仍是国内 TraeCode。
+        assert_eq!(variant_of_name("Trae CN"), Some(TraeVariant::Trae));
+        assert_eq!(variant_of_name("Trae CN.exe"), Some(TraeVariant::Trae));
+        // 两个程序位的目录名互不包含（`Trae` 是 `Trae CN` 的子串）—— 靠**精确匹配**分开。
+        assert_ne!(
+            variant_of_name("Trae CN"),
+            variant_of_name("Trae"),
+            "包含关系必须靠精确匹配拆开，不能靠包含匹配"
+        );
     }
 
     #[test]
@@ -591,25 +786,76 @@ mod tests {
         assert_eq!(variant_of_name("Doubao"), None);
     }
 
-    /// 变体之间的候选名**必须不重叠**：重叠会导致探测时互相抢，
-    /// 出现「选中 Trae Work 的安装、读 Trae CN 的 userData」。
+    /// 四个程序位的候选名**必须两两不重叠**（唯一例外见下）——重叠会导致探测时互相抢，
+    /// 出现「选中 A 的安装、读 B 的 userData」。
     ///
-    /// ⚠️ **只比 `TraeWork` vs `Trae`**（历史范围）。`TraeWork` 与 `Global` 之间
-    /// 在 `TRAE SOLO` 上**确实重叠**，而修它必须连同约 20 条依赖「多变体多候选目录」
-    /// 的护栏一起做 —— 见 `TRAE_WORK_SPEC` 的说明。在那之前，把本用例扩到 `Global`
-    /// 只会得到一条**恒红**的断言，不如把事实写在这里。
+    /// ## 这条用例 2026-09-28 扩到了全部 4 个程序位（issue #3）
+    ///
+    /// 此前它**只比 `TraeWork` vs `Trae`**：`TraeWork` 与 `Global` 在 `TRAE SOLO` 上
+    /// 确实重叠，而修它必须连同约 20 条依赖「一个变体多个候选目录」的护栏一起做
+    /// （见 `TRAE_WORK_SPEC` 的说明），当时把范围扩到 `Global` 只会得到一条**恒红**断言。
+    ///
+    /// 现在仍留着那**一条**例外，但把它**显式白名单化**：断言的是「重叠集合恰好等于
+    /// 这 3 项」，而不是「随便重叠都行」。白名单外的任何新增重叠都会红。
+    ///
+    /// ## 为什么 TraeCode 那一侧必须**零例外**
+    ///
+    /// issue #3 的根因就是那里的一条重叠（裸名 `Trae` 同时属于国内与国际 TraeCode）。
+    /// 所以下面单独再钉一遍：**TraeCode 的两个程序位与所有其它槽位都不重叠**。
     #[test]
-    fn 变体候选名互不重叠() {
-        let work = variant_spec(TraeVariant::TraeWork);
-        let cn = variant_spec(TraeVariant::Trae);
-        for a in work.data_dir_names {
-            assert!(
-                !cn.data_dir_names.contains(a),
-                "userData 目录名重叠: {a}"
-            );
+    fn 四个程序位的候选名互不重叠() {
+        let specs = all_specs();
+        let mut overlaps: Vec<String> = Vec::new();
+        for (i, a) in specs.iter().enumerate() {
+            for b in specs.iter().skip(i + 1) {
+                for (kind, left, right) in [
+                    ("userData 目录名", a.data_dir_names, b.data_dir_names),
+                    ("exe 名", a.exe_names, b.exe_names),
+                    ("进程名", a.proc_names, b.proc_names),
+                ] {
+                    for name in left {
+                        if right.contains(name) {
+                            overlaps.push(format!("{kind}:{name}:{:?}/{:?}", a.variant, b.variant));
+                        }
+                    }
+                }
+            }
         }
-        for a in work.exe_names {
-            assert!(!cn.exe_names.contains(a), "exe 名重叠: {a}");
+        overlaps.sort();
+        // 唯一登记在案的例外：`TRAE SOLO` 属于**国际版** TraeWork，却仍留在
+        // CN TraeWork 的候选里（`TRAE_WORK_SPEC` 的待修缺陷，必须单独一轮处理）。
+        assert_eq!(
+            overlaps,
+            vec![
+                "exe 名:TRAE SOLO.exe:TraeWork/Global".to_string(),
+                "userData 目录名:TRAE SOLO:TraeWork/Global".to_string(),
+                "进程名:TRAE SOLO:TraeWork/Global".to_string(),
+            ],
+            "候选名重叠集合变了 —— 白名单外的新重叠必须先修掉（或显式登记理由）"
+        );
+
+        // ★ TraeCode 的两个程序位（国内 `Trae CN` / 国际 `Trae`）必须与**所有**其它
+        //   槽位不重叠。反例就是 issue #3 修掉的那条：裸名 `Trae` 曾同时挂在
+        //   国内 TraeCode 的候选里 ⇒ 装了国际版 TraeCode 的机器上国内程序位被判成已安装。
+        for code in [variant_spec(TraeVariant::Trae), variant_spec(TraeVariant::GlobalTraeCode)] {
+            for other in all_specs() {
+                if other.variant == code.variant {
+                    continue;
+                }
+                for (kind, mine, theirs) in [
+                    ("userData 目录名", code.data_dir_names, other.data_dir_names),
+                    ("exe 名", code.exe_names, other.exe_names),
+                    ("进程名", code.proc_names, other.proc_names),
+                ] {
+                    for name in mine {
+                        assert!(
+                            !theirs.contains(name),
+                            "TraeCode 的 {kind} `{name}` 与 {:?} 重叠（跨区误判来源）",
+                            other.variant
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -711,6 +957,14 @@ mod tests {
     /// `bootConfig.<能力>.trae.<regionKey>` 的取值；其中 `grow-normal.trae.ai`
     /// 在国际版客户端里是 **account** 基址，却被记成了 agent。
     /// 谁再按字符串搜国内版文件把它抄回去，这条会红。
+    ///
+    /// ## 为什么分成两拨断言（2026-09-28，issue #3）
+    ///
+    /// `all_specs()` 补上两个**国际区域**变体之后，「每个 spec 都要有
+    /// `global_endpoints`」这个前提不再成立 —— 国际变体**没有「另一套」可切**，
+    /// 它们的国际值直接放在 `cn_endpoints` 槽（字段名是历史包袱，见 `GLOBAL_SPEC`）。
+    /// 所以按「有没有声明另一套」分两拨，各自断言自己那一拨该等于什么：
+    /// 比原来那条「一律 expect」**更精确**（原来根本没校验国际变体自己的取值）。
     #[test]
     fn 国际化端点取自国际版客户端自述值() {
         let expected = EndpointSet {
@@ -720,11 +974,30 @@ mod tests {
             ws_base: Some("wss://wss-normal.trae.ai/custom_model"),
             console_base: "https://www.trae.ai",
         };
-        for spec in all_specs() {
+        let (declared, global_only): (Vec<&'static VariantSpec>, Vec<&'static VariantSpec>) =
+            all_specs().into_iter().partition(|s| s.global_endpoints.is_some());
+        // 前置：两拨都不能为空，否则本用例会**恒真**（没有对象可校验）。
+        assert_eq!(declared.len(), 2, "应恰有两条 CN 变体声明了国际版端点");
+        assert_eq!(global_only.len(), 2, "应恰有两个国际区域变体");
+        for spec in declared {
             assert_eq!(
-                spec.global_endpoints.expect("国际化端点应已登记"),
+                spec.global_endpoints.expect("刚 partition 过，必然有"),
                 expected,
                 "{} 的国际化端点漂了",
+                spec.name_alias
+            );
+        }
+        // 国际区域变体：它的 `cn_endpoints` 槽里放的就是**它实际使用的端点**。
+        for spec in global_only {
+            assert_eq!(
+                spec.cn_endpoints, expected,
+                "{} 的端点不是国际版客户端自述值",
+                spec.name_alias
+            );
+            assert_eq!(
+                spec.variant.region(),
+                super::super::region::TraeRegion::Global,
+                "{} 必须是国际区域变体",
                 spec.name_alias
             );
         }
@@ -735,10 +1008,17 @@ mod tests {
     ///
     /// 另钉住 `ws_base` **必须已登记**：它此前是 `None`（"未验证"占位），
     /// 这条断言在本次更正前是**红的** —— 正因如此它才值得留在这里。
+    ///
+    /// 只对**同时有两套端点**的变体（两条 CN 线）成立：国际区域变体只有一套，
+    /// 「与 CN 不同」对它们无意义（见上一条的分拨说明）。
     #[test]
     fn 国际化端点与cn端点主机全不同() {
+        let mut checked = 0usize;
         for spec in all_specs() {
-            let global = spec.global_endpoints.expect("国际化端点应已登记");
+            let Some(global) = spec.global_endpoints else {
+                continue;
+            };
+            checked += 1;
             assert_ne!(global.account_base, spec.cn_endpoints.account_base, "account 撞了");
             assert_ne!(global.icube_base, spec.cn_endpoints.icube_base, "iCube 撞了");
             assert_ne!(global.agent_host, spec.cn_endpoints.agent_host, "agent 撞了");
@@ -754,6 +1034,8 @@ mod tests {
                 spec.name_alias
             );
         }
+        // 前置：必须有对象被校验过，否则本用例会**恒真**。
+        assert_eq!(checked, 2, "应恰有两条变体同时持有 CN 与国际两套端点");
     }
 
     /// CN 端点必须等于改造前的硬编码常量原值 —— 保证既有行为零变化。

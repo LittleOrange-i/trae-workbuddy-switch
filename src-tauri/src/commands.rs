@@ -258,10 +258,17 @@ pub async fn oauth_status(login_id: String, region: Option<String>) -> Value {
 }
 
 /// POST /api/import-local —— 导入本机当前账号（按 region）。
+///
+/// `async` + `spawn_blocking`：本命令要读客户端认证文件（**慢 IO**），
+/// 同步命令跑在 Tauri **主线程**上，会阻塞原生窗口消息循环（判据见 `get_status` 的注释）。
 #[tauri::command]
-pub fn import_local(region: Option<String>) -> Result<Value, String> {
+pub async fn import_local(region: Option<String>) -> Result<Value, String> {
     let region = parse_region(region.as_deref());
-    account::import_local_for(region).map(|acc| json!({ "ok": true, "account": acc }))
+    tauri::async_runtime::spawn_blocking(move || {
+        account::import_local_for(region).map(|acc| json!({ "ok": true, "account": acc }))
+    })
+    .await
+    .map_err(|error| format!("导入本机账号失败: {error}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -334,22 +341,29 @@ pub fn open_permission_settings(target: Option<String>) -> Result<(), String> {
 }
 
 /// 权限自检：尝试在认证文件目录写/删探针文件，确认完全磁盘访问等授权是否生效。
+///
+/// `async` + `spawn_blocking`：探针是**写盘 + 删盘**（慢 IO），不能跑在 Tauri 主线程上。
+/// 返回形状与判据都不变 —— 探针失败本来就要以 `ok:false` 回报，不是错误。
 #[tauri::command]
-pub fn check_auth_permission() -> Value {
-    let path = auth_file::auth_file_path();
-    let probe = path.with_file_name("workbuddy-desktop.info.probe");
-    match std::fs::write(&probe, "probe") {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            json!({ "ok": true, "message": "认证目录可写，权限正常" })
+pub async fn check_auth_permission() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let path = auth_file::auth_file_path();
+        let probe = path.with_file_name("workbuddy-desktop.info.probe");
+        match std::fs::write(&probe, "probe") {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                json!({ "ok": true, "message": "认证目录可写，权限正常" })
+            }
+            Err(e) => json!({
+                "ok": false,
+                "error": e.to_string(),
+                "dir": path.parent().map(|p| p.to_string_lossy().to_string()),
+                "hint": "请在 系统设置→隐私与安全性 中授权：优先「App 管理」开启 buddy-switch，若没有则去「完全磁盘访问」把 buddy-switch 拖进去；授权后需重启 App 生效",
+            }),
         }
-        Err(e) => json!({
-            "ok": false,
-            "error": e.to_string(),
-            "dir": path.parent().map(|p| p.to_string_lossy().to_string()),
-            "hint": "请在 系统设置→隐私与安全性 中授权：优先「App 管理」开启 buddy-switch，若没有则去「完全磁盘访问」把 buddy-switch 拖进去；授权后需重启 App 生效",
-        }),
-    }
+    })
+    .await
+    .map_err(|error| format!("权限自检失败: {error}"))
 }
 
 /// 在 Finder 中显示当前 App（便于拖拽到「完全磁盘访问」授权框）。
@@ -416,7 +430,6 @@ pub async fn switch_account(
     account_id: String,
     region: Option<String>,
     restart: Option<bool>,
-    share_sessions: Option<bool>,
     copy_session_ids: Option<Vec<String>>,
     source_region: Option<String>,
 ) -> Result<Value, String> {
@@ -430,7 +443,6 @@ pub async fn switch_account(
         None => region,
     };
     let restart = restart.unwrap_or(true);
-    let share_sessions = share_sessions.unwrap_or(false);
     let copy_ids = copy_session_ids.unwrap_or_default();
 
     // 与 webui 的 `/api/switch/progress` 同契约：同步写入进程内进度缓存，
@@ -455,7 +467,6 @@ pub async fn switch_account(
             Some(&progress),
             &account_id,
             restart,
-            share_sessions,
             &copy_ids,
         )
     })
@@ -479,10 +490,13 @@ pub fn switch_progress() -> Value {
 /// 用 `list_sessions_with_fallback_for` 透传 `source` / `warning`：
 /// `source: "db"` 正常、`"scan"` 表示 db 不可读已降级扫描 projects 目录、
 /// `"empty"` 表示两个都空。前端据此区分「账号无会话」与「数据库不可读」。
+///
+/// `async` + `spawn_blocking`：要读 `workbuddy.db`（**慢 IO**；db 不可读时还会降级扫
+/// `projects` 目录，更慢），不能跑在 Tauri 主线程上。
 #[tauri::command]
-pub fn list_sessions(region: Option<String>) -> Value {
+pub async fn list_sessions(region: Option<String>) -> Result<Value, String> {
     let region = parse_region(region.as_deref());
-    match session::current_user_uid_for(region) {
+    tauri::async_runtime::spawn_blocking(move || match session::current_user_uid_for(region) {
         Some(uid) => {
             let resp = session::list_sessions_with_fallback_for(region, &uid);
             json!({
@@ -493,7 +507,9 @@ pub fn list_sessions(region: Option<String>) -> Value {
             })
         }
         None => json!({ "sessions": [], "current": Value::Null, "source": "empty" }),
-    }
+    })
+    .await
+    .map_err(|error| format!("读取会话列表失败: {error}"))
 }
 
 /// POST /api/sessions/copy —— 把勾选会话复制到指定账号（路径 B，按 region）。
@@ -1256,9 +1272,14 @@ pub fn get_trae_env() -> Value {
 /// 返回 `{ platform, variants: [...] }`，每个元素自带
 /// `variant` / `variantLabel` / `installed` / `running` / `version` / `path` /
 /// `dataDir` / `dataDirExists`，前端直接遍历即可。
+///
+/// `async` + `spawn_blocking`：`variants_status` 内部要做**进程探测**（Windows 起
+/// `tasklist` 子进程），必须离开 Tauri 主线程。
 #[tauri::command]
-pub fn get_trae_variants() -> Value {
-    trae::platform::variants_status()
+pub async fn get_trae_variants() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(trae::platform::variants_status)
+        .await
+        .map_err(|error| format!("探测 Trae 产品线状态失败: {error}"))
 }
 
 /// GET /api/trae/capabilities —— 当前平台的能力与受限项说明。
@@ -1271,9 +1292,14 @@ pub fn get_trae_capabilities() -> Value {
 ///
 /// `variant` 可选（`"trae_work"` / `"trae_cn"`）：决定读哪个账号库。缺失回落默认变体，
 /// 保证老调用点行为不变。
+///
+/// `async` + `spawn_blocking`：要读账号库 JSON 与快照目录（**慢 IO**）。
 #[tauri::command]
-pub fn get_trae_accounts(variant: Option<String>) -> Value {
-    trae::handlers::accounts_overview_for(parse_trae_variant(variant.as_deref()))
+pub async fn get_trae_accounts(variant: Option<String>) -> Result<Value, String> {
+    let variant = parse_trae_variant(variant.as_deref());
+    tauri::async_runtime::spawn_blocking(move || trae::handlers::accounts_overview_for(variant))
+        .await
+        .map_err(|error| format!("读取 Trae 账号总览失败: {error}"))
 }
 
 /// GET /api/trae/checkin/status —— 最近一次签到摘要与冷却明细。
@@ -1309,21 +1335,27 @@ pub fn get_trae_token_statistics(days: Option<i64>, scope: Option<String>) -> Va
 ///
 /// 入参在这里组装成 JSON 再交给 [`trae::handlers::logs`]：过滤逻辑只实现一份，
 /// 两条通道共用（历史上两边各写一遍导致过响应形状漂移）。
+///
+/// `async` + `spawn_blocking`：本命令**全量读日志文件**（最慢的一个，`limit` 上限 2000 行），
+/// 同步执行会明显卡住窗口。
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_trae_logs(
+pub async fn get_trae_logs(
     kind: Option<String>,
     date: Option<String>,
     keyword: Option<String>,
     limit: Option<u64>,
     variant: Option<String>,
-) -> Value {
-    trae::handlers::logs(&serde_json::json!({
+) -> Result<Value, String> {
+    let args = serde_json::json!({
         "kind": kind,
         "date": date,
         "keyword": keyword,
         "limit": limit,
         "variant": variant,
-    }))
+    });
+    tauri::async_runtime::spawn_blocking(move || trae::handlers::logs(&args))
+        .await
+        .map_err(|error| format!("读取运行日志失败: {error}"))
 }
 
 /// GET /api/trae/profiles —— 登录态快照总览。
@@ -1733,4 +1765,52 @@ pub fn clear_trae_gateway_logs() -> Value {
     let state = trae_gateway::shared_state();
     state.log.clear();
     json!({ "ok": true })
+}
+
+/// 护栏：**慢 IO / 起子进程**的命令必须 `async`（否则阻塞 Tauri 主线程）。
+///
+/// ## 判据来自本文件自己的约定
+///
+/// `get_status` 的注释写得很明确：同步 command 默认在 Tauri **主线程**执行，一旦涉及
+/// 子进程或慢 IO，就会阻塞原生窗口消息循环（拖拽标题栏时尤其明显）。同文件的
+/// `get_token_statistics` / `get_trae_profiles` / `trae_import_local_account` 都按此办理
+/// —— 说明「慢 IO 却仍同步」的那些是**遗漏而非设计**（审计 P1-3）。
+///
+/// ## 为什么用源码扫描而不是行为断言
+///
+/// 「是否阻塞主线程」需要真实 Tauri 运行时 + 卡顿度量，单测里做不了；而「声明是不是
+/// `async`」是**确定性、可判定**的性质。两者之间只差一步推理（同步 ⇒ 跑在主线程），
+/// 而那一步正是本文件注释所陈述的约定 —— 把它写下来，比让它继续靠口口相传好。
+#[cfg(test)]
+mod command_threading_tests {
+    /// 本文件自己的源码（`include_str!` 相对路径 ⇒ 与本文件同目录）。
+    const SOURCE: &str = include_str!("commands.rs");
+
+    /// 这些命令做**慢 IO 或起子进程**，必须 `async` + `spawn_blocking`。
+    ///
+    /// 2026-09-28 之前它们全是同步的（审计 `docs/perf-audit-2026-09-24.md` 的 P1-3）。
+    /// 把它们改回同步会让本用例变红。
+    const MUST_BE_ASYNC: &[&str] = &[
+        "import_local",          // 读客户端认证文件
+        "check_auth_permission", // 写 / 删探针文件
+        "list_sessions",         // 读 workbuddy.db（不可读时降级扫 projects 目录）
+        "get_trae_variants",     // 进程探测（Windows 起 tasklist 子进程）
+        "get_trae_accounts",     // 读账号库 + 快照目录
+        "get_trae_logs",         // 全量读日志文件
+    ];
+
+    #[test]
+    fn slow_io_commands_must_be_declared_async() {
+        for name in MUST_BE_ASYNC {
+            assert!(
+                SOURCE.contains(&format!("pub async fn {name}")),
+                "`{name}` 做慢 IO / 起子进程，必须声明为 `async` 并用 `spawn_blocking` \
+                 （否则会阻塞 Tauri 主线程，判据见 `get_status` 的注释）。"
+            );
+            assert!(
+                !SOURCE.contains(&format!("pub fn {name}(")),
+                "`{name}` 被改回同步了：同步 command 跑在 Tauri 主线程上。"
+            );
+        }
+    }
 }

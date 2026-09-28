@@ -539,17 +539,44 @@ fn windows_workbuddy_process_rows_for(region: Region) -> Vec<WindowsProcessRow> 
         .collect()
 }
 
+/// Windows：**一次**全量枚举当前所有 PID。
+///
+/// 为什么是全量而不是按 PID 过滤：`tasklist` 是**子进程**，每次调用 100~200 ms。
+/// 按 PID 过滤要 N 次调用（N = 待观察 PID 数），全量只要 1 次 —— 而 `wait_windows_pids_gone`
+/// 每 500 ms 就轮一轮，N×轮数 个子进程会**直接叠加到「切换客户端要等多久」上**。
+///
+/// 失败返回 `None`（**不是**空集）：调用方据此判定「查询失败」，不得把失败当成「进程已退出」。
 #[cfg(target_os = "windows")]
-fn is_windows_pid_running(pid: u32) -> bool {
-    let filter = format!("PID eq {pid}");
-    match run_cmd_timeout("tasklist", &["/FI", &filter, "/FO", "CSV", "/NH"], 5) {
-        Some(out) => parse_tasklist_csv(&String::from_utf8_lossy(&out.stdout))
-            .iter()
-            .any(|r| r.pid == pid),
-        None => true,
+fn windows_running_pids() -> Option<std::collections::HashSet<u32>> {
+    let out = run_cmd_timeout("tasklist", &["/FO", "CSV", "/NH"], 5)?;
+    Some(
+        parse_tasklist_csv(&String::from_utf8_lossy(&out.stdout))
+            .into_iter()
+            .map(|row| row.pid)
+            .collect(),
+    )
+}
+
+/// 从「当前存活 PID 集合」里筛出仍存活的待观察 PID。
+///
+/// `running = None` 表示**枚举失败** ⇒ 保守地返回全部（视为仍在运行）。
+/// 这条语义是本模块最容易改错的一处：把 `None` 当成「空集」会让一次 `tasklist` 抖动
+/// 直接变成「客户端已退出」的误判，随后就会去动它正在写的数据库 / 认证文件。
+/// 单独抽成纯函数就是为了让这条语义有**确定性**的测试（不依赖真实子进程）。
+#[cfg(target_os = "windows")]
+fn alive_pids_from(pids: &[u32], running: Option<&std::collections::HashSet<u32>>) -> Vec<u32> {
+    match running {
+        Some(set) => pids.iter().copied().filter(|pid| set.contains(pid)).collect(),
+        None => pids.to_vec(),
     }
 }
 
+/// 阻塞等待给定 PID 全部退出，返回**超时后仍存活**的 PID（空 = 全部已退出）。
+///
+/// 语义要点（改这里之前先读）：
+/// - **查询失败视为「仍在运行」** —— 宁可多等一个超时，也不能因为一次 `tasklist` 抖动
+///   就误判客户端已退出（见 [`alive_pids_from`]）。
+/// - 每轮只起**一个**子进程（见 [`windows_running_pids`]），不是每个 PID 一个。
 #[cfg(target_os = "windows")]
 pub(crate) fn wait_windows_pids_gone(pids: &[u32], timeout: Duration) -> Vec<u32> {
     if pids.is_empty() {
@@ -557,11 +584,8 @@ pub(crate) fn wait_windows_pids_gone(pids: &[u32], timeout: Duration) -> Vec<u32
     }
     let deadline = Instant::now() + timeout;
     loop {
-        let alive: Vec<u32> = pids
-            .iter()
-            .copied()
-            .filter(|pid| is_windows_pid_running(*pid))
-            .collect();
+        let running = windows_running_pids();
+        let alive = alive_pids_from(pids, running.as_ref());
         if alive.is_empty() || Instant::now() >= deadline {
             return alive;
         }
@@ -1626,6 +1650,52 @@ INFO: No tasks are running which match the specified criteria.
 ";
         let kept = filter_windows_workbuddy_rows(&parse_tasklist_csv(csv));
         assert_eq!(kept.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![1234]);
+    }
+
+    /// P0-1 的语义护栏：**枚举失败不得被当成「进程已退出」**。
+    ///
+    /// 修前这条逻辑散在 `wait_windows_pids_gone` 的 `is_windows_pid_running` 里
+    /// （`None => true`），无法单独测；抽成纯函数后可以把三条分支都钉死。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn alive_pids_treats_enumeration_failure_as_still_running() {
+        use std::collections::HashSet;
+
+        let pids = [111u32, 222, 333];
+
+        // 枚举失败 ⇒ **全部**视为仍在运行（宁可多等一个超时，也不能误判退出后去动客户端的数据）
+        assert_eq!(alive_pids_from(&pids, None), vec![111, 222, 333]);
+
+        // 部分存活 ⇒ 只返回交集，且**保持入参顺序**（调用方按此顺序报错/重试）
+        let running: HashSet<u32> = [333u32, 111].into_iter().collect();
+        assert_eq!(alive_pids_from(&pids, Some(&running)), vec![111, 333]);
+
+        // 全部退出 ⇒ 空集（调用方据此结束等待）
+        let none_running: HashSet<u32> = HashSet::new();
+        assert!(alive_pids_from(&pids, Some(&none_running)).is_empty());
+
+        // 空入参恒空（不得因为 `None` 分支把空集放大成非空）
+        assert!(alive_pids_from(&[], None).is_empty());
+    }
+
+    /// 全量 `tasklist` 输出与按映像名过滤的输出**列位一致**，`parse_tasklist_csv` 都能吃。
+    ///
+    /// 这是 P0-1 改动的关键前提：把「每个 PID 一次过滤调用」换成「每轮一次全量调用」，
+    /// 依赖的就是两者 CSV 布局相同（`"name","pid",...`）。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn full_tasklist_csv_uses_the_same_columns_as_filtered_output() {
+        let full = "\
+\"System Idle Process\",\"0\",\"Services\",\"0\",\"8 K\"
+\"WorkBuddy.exe\",\"1234\",\"Console\",\"1\",\"50,123 K\"
+\"explorer.exe\",\"5678\",\"Console\",\"1\",\"90,000 K\"
+";
+        let rows = parse_tasklist_csv(full);
+        assert_eq!(
+            rows.iter().map(|r| (r.pid, r.name.as_str())).collect::<Vec<_>>(),
+            vec![(0, "System Idle Process"), (1234, "WorkBuddy.exe"), (5678, "explorer.exe")],
+            "全量输出必须按 `\"name\",\"pid\"` 两列解析"
+        );
     }
 
     #[test]

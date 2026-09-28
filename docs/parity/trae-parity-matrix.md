@@ -7,6 +7,43 @@
 
 ---
 
+## ⚠️ 2026-09-28 更正：Trae 的维度已由「单轴变体」改为「区域 × 程序」双轴
+
+本文件生成于 2026-09-21 之前，其核心前提「Trae **没有 region**，只有产品线变体」**已作废**。
+2026-09-21 起（`11b9600`、`501084f`）Trae 侧落地区域 × 程序双轴：
+
+| 轴 | 取值 | 决定 | 落点 |
+|:--|:--|:--|:--|
+| `TraeRegion` | `Cn` / `Global` | **持久化**：账号库 / 登录态快照 / 设备标识 / 冷却 / 端点 | `trae/region.rs`、`trae/region_migrate.rs` |
+| `TraeProgram` | `TraeWork` / `TraeCode` | **执行**：把登录态写进哪个客户端目录、启动哪个 exe | `trae/region.rs` 的 4 个 `ProgramSpec` |
+
+顶部 `RegionBar` 现在按**区域**切换（与 WorkBuddy 的 region 条同构），程序位是账号卡片上的第二层控件。
+**因此下文所有「Trae 无 region」「用变体切换器替代」的表述一律以本节为准**：Trae 有 region，
+且 region 是**持久化轴**（同一区域内的两条程序共用同一套账号）。
+
+`TraeVariant` 的三取值（`TraeWork` / `Trae` / `Global`）是双轴改造前的遗留类型，靠 `region()` 桥接，
+属 `.trellis/tasks/09-21-trae-region-program-model`「仍未做 #1」的类型收尾（改名要动 ~49 文件 / ~500 处引用）。
+
+另：**`G-A09`（Trae OAuth 是否支持）已闭合** —— OAuth 已实现（`trae-oauth-login-dialog.tsx` +
+`trae_oauth_start` + `TraeAccountsPage.tsx` 的 `oauthOpen` 状态），回调已改为结果页
+（`trae/oauth_result_page.rs`）；原判据引用的 `:77` 注释已随文件重写消失。
+
+**2026-09-28 第二处更正（issue #3）：第 4 个程序位「国际版 TraeCode」已落地。**
+双轴改造当初只接上了 3 个程序位 —— `platform::variant_for_program(Global, TraeCode)`
+返回 `None`，于是国际版页签上的 TraeCode 永远是「未检测到」（用户报障原话
+「不支持 TraeCode」）。本次补上 `TraeVariant::GlobalTraeCode`
+（`as_str = "global_trae_code"`，`region() = Global`，快照目录
+`profiles_global_trae_code`），四个程序位全部一等公民。
+
+同时修掉一条**更危险**的伴生缺陷：`TRAE_CN_SPEC` 的候选名里混着裸名 `Trae` /
+`Trae.exe`，而那是**国际版**客户端的名字 ⇒ 只装国际版 TraeCode 的机器上，
+国内版程序位会被判成「已安装」并指向国际版目录（切账号写错客户端）。裸名已移交
+`GLOBAL_TRAE_CODE_SPEC`。**同类缺陷在 TraeWork 侧仍在**（`TRAE_WORK_SPEC` 的
+`TRAE SOLO` 与 `GLOBAL_SPEC` 重叠），修它必须连同约 20 条依赖「一个变体多个候选目录」
+的护栏一起做，仍属该任务「仍未做 #1」的范围。
+
+---
+
 ## 0. TL;DR
 
 - 差距总量 **76 条**：页面级 32 条、组件级 12 条、后端命令级 32 条。
@@ -30,9 +67,11 @@
 
 维度口径（贯穿全文，**不得混用**）：
 - WorkBuddy 用 `Region`（国内版 `cn` / 国际版 `global` / 合并 `all`）——`src/lib/region.ts`、`src/components/region-bar.tsx:25`。
-- Trae **没有 region**，对应位置是产品线变体 `TraeVariant`（`TraeWork` / `TraeCn`）——`crates/buddy-switch-core/src/modules/trae/variant.rs:71-76`、`src/components/trae-variant-switch.tsx:33`。
-- 三态「合并/all」是**筛选维度**，不是第三种变体；**不得**往 `TraeVariant` 里加「合并」值（`variant.rs:17-25` 明确二者正交）。
-- Trae 凭据是 `Cloud-IDE-JWT`（VSCode 系），**不叫 Token**——`TraeAccountsPage.tsx:77`、`trae-import-accounts-dialog.tsx:176`。
+- Trae **有 region**（`Cn` / `Global`），且它是**持久化轴**；程序位 `TraeProgram`（`TraeWork` / `TraeCode`）
+  是**执行轴**——见文件头「2026-09-28 更正」节，落点 `crates/buddy-switch-core/src/modules/trae/region.rs`、
+  `src/components/trae-variant-switch.tsx`。本文中「Trae 无 region」「变体即产品线」的旧表述**已作废**。
+- 三态「合并/all」是**筛选维度**，不是第三种区域；**不得**往 `TraeRegion` 里加「合并」值。
+- Trae 凭据是 `Cloud-IDE-JWT`（VSCode 系），**不叫 Token**——`trae-import-accounts-dialog.tsx:176`。
 
 ---
 
@@ -52,7 +91,7 @@
 | G-A06 | 账号卡积分包进度条 + 近期到期 `account-card.tsx:447-465` | `trae-account-card.tsx` 无该区块（无按包进度，见 `credits.rs:572-648`） | B | P1 |
 | G-A07 | 批量签到单命令 `checkin_all` | 两步：`traeCheckin` + `traeRefreshCredits` `TraeAccountsPage.tsx:214-233` | A | P0 |
 | G-A08 | 切换账号对话框（会话/记忆/连接器迁移）`switch-account-dialog.tsx:34, 269-307` | 无对话框；卡片内联 `api.traeSwitchAccount` | C | P1 |
-| G-A09 | OAuth 扫码登录 `oauth-login-dialog.tsx` | `trae-oauth-login-dialog.tsx` 存在且 `oauthOpen` 状态在 `TraeAccountsPage.tsx:104`，但同文件 `:77` 注释称「只支持粘贴 Cloud-IDE-JWT」 | A | P1 （**未证实**：注释与组件并存，需澄清） |
+| G-A09 | OAuth 扫码登录 `oauth-login-dialog.tsx` | **已实现**：`trae-oauth-login-dialog.tsx` + `trae_oauth_start/status/cancel` + `TraeAccountsPage.tsx` 的 `oauthOpen`；回调走结果页 `trae/oauth_result_page.rs` | A | ~~P1~~ **已闭合（2026-09-28）** |
 | G-A10 | 添加账号对话框（多字段） | 粘贴 JWT 添加 `trae_add_account`（`api.rs:162`） | A | P0 |
 
 > 已对齐、无需改动：页头标题/副标题、「添加与迁移账号」横幅、环境说明行、空态卡、账号工具栏（`账号[N]` 徽章 + 紧凑 + 刷新）、卡片栅格、删除确认、导入/导出对话框（见 `TraeAccountsPage.tsx:66-81`）。
@@ -66,7 +105,7 @@
 
 | 编号 | WorkBuddy 侧 | Trae 侧现状 | 分类 | 优先级 |
 |:--|:--|:--|:--:|:--:|
-| G-T01 | `RegionBar` `TokenStatsPage.tsx:1365-1366`，region 为数据源 `:1271,1277-1296` | 无 region 条（应用变体条，Trae 无 region） | A | P0 |
+| G-T01 | `RegionBar` `TokenStatsPage.tsx:1377`（全宽区域条），region 为数据源 `:1271,1277-1296` | **区域轴已具备**，但用页头紧凑控件 `TraeVariantSwitch`（`TraeTokenStatsPage.tsx:276`），**未采用全宽 `RegionBar`** | A（仅骨架差异） | P2（2026-09-28 复核：原判「无 region 条」作废） |
 | G-T02 | 产品来源 Tabs（WorkBuddy / CodeBuddy CLI / IDE）`TokenStatsPage.tsx:35, 396-411` | 无（Trae 只有本机网关一个数据源，`token_stats.rs:1-17`） | C | P1 |
 | G-T03 | Token 总览（堆叠比例条 + 4 指标）`TokenStatsPage.tsx:381-411` | 8 指标（含平均/P95 耗时、流式、活跃账号）`TraeTokenStatsPage.tsx` | A（Trae 更全） | P0 |
 | G-T04 | Token 与调用趋势（堆叠柱+折线右轴）`TokenStatsPage.tsx:623` | 每日趋势折线 | A | P1 |
@@ -79,7 +118,7 @@
 
 | 编号 | WorkBuddy 侧 | Trae 侧现状 | 分类 | 优先级 |
 |:--|:--|:--|:--:|:--:|
-| G-C01 | `RegionBar` `CreditStatsPage.tsx:22` + region 持久化 `:58-78` | 无 region 条 | A | P0 |
+| G-C01 | `RegionBar` `CreditStatsPage.tsx:1652`（全宽区域条）+ region 持久化 | **区域轴已具备**（页头 `TraeVariantSwitch`，`TraeCreditsPage.tsx:237`），未采用全宽 `RegionBar` | A（仅骨架差异） | P2（2026-09-28 复核） |
 | G-C02 | 4 指标卡 `CreditStatsPage.tsx:288` | 5 指标（可用总额/平均/账号数/今日新增/今日消耗） | A | P0 |
 | G-C03 | 「官方积分消耗」按模型堆叠柱 `CreditStatsPage.tsx:212, 384-385, 483` | 无（Trae 无按模型官方消耗 `credits.rs:572-648`） | C | P1 |
 | G-C04 | 「按模型类型」Top8（含合计角标）`CreditStatsPage.tsx:754-771` | 无 | C | P1 |
@@ -241,9 +280,9 @@ WorkBuddy 命令表见 `src-tauri/src/lib.rs:155-217`；Trae 命令表见 `src-t
 | 定时任务（签到/旅行/保活调度） | `lib.rs:27-90`、`schedule.rs` | Trae 侧无调度器（`TraeAccountsPage.tsx:78-79`） | 不出现「自动」开关；改用「跳过已签到」 |
 | 自动轮换 | `lib.rs:195-199` | 无对应上游能力 | 不渲染 |
 | GitHub 配置 | `lib.rs:200-201` | 无对应 | 不渲染（全局共用项除外） |
-| region 国内/国际维度 | `region.rs`、`region-bar.tsx:25` | Trae 无 region，只有产品线变体（`variant.rs:17-25,71-76`） | 用变体切换器替代；**不得**在 `Region`/`TraeVariant` 加「合并」值 |
+| region 国内/国际维度 | `region.rs`、`region-bar.tsx:26` | **Trae 有 region（`Cn`/`Global`）且为持久化轴**；另有程序轴 `TraeProgram`（`TraeWork`/`TraeCode`）——`trae/region.rs`、`trae-variant-switch.tsx` | 区域条已具备（紧凑控件；账号页用全宽 `trae-variant-bar.tsx`）；**不得**在 `TraeRegion` 加「合并」值。旧表述「Trae 无 region」**已作废**（2026-09-28 复核） |
 | 非 Windows 的 MachineGuid 重置 | `platform.rs`（WB 同机制） | 该层仅 Windows（`platform.rs:940-959,1160-1166`） | 返回结构化 `Unsupported`（`platform.rs:45-54`）；前端 `CapabilityBadge` 置灰（`TraeSettingsPage.tsx:1205`） |
-| OAuth 扫码（若 Trae 不支持） | `oauth-login-dialog.tsx` | 见 G-A09（**未证实**） | 待澄清后决定：支持则保留对话框，不支持则改为粘贴 JWT 并 Alert |
+| OAuth 扫码（若 Trae 不支持） | `oauth-login-dialog.tsx` | **支持**（G-A09 已闭合，2026-09-28）：`trae-oauth-login-dialog.tsx` + `trae_oauth_start` + 结果页 | 保留对话框，无需改粘贴 JWT |
 | 账号策略（account_strategy） | `lib.rs:215-216` | Trae 用「账号池」替代，语义不同 | 展示账号池卡；若策略项无对应则隐藏该项 |
 | 开机自启 / 更新检查 | `lib.rs:202-205` | 属应用级能力，非 Trae 产品能力 | 保持全局可用，**不计为 Trae 差距** |
 
@@ -251,8 +290,7 @@ WorkBuddy 命令表见 `src-tauri/src/lib.rs:155-217`；Trae 命令表见 `src-t
 
 ## 5. 待确认问题（需用户/架构师拍板）
 
-1. **OAuth 在 Trae 究竟支持吗？** 证据冲突：`TraeAccountsPage.tsx:77` 注释称「没有 OAuth 扫码，只支持粘贴 Cloud-IDE-JWT」，但同文件 `:104` 有 `oauthOpen` 状态、且 `trae-oauth-login-dialog.tsx`（369 行）与 `trae_oauth_start/status/cancel`（`lib.rs:235-237`）均存在。
-   **推荐**：以代码为准 → OAuth **可用**，把 `:77` 注释更正；账号页保留「扫码登录」入口。
+1. ~~**OAuth 在 Trae 究竟支持吗？**~~ **已闭合（2026-09-28）**：OAuth **支持且已实现** —— `trae-oauth-login-dialog.tsx` + `trae_oauth_start/status/cancel` + 回调结果页 `trae/oauth_result_page.rs`。原判据引用的 `TraeAccountsPage.tsx:77` 注释已随文件重写消失，无需再更正。
 2. **Trae 是否有包级积分到期数据？** 决定 G-A06（积分包进度条）是 A 还是 C。
    **推荐**：先按 B 处理（若有 `user_entitlement_pack_list` 的到期字段则显示，否则显式「无包级数据」）。若架构师确认无，则降级为 C。
 3. **「按模型消耗 / 热力网格 / 按项目」三项是否纳入本轮？** 它们全部依赖 B 类后端聚合，且 Trae 网关日志可能无项目/模型级年度字段。

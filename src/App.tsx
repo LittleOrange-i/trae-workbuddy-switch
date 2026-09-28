@@ -1,20 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ArrowUp, MessagesSquare, Server, Settings, Sparkles, User } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
 import type { UpdateInfo } from "@/lib/types";
-import AccountsPage from "@/pages/AccountsPage";
-import ApiServicePage from "@/pages/ApiServicePage";
-import CreditStatsPage from "@/pages/CreditStatsPage";
-import TokenStatsPage from "@/pages/TokenStatsPage";
-import SettingsPage from "@/pages/SettingsPage";
-import TraeAccountsPage from "@/pages/TraeAccountsPage";
-import TraeApiServicePage from "@/pages/TraeApiServicePage";
-import TraeCreditsPage from "@/pages/TraeCreditsPage";
-import TraeSettingsPage from "@/pages/TraeSettingsPage";
-import TraeTokenStatsPage from "@/pages/TraeTokenStatsPage";
+import { PageFallback } from "@/components/page-fallback";
 import { StatusDot, AppIconMark, TraeVariantMark, WorkBuddyMark } from "@/components/product-marks";
 import { DonateButton } from "@/components/donate-dialog";
 import { AppSettingsEntry } from "@/components/app-settings";
@@ -29,6 +20,34 @@ import { useT } from "@/lib/i18n";
 import type { TranslationKey } from "@/locales/zh";
 import { TRAE_VARIANTS_KEY, loadTraeVariantStatuses } from "@/lib/trae-variant-status";
 import type { TraeVariantStatus } from "@/lib/trae-types";
+
+// ---------------------------------------------------------------------------
+// 路由级懒加载（P0-2）
+//
+// 实测（`scripts/bundle-report.config.ts`，2026-09-28）：首屏单 chunk 1.47 MB 里
+// **recharts 家族占 407.7 kB / 27.9%**，而它只被 4 个统计页用到（TokenStats /
+// CreditStats / TraeTokenStats / TraeCredits）。用户若从不打开统计页，这 400 kB
+// 每次冷启动都要解析一遍。
+//
+// ⇒ 每个页面各自成 chunk：首屏只加载当前路由那一个，其余按需拉取。
+// **默认路由（`/` → AccountsPage）也要懒加载**：它在桌面端/WebUI 都从内嵌资源或
+// `127.0.0.1` 取，多一次「入口 chunk → 页面 chunk」的往返是毫秒级，
+// 换来的是「其它 9 个页面不进首屏」。
+//
+// ⚠️ 改这里必须同步确认：`Suspense` 仍在**路由层**（见 `Layout` 里的 `<Outlet />`），
+// 且 `dist` / `dist-demo` 的 base 差异不受影响（懒加载产生的是同源相对路径）。
+// `api::tests::embedded_index_html_references_only_embedded_assets` 会兜住产物一致性。
+// ---------------------------------------------------------------------------
+const AccountsPage = lazy(() => import("@/pages/AccountsPage"));
+const ApiServicePage = lazy(() => import("@/pages/ApiServicePage"));
+const CreditStatsPage = lazy(() => import("@/pages/CreditStatsPage"));
+const TokenStatsPage = lazy(() => import("@/pages/TokenStatsPage"));
+const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
+const TraeAccountsPage = lazy(() => import("@/pages/TraeAccountsPage"));
+const TraeApiServicePage = lazy(() => import("@/pages/TraeApiServicePage"));
+const TraeCreditsPage = lazy(() => import("@/pages/TraeCreditsPage"));
+const TraeSettingsPage = lazy(() => import("@/pages/TraeSettingsPage"));
+const TraeTokenStatsPage = lazy(() => import("@/pages/TraeTokenStatsPage"));
 import { useCachedResource } from "@/lib/use-cached-resource";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 import { useCreditAutoRefresh } from "@/lib/use-credit-auto-refresh";
@@ -483,7 +502,12 @@ function Layout() {
           hasUnifiedTitleBar && "pt-16 [&>div]:pt-4",
         )}
       >
-        <Outlet />
+        {/* 懒加载页面在这里挂起。Suspense **必须留在路由层**：
+            放在更外层会让侧栏一起被 fallback 替换（切页时整屏闪），
+            放在页面内部则页面自己的 chunk 还没到、根本没人接住 Suspense。 */}
+        <Suspense fallback={<PageFallback />}>
+          <Outlet />
+        </Suspense>
       </main>
     </div>
   );

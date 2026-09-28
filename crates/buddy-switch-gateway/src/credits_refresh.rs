@@ -76,16 +76,76 @@ impl CreditFetcher for CoreCreditFetcher {
 
 /// 刷新一次账号池余额；返回本次**真正刷新**（拿到有效读数并写入）的账号数。
 ///
-/// 仅由后台周期循环调用（首次启动后先跑一次）。委托给 [`refresh_with`]。
+/// 仅由后台周期循环调用（首次启动后先跑一次）。
+///
+/// ## ★ 为什么不能像原来那样「先取写锁、再 await 取数」
+///
+/// 改造前这里是：
+///
+/// ```ignore
+/// let mut pool = state.pool.write().await;
+/// refresh_with(&mut pool, &fetcher, now_ms, interval_ms).await
+/// ```
+///
+/// `refresh_with` 内部要对每个待刷账号发一次**网络**请求 ⇒ **全局写锁被跨整个取数过程持有**。
+/// 后果不是死锁而是**排队**：启动时所有账号都「从未取过余额」⇒ 第一批 relay 请求要等
+/// 完整一轮取数（账号数 × 单次上游耗时）才能选到号；之后每 30 分钟再来一次。
+/// 这与本模块开头那条硬约束（「绝不在请求路径上同步拉余额」）是**同一件事的另一面**：
+/// 取数虽然不在请求路径上，但它**把请求路径堵住了**。
+///
+/// 现在分三段：读锁算目标 → **无锁**取数 → 短暂写锁写回。
 pub async fn refresh_once(state: &GatewayState) -> usize {
-    let now_ms = timeutil::now_ms();
-    let interval_ms = {
-        let pool = state.pool.read().await;
-        pool.config().credits_refresh_interval_ms
+    refresh_pool(&state.pool, &CoreCreditFetcher, timeutil::now_ms()).await
+}
+
+/// 刷新入口（按池句柄）：**三段式**，取数期间不持锁。
+///
+/// 与 [`refresh_with`] 共用 [`refresh_targets`] / [`apply_refresh`] / [`parse_credits`]，
+/// 因此「测的语义」与「跑的语义」是**同一份代码**；两者只差锁的持有时机。
+pub async fn refresh_pool<F: CreditFetcher>(
+    pool: &std::sync::Arc<tokio::sync::RwLock<Pool>>,
+    fetcher: &F,
+    now_ms: i64,
+) -> usize {
+    // ① 读锁：只算出目标清单，随即释放（不跨 await）。
+    let targets = {
+        let guard = pool.read().await;
+        refresh_targets(&guard, now_ms, guard.config().credits_refresh_interval_ms)
     };
-    let fetcher = CoreCreditFetcher;
-    let mut pool = state.pool.write().await;
-    refresh_with(&mut pool, &fetcher, now_ms, interval_ms).await
+    if targets.is_empty() {
+        return 0;
+    }
+
+    // ② **不持锁**：逐个取数（网络）。
+    let mut refreshed = 0usize;
+    for (uid, region) in targets {
+        let result = fetcher.fetch(region, &uid).await;
+        // 未知（失败/回退）→ 绝不写 0，也绝不标记已刷新（下一轮重试）。
+        let Some((credits, expiring)) = parse_credits(&result) else {
+            continue;
+        };
+        // ③ 短暂写锁：只做内存写回。
+        apply_refresh(&mut *pool.write().await, &uid, credits, expiring, now_ms);
+        refreshed += 1;
+    }
+    refreshed
+}
+
+/// 本轮需要刷新的账号（**只读**池）：从未取过的一律刷新，否则超过阈值才刷新。
+fn refresh_targets(pool: &Pool, now_ms: i64, interval_ms: i64) -> Vec<(String, Region)> {
+    let interval = normalized_interval(interval_ms);
+    pool.entries()
+        .filter(|entry| needs_refresh(entry.credits_refreshed_ms, now_ms, interval))
+        .filter_map(|entry| entry.realm.map(|realm| (entry.uid.clone(), region_of(realm))))
+        .collect()
+}
+
+/// 把一次**有效**读数写回池（只碰内存，不做 IO）。
+fn apply_refresh(pool: &mut Pool, uid: &str, credits: i64, expiring: i64, now_ms: i64) {
+    pool.set_credits(uid, credits, expiring);
+    pool.mark_credits_refreshed(uid, now_ms);
+    // 余额恢复后自动解冻「因余额不足」的硬冷却账号（内部有 0 余额/未知/其它原因三重反面约束）。
+    pool.thaw_hard_credit_if_recovered(uid, credits);
 }
 
 /// 刷新核心：对「从未取过余额」或「读数已过期」的账号取真实余额并写入池。
@@ -96,20 +156,17 @@ pub async fn refresh_once(state: &GatewayState) -> usize {
 /// - 池条目的 `realm` 为 `None` 时**跳过**——无从确定调用哪个域。
 /// - 拿不到有效读数（接口失败 / 回退路径 / 无 `resources`）→ **不写**、不标记、不写 0。
 ///
-/// 该签名（`&mut Pool` + 注入 `fetcher`）是单测的注入点，生产由 [`refresh_once`] 包装。
+/// 该签名（`&mut Pool` + 注入 `fetcher`）是单测的注入点；生产走 [`refresh_pool`]。
+///
+/// 两者共用 [`refresh_targets`] / [`apply_refresh`] / [`parse_credits`]，**只差锁的持有时机** ——
+/// 因此这里测到的语义就是生产语义，不存在「测的路径不是跑的路径」。
 pub async fn refresh_with<F: CreditFetcher>(
     pool: &mut Pool,
     fetcher: &F,
     now_ms: i64,
     interval_ms: i64,
 ) -> usize {
-    let interval = normalized_interval(interval_ms);
-
-    let targets: Vec<(String, Region)> = pool
-        .entries()
-        .filter(|entry| needs_refresh(entry.credits_refreshed_ms, now_ms, interval))
-        .filter_map(|entry| entry.realm.map(|realm| (entry.uid.clone(), region_of(realm))))
-        .collect();
+    let targets = refresh_targets(pool, now_ms, interval_ms);
 
     let mut refreshed = 0usize;
     for (uid, region) in targets {
@@ -118,10 +175,7 @@ pub async fn refresh_with<F: CreditFetcher>(
         let Some((credits, expiring)) = parse_credits(&result) else {
             continue;
         };
-        pool.set_credits(&uid, credits, expiring);
-        pool.mark_credits_refreshed(&uid, now_ms);
-        // 余额恢复后自动解冻「因余额不足」的硬冷却账号（内部有 0 余额/未知/其它原因三重反面约束）。
-        pool.thaw_hard_credit_if_recovered(&uid, credits);
+        apply_refresh(pool, &uid, credits, expiring, now_ms);
         refreshed += 1;
     }
     refreshed
@@ -420,6 +474,91 @@ mod tests {
         assert_eq!(
             parse_credits(&json!({"ok": true, "totalRemaining": 5.0, "resources": []})),
             Some((5, 0))
+        );
+    }
+
+    /// ★ 护栏：**取数期间不得持有池锁**。
+    ///
+    /// ## 回归背景
+    ///
+    /// 改造前 `refresh_once` 是「先 `state.pool.write().await` 取全局写锁，再把 guard
+    /// 交给 `refresh_with` 逐账号 `await` 网络取数」⇒ **写锁跨整个取数过程持有**。
+    /// 后果不是死锁而是**排队**：启动时所有账号都「从未取过余额」，第一批 relay 请求
+    /// 必须等完整一轮取数（账号数 × 单次上游耗时）才能选到号。
+    ///
+    /// ## 判据：**直接观测**，不靠计时
+    ///
+    /// 注入的 fetcher 在 `fetch` 被调用时（即「取数期间」）对同一把锁 `try_read()`。
+    /// 拿不到 ⇒ 此刻锁被占着。计时而断会随机器快慢抖动，这个不会。
+    ///
+    /// 反面对照：把 `refresh_pool` 改回「先取写锁再 `refresh_with`」，本用例立刻变红。
+    #[tokio::test]
+    async fn refresh_pool_does_not_hold_the_lock_across_fetches() {
+        /// 取数时探测锁：记录「有几次拿不到读锁」。
+        struct LockProbeFetcher {
+            pool: Arc<tokio::sync::RwLock<Pool>>,
+            observed_locked: Arc<AtomicUsize>,
+        }
+
+        impl CreditFetcher for LockProbeFetcher {
+            fn fetch<'a>(
+                &'a self,
+                _region: Region,
+                _uid: &'a str,
+            ) -> Pin<Box<dyn Future<Output = Value> + Send + 'a>> {
+                // 只在「锁被写者占着」时 `try_read` 才失败 —— 这正是要观测的。
+                if self.pool.try_read().is_err() {
+                    self.observed_locked.fetch_add(1, Ordering::SeqCst);
+                }
+                let response = ok_response(100.0, json!([]));
+                Box::pin(async move { response })
+            }
+        }
+
+        let pool = Arc::new(tokio::sync::RwLock::new(cn_pool("u1")));
+        let probe = LockProbeFetcher {
+            pool: Arc::clone(&pool),
+            observed_locked: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let refreshed = refresh_pool(&pool, &probe, NOW).await;
+
+        assert_eq!(refreshed, 1, "有效读数必须写回");
+        assert_eq!(
+            probe.observed_locked.load(Ordering::SeqCst),
+            0,
+            "取数期间不得持有池锁：改造前写锁跨整个 await 持有，本断言必红"
+        );
+        assert_eq!(pool.read().await.get("u1").unwrap().credits, 100);
+    }
+
+    /// `refresh_pool` 与 `refresh_with` 必须产出**相同结果**（同一份语义）。
+    ///
+    /// 前者是生产路径（三段式、不持锁），后者是单测注入点；若有人日后只改一处，
+    /// 本用例会红 —— 防「测的路径不是跑的路径」。
+    #[tokio::test]
+    async fn refresh_pool_and_refresh_with_agree() {
+        let handle = Arc::new(tokio::sync::RwLock::new(cn_pool("u1")));
+        let direct = {
+            let mut pool = cn_pool("u1");
+            refresh_with(&mut pool, &FakeFetcher::new(ok_response(77.0, json!([]))), NOW, INTERVAL)
+                .await;
+            (pool.get("u1").unwrap().credits, pool.get("u1").unwrap().credits_refreshed_ms)
+        };
+
+        let via_pool = refresh_pool(
+            &handle,
+            &FakeFetcher::new(ok_response(77.0, json!([]))),
+            NOW,
+        )
+        .await;
+
+        let guard = handle.read().await;
+        assert_eq!(via_pool, 1);
+        assert_eq!(
+            (guard.get("u1").unwrap().credits, guard.get("u1").unwrap().credits_refreshed_ms),
+            direct,
+            "两条路径必须产出完全相同的池状态"
         );
     }
 }

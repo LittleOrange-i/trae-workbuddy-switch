@@ -21,6 +21,7 @@ import {
   // XCircle, // 最近事件卡片隐藏后未使用
   type LucideIcon,
 } from "lucide-react";
+import { useShallow } from "zustand/react/shallow";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -1487,6 +1488,14 @@ function loadCachedStatistics(region: RegionFilter, refresh: boolean): Promise<C
 }
 
 export default function CreditStatsPage() {
+  // ★ 必须带 selector（并用 `useShallow` 做浅比较）。
+  //
+  // 不带 selector 时订阅的是**整个 store**：这个页面有 1900+ 行、内含多个 recharts 图表，
+  // 而 store 每 30 分钟刷新积分、每 60 秒刷新运行状态，且 `loadCredits` 按账号逐个 `setState`
+  // ⇒ 任何一次与积分无关的变更（`statusMap` / `travelMap` / `lastCreditRefreshAt`…）
+  // 都会让整页重渲染一遍。
+  //
+  // 只订阅本页真正用到的 6 个字段；`useShallow` 保证「引用没变就不重渲染」。
   const {
     accounts,
     global,
@@ -1494,7 +1503,16 @@ export default function CreditStatsPage() {
     creditLoadingMap,
     fetchAllRegions,
     refreshCredits,
-  } = useAccountsStore();
+  } = useAccountsStore(
+    useShallow((state) => ({
+      accounts: state.accounts,
+      global: state.global,
+      creditMap: state.creditMap,
+      creditLoadingMap: state.creditLoadingMap,
+      fetchAllRegions: state.fetchAllRegions,
+      refreshCredits: state.refreshCredits,
+    })),
+  );
   const [region, setRegion] = useState<RegionFilter>(readPreferredRegion);
   const [stats, setStats] = useState<CreditStatistics | null>(() => cachedFor(readPreferredRegion()) ?? null);
   const [loading, setLoading] = useState(() => !cachedFor(readPreferredRegion()));

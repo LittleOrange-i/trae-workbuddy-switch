@@ -134,6 +134,57 @@ Global 区域一次 `windows_workbuddy_process_rows_for` ≈ 4 × 141ms ≈ **56
 
 ---
 
+#### ✅ P0-2 已实施（2026-09-28，B2）—— 实测收益与三处与原方案的偏差
+
+**实测收益**（`dist/` 产物，未 gzip）：
+
+| 指标 | 改动前 | 改动后 |
+|---|---:|---:|
+| 首屏（`/` 路由）静态 JS 闭包 | **1,464,712 B** | **786,223 B** |
+| 全部 JS 合计 | 1,464,712 B | 1,482,894 B（拆包开销 +18 kB，+1.2%） |
+| 被推迟到其它路由 | 0 | **696,671 B** |
+| 首屏变化 | — | **−678,489 B（−46.3%）** |
+
+recharts 主 chunk `chart-*.js` = 385,793 B（gzip 107 kB），**只在统计页加载**。
+
+**★ 三处与原方案不同（都是有意的）**
+
+1. **`Suspense` 放在 `Layout` 的 `<Outlet />` 里，不是「`<Routes>` 外层」。**
+   包住 `<Routes>` 会把**侧栏也一起换成 fallback** —— 每次切页侧栏闪一下，看起来像整页重载。
+   放在 `<Outlet />` 里，外壳（侧栏 / 产品切换 / 状态圆点）保持不动，只有内容区显示骨架。
+2. **没有引入 `manualChunks`。** 路由级 `lazy()` 之后，Rollup **自动**把 `chart` / `ComposedChart` /
+   `Line` / 各页面拆成了独立 chunk（实测见上表）。再加 `manualChunks` 只会增加配置面，
+   没有额外收益。原方案第 2 条**不必做**。
+3. **默认路由 `/` 也懒加载。** 桌面端与 WebUI 都从内嵌资源 / `127.0.0.1` 取，
+   多一次「入口 chunk → 页面 chunk」往返是毫秒级，换来「其余 9 个页面不进首屏」。
+
+**★ 新增护栏（原方案漏掉的一条）**
+
+`embedded_index_html_references_only_embedded_assets` **只校验 `index.html` 的根绝对引用**；
+懒加载 chunk 全在入口 JS 的 `__vite__mapDeps` 清单里，`index.html` 里看不见
+⇒ 那条护栏**对懒加载 chunk 零覆盖**。新增
+`api::tests::embedded_entry_chunk_references_only_embedded_lazy_chunks`：
+解析入口 chunk 的引号资源名并逐个断言在 embed 中，且**先断言集合非空**（不许空转）。
+证伪：从 `dist/assets/` 移走 `chart-DDcOHMGW.js` ⇒ 立刻红，并逐字点名缺失文件。
+
+**复现方式**
+
+```bash
+# 体积量化
+npx vite build --config scripts/bundle-report.config.ts     # → dist-analyze/，量完删
+# 浏览器验收（11 项断言：首屏不含统计页 chunk、切页后才加载、路由渲染、无白屏）
+node scripts/preview-dist.mjs dist 4174 &                   # 需常驻后台
+node ~/.workbuddy-ai/skills/webui-cdp-verify/scripts/cdp-drive.mjs \
+     http://127.0.0.1:4174/ scripts/scenarios/b2-lazy-routes.scenario.mjs logs
+```
+验收场景已固化在 `scripts/scenarios/b2-lazy-routes.scenario.mjs`（**已跟踪**；截图落 `logs/`，该目录被 gitignore）。
+脚本注释里记了两个真实踩坑：① 点侧栏后 `location.pathname` **同步**变、chunk **异步**拉，
+断言必须等 chunk 到位，否则会看到「新增 chunk 落后一次导航」；② `chart-*.js` 由
+**TokenStatsPage** 静态引入（不是积分页），首跑把它当积分页 chunk 断言 ⇒ **假失败，脚本错不是应用错**。
+
+
+---
+
 ### P0-3 Trae 网关：每个请求重建整个账号池
 
 **证据（已核实）**
@@ -160,6 +211,42 @@ Global 区域一次 `windows_workbuddy_process_rows_for` ≈ 4 × 141ms ≈ **56
 - 「同一 uid 两次 `device::derive` 结果相同」。
 - 「改动 cooldown 文件后，下一次 `sync_for` 能看到新值」（防缓存过度）。
 - 「CN / Global 两池互不污染」。
+
+---
+
+#### ❌ P0-3 已实测（2026-09-28，B3）—— **结论：不值得实施，建议关闭**
+
+本节自己把「哈希派生 vs 文件 parse 谁是大头」列为**未实测**（见 §5 第 5 条），
+并明确「未实测前不得当作『已确认』」。现已实测（隔离副本 + 独立 `CARGO_TARGET_DIR`，
+临时基准 `cargo test --test tmp-bench-sync`，300 次取均值）：
+
+| 账号数 | `sync_for` 单次（debug） | 单次（**release**） |
+|---:|---:|---:|
+| 1 | 152.3 µs | 108.5 µs |
+| 5 | 233.1 µs | 133.9 µs |
+| 20 | 534.3 µs | 199.1 µs |
+| 50 | 1120.5 µs | **330.8 µs** |
+
+拆解（release）：**固定成本 ≈ 112 µs**（3 份 JSON 的读盘 + 解析），**每账号 ≈ 4.4 µs**
+（= `device::derive` 的 3 次 SHA-256 + `rand_hex_salted` 的 1 次 SHA-256 + 32 次 `format!` + 结构体分配）。
+
+**为什么不做**：`sync_for` 走的是**转发一次 LLM 请求**的路径，那个请求本身是**秒级**的。
+50 账号（远超真实场景）下 0.33 ms 的 CPU ≈ 该请求耗时的 **0.01%~0.03%**。
+而按本节自己列的约束，加缓存要付出的是**正确性风险**：缓存键必须含 region（否则 CN/Global 串台）、
+mtime 精度不足（须并入 size）、`apply_error` 写回后要主动标脏、还要能被测试重置。
+**用「真实的失效 bug 风险」换「测不出来的 0.33 ms」，不划算。**
+
+**这与 P0-2 的处理逻辑完全一致**（那条也是「先量化再投入」）—— 只是量化结果相反：
+P0-2 量出 −46% 首屏，所以做；P0-3 量出 0.33 ms，所以不做。
+
+**什么情况下应该改结论**：① 单账号池规模上到数百（此时线性项才开始显形）；
+② `sync_for` 从「每请求一次」变成「每次选号/重试都调」且重试次数放大（`routes.rs:382-388`
+在换号重试里会重复调，但重试次数由 `max_rotate` 限制，量级仍小）；
+③ 出现真实 profile 证据表明该函数在火焰图里占比显著。
+
+**保留的资产**：临时基准未进仓库（它依赖隔离副本的播种代码）。若日后要复查，
+按「隔离副本」配方重建后用同样方式量即可 —— 配方已写进 `.workbuddy-ai/memory/2026-09-28.md`。
+
 
 ---
 
@@ -198,6 +285,39 @@ Global 区域一次 `windows_workbuddy_process_rows_for` ≈ 4 × 141ms ≈ **56
 
 ---
 
+#### ✅ P0-4「无争议的那一半」已实施（2026-09-28，B4）
+
+**改动**：`ide_workspace_meta`（每会话一次 `read_to_string` + `serde_json::from_str`）
+→ 拆成 `workspace_index_path` + `workspace_meta_index` + `WorkspaceMetaCache`，
+把 workspace `index.json` 的解析**提到会话循环外**、按路径缓存查表。
+
+**语义等价性**（逐条对照，全部保留）：
+- 索引缺失 / 读失败 / 坏 JSON / 无 `conversations` ⇒ 空表 ⇒ 回落 `(None, "未知模型")`（逐字相同）；
+- 标题优先级 `name` → `title`；模型优先级 `selectedModelId` → `modelId` → `model` → `"未知模型"`；
+- **同名 id 取首次出现**：改造前是「线性扫描返回第一个匹配」，故用
+  `entry().or_insert()` 而非 `insert()`（后者会变成「最后一个赢」）；
+- 无 `id` / `id` 为空串的条目**永远匹配不上**（调用方传的是会话**目录名**，
+  空目录名先被 `.filter(|name| !name.is_empty())` 换成 `"未知会话"`）⇒ 直接跳过。
+
+**★ 可观测缝**：`WorkspaceMetaCache` 带一个 `#[cfg(test)] parses: usize` 计数。
+没有它，「只解析一次」就只能靠计时或读盘计数**间接推断**，两者都不可靠。
+这是**直接**断言，且发布构建零成本。
+
+**验证**：
+- 新增 3 条用例 —— `workspace_meta_cache_parses_each_index_once`（3 会话 ⇒ `parses == 1`
+  且各拿到自己的标题/模型）、`workspace_meta_cache_falls_back_exactly_like_the_linear_scan`
+  （索引缺失 / 无该会话 / 坏 JSON 三种回落）、`workspace_meta_index_keeps_the_first_duplicate_id`。
+- **证伪**：把 `lookup` 改回「每次重新解析」⇒ `workspace_meta_cache_parses_each_index_once`
+  立刻红，报 **`left: 3` vs `right: 1`** —— 计数缝量的正是这件事，且坐实了改造前确实是 N 次。
+- `token_stats::` 全套 **32 passed / 0 failed**，无编译警告。
+
+**仍未做（须先向作者确认「不缓存聚合结果」是刻意还是现状）**：
+per-文件聚合结果的 `(path, mtime, size)` 缓存、追加式 jsonl 的 offset 增量解析、
+以及用精简 `#[derive(Deserialize)]` 替代 `Value`（风险最高，需先枚举全部被读字段）。
+
+
+---
+
 ### P0-5 静态资源无任何缓存头
 
 **证据（已核实）**
@@ -226,12 +346,94 @@ Global 区域一次 `windows_workbuddy_process_rows_for` ≈ 4 × 141ms ≈ **56
 
 **修复**：① 账号同步从「每请求」改为**节流/事件驱动**（间隔或按账号库 mtime）；② `acquire`/`release` 这类小状态更新改为原子量或分片锁；③ `select_account` 走读锁。**约束**：`sync_accounts` 的「增量 upsert、不删除既有账号以保留治理历史」语义（`relay.rs:81`）必须保留。
 
+---
+
+#### B5 实施结果（2026-09-28）—— 实测后**改写**了本条的优先级
+
+复核时逐行读了 `relay.rs:82-190` 的 5 处 `pool.write()`，并**实测了各临界区的性质**：
+
+| 锁点 | 临界区内做什么 | 是否含 IO |
+|---|---|---|
+| `relay.rs:83-86` | `load_accounts_for` 在**锁外**先读盘，锁内只有 `sync_accounts`（内存合并） | ❌ |
+| `relay.rs:121` `acquire` | 内存置在途标记 | ❌ |
+| `relay.rs:147` `release` | 内存清标记 | ❌ |
+| `relay.rs:157` `note_success` | 内存计数 / EMA（只置 `self.dirty`） | ❌ |
+| `relay.rs:176` `apply_upstream_error` | 内存冷却 / 熔断（只置 `self.dirty`） | ❌ |
+
+⇒ 这些临界区都是**几百纳秒级的内存操作**，「每请求 5 次写锁」本身**不构成瓶颈**；
+本条原判的严重度**下调**。真正严重的是另外两处（下）。
+
+##### ★★ 发现一（**正确性缺陷**，非性能）：池治理状态**从不落盘**
+
+`Pool::flush_if_dirty` 存在、类型全对、单测全绿（`persistence_round_trip_*` 等），
+但**生产上没有任何调用点** —— 唯一的包装 `GatewayState::persist_pool` 自身**零调用者**。
+而 `GatewayState::load` 在启动时调 `pool.load(&state_file, …)` 读的正是它写的那个文件
+⇒ **该文件永远是旧的**。
+
+后果不是崩溃而是**静默遗忘**：冷却 / 熔断 / 成功率 EMA / 余额读数 / `credits_refreshed_ms`
+全部只在内存里，**每次重启从零开始**（例：刚判定 `SessionDead` 的账号，重启后立刻又被选中、再撞一次同样的墙）。
+
+★ 这与 `BackgroundTask` 注册表文档里记的 `set_credits` 事故是**同一类**
+（「函数存在、类型全对、构建全绿、测试全绿，但生产上没人调用」）——
+**同一个坑在本仓库第二次出现**，只是换了个函数。
+
+**已修**：新增 `BackgroundTask::PoolPersist` 登记进注册表（周期 30 s，`flush_if_dirty` 只在有改动时真写），
+并补两条护栏：`background_task_registry_includes_pool_persist`（注册表守卫）+
+`persist_pool_writes_governance_state_to_disk`（端到端：改池 → `persist_pool` → 文件里真出现该账号）。
+两条都做了变异验证（移除注册项 / 让 `persist_pool` 直接 return ⇒ 均精确变红）。
+
+##### ★★ 发现二（**真·阻塞**）：`refresh_once` 持**全局写锁跨网络取数**
+
+`credits_refresh.rs` 改造前：
+
+```ignore
+let mut pool = state.pool.write().await;
+refresh_with(&mut pool, &fetcher, now_ms, interval_ms).await   // 内部逐账号 await 网络
+```
+
+写锁**跨整个取数过程**持有 ⇒ 后果不是死锁而是**排队**：启动时所有账号都「从未取过余额」，
+第一批 relay 请求必须等完整一轮取数（账号数 × 单次上游耗时）才能选到号；之后每 30 分钟再来一次。
+这与本模块开头那条硬约束（「绝不在请求路径上同步拉余额」）是**同一件事的另一面**：
+取数虽不在请求路径上，但它**把请求路径堵住了**。
+
+**已修**：拆成三段 —— 读锁算目标 → **无锁**取数 → 短暂写锁写回。
+`refresh_with`（单测注入点）与新的 `refresh_pool`（生产）**共用**
+`refresh_targets` / `apply_refresh` / `parse_credits`，**只差锁的持有时机**，
+因此不存在「测的路径不是跑的路径」；另有 `refresh_pool_and_refresh_with_agree` 钉住两者产出相同。
+
+护栏 `refresh_pool_does_not_hold_the_lock_across_fetches`：注入的 fetcher 在 `fetch` 时
+对同一把锁 `try_read()`，拿不到即说明锁被占着 —— **直接观测，不靠计时**。
+变异（改回「先取写锁再取数」）⇒ 红且报 `left: 1` vs `right: 0`。
+
+##### 仍未做（**已评估，建议不做**）
+
+- **账号同步节流**（原方案 ①）：`sync_accounts` 在锁内是**内存合并**，且账号数是几十量级；
+  加节流会引入「另一入口刚改账号库、这边看不到」的陈旧窗口 —— 与 P0-3 同款取舍，**收益测不出来、风险真实**。
+- **`acquire`/`release` 改原子量 / 分片锁**（原方案 ②）：临界区已是纳秒级，改造成本与出错面远大于收益。
+- **`select_account` 走读锁**（原方案 ③）：它确实只读，但每次选号都紧跟一次写（`acquire`），
+  读写分开只是把一次锁变成两次，无净收益。
+
+
 ### P1-2 core / gateway 在 async 里直接做阻塞 IO
 
 **证据（已核实）** `spawn_blocking` 在 `buddy-switch-core` 与 `buddy-switch-gateway` 中**各 0 处**，而 `buddy-switch-server/api.rs` 有 15 处。已定位的阻塞点：`trae/handlers.rs:503-513`（async 中调 `list_account_views_for`）、`trae/checkin.rs:360-374`（async 中调 `entries_for` / `list_account_views_for` / `load_cooldowns_for` / `load_remaining_for`，循环内还有 `device::ensure_for_variant` 阻塞 fs）。
 
 **影响**：阻塞 tokio worker 线程；多账号并发签到/刷新时线程池被占满，整体吞吐下降。
 **修复**：把同步 IO 包进 `tokio::task::spawn_blocking`。**约束**：`spawn_blocking` 要求 `'static`，需把数据 `Arc` 化；注意别把「持锁跨 await」引入进来。
+
+#### B5 对 P1-2 的评估（2026-09-28）—— **建议不做，理由如下**
+
+本条定位的两处（`trae/handlers.rs:503-513`、`trae/checkin.rs:360-374`）都在 **Trae 侧的后台/交互路径**
+（签到、余额刷新、账号视图列表），**不在 relay 热路径上**。`spawn_blocking` 的收益是
+「不让同步 IO 占住 tokio worker 线程」，而它的代价是真实的：
+`'static` 约束会迫使 `Arc` 化一批数据、并新增「跨 `spawn_blocking` 边界」的错误处理与
+`await` 点 —— 而本仓库刚刚（见 P1-1 发现二）踩过「持锁跨 await」这个坑。
+
+判据：**收益要有证据**。目前没有任何 profile 证据表明这些路径造成过线程池饥饿
+（本应用是**个人本地网关**，并发度是「几个请求」而不是「几百并发」）。
+⇒ 与 P0-3 同款结论：**在有 profile 证据之前不做**。若日后真要做，先补一个
+「并发 N 个签到请求 + 观测 tokio worker 是否被占满」的度量，而不是直接改。
+
 
 ### P1-3 Tauri：55 / 81 个命令是同步的
 
@@ -264,6 +466,101 @@ Global 区域一次 `windows_workbuddy_process_rows_for` ≈ 4 × 141ms ≈ **56
 **若决定接上**：`server/main.rs:33-57` 的「后台任务注册表」纪律要求 —— 任何后台循环**必须登记进
 `BackgroundTask` 枚举**（注释原文：「登记即执行——不要在本表之外直接 `tokio::spawn` 后台循环」），
 且已有测试守住该表。**约束**：GC 不得驱逐未过期绑定（单测 `gc_drops_only_expired_entries` 已锁定）。
+
+#### ✅ B8 已接线（2026-09-28）—— 复核先发现**接线的键是错的**，修好后接上
+
+准备接线时逐行读了键的派生，发现一个**会让「接上」变成假动作**的问题：
+
+`sticky.rs` 的键是 `sticky_key(region, model, conversation_request_id)`，
+而 `conversation_request_id` 由 `relay::prepare_body` 这样解析：
+
+```rust
+session_headers::resolve_conversation_request_id(inbound_request_id, None, turn_key)
+//                                                               ^^^^ session_key 传的是 None
+```
+
+`resolve_conversation_request_id` 的优先级是
+① 入站头 → ② **会话键**派生（「同一会话跨轮稳定」）→ ③ 轮键派生 → ④ 随机。
+因为 **② 的 `session_key` 恒为 `None`**，实际只会在 ③（按「最后一条 user 文本」派生）与 ④ 之间落。
+
+⇒ **`conversation_request_id` 实际是「轮」级标识，每轮都换。**
+用它当粘性键 ⇒ 每轮都是新键 ⇒ 绑定永远命中不了、`sticky_sessions` 恒为 0。
+**「把 `bind` 接进 relay」这个动作本身不会产生任何效果。**
+
+而模块开头写明的用途是**跨轮**的：「同一会话的上下文会落到不同账号上，上游侧表现为
+『对话突然失忆』；且跨账号的缓存前缀命中率归零」。
+
+**⇒ 正确的键是 `RelayRequest::conversation_id`（客户端会话 id）**，而不是轮主键。
+
+##### 改用它牵出一个**真实的取舍**（已确认按方案 1 实施）
+
+`conversation_id` 是 `Option<String>`（来自请求体 `metadata.conversation_id`），**可能缺失**；
+而轮主键是 `String`（必有）。这大概就是原作者选轮主键的原因 —— 但那让粘性**永不命中**。
+
+更关键的是：粘性**会绕过 `pick` 的四因子加权**（积分比例 / 快过期占比 / 闲置补偿 / 成功率）
+去钉住一个账号。也就是说：
+
+| | 粘性开（现已采用） | 粘性关 |
+|---|---|---|
+| 同会话上下文 | 固定在同一账号（上游不「失忆」、缓存前缀命中） | 可能落到不同账号 |
+| 积分利用 | 绑定的账号可能积分少却一直被用（直到不可用才解绑） | 按四因子选，额度利用更优 |
+
+这是**产品取舍**（拿「额度利用」换「会话一致性与缓存命中」），不是纯缺陷修复。
+`sticky_ttl_ms` 与 status 的 `sticky_sessions` 是已对外暴露的配置/契约。
+
+**缓解**：取舍的代价被两条设计压到最小 ——
+① 只对**带了会话 id** 的请求生效（没带的一律走原逻辑，行为不变）；
+② 绑定的账号一旦不可用（冷却 / 在途占满 / 模型级限流 / 账号已删）**立刻放弃**并落回四因子选号。
+
+##### ✅ 已接线（2026-09-28，按「键改用 `conversation_id`」方案）
+
+**做了什么**
+
+1. **键改用会话级标识**：`sticky_key(region, model, session_key)` 的第三参从
+   `conversation_request_id` 改为**客户端会话 id**；参数名与文档一并改，
+   把「为什么不能用轮主键」写进函数文档（避免后人又改回去）。
+2. **`conversation_id` 缺失 ⇒ 整段跳过粘性**（`sticky_key_of` 返回 `None`）：
+   **不退化成轮主键** —— 那只会造一个永不命中的键，让 `sticky_sessions` 看起来非 0 却毫无作用。
+   绝大多数既有调用点不带 `metadata.conversation_id`，它们的行为与接线前**逐字相同**。
+3. **可用性判据同源**：新增 `Pool::is_usable_for` ⇒ `pick::is_usable` ⇒ `pick::entry_usable`，
+   与 `pick_account` 的候选过滤**共用同一个函数**（`entry_usable`）。
+   若另写一套且更宽松，粘性会把请求钉到 `pick` 认为不可用的账号上 —— 且**不报错**。
+4. **绑定 / 解绑时机**：只在**成功之后** `bind`；失败（进 `tried`）时立刻 `unbind`。
+   （即便漏了解绑也不会失败 —— 冷却中的账号会被 `is_usable_for` 挡掉 —— 解绑只是省一次无用尝试。）
+5. **GC 走写入路径摊销**，**不新增后台循环**（因此不触碰 `BackgroundTask` 注册表纪律）：
+   `bind` 里 `len >= gc_at` 才清扫，清扫后按当前规模**翻倍上抬**阈值。
+   ★ 关键分支：**清扫释放 0 条时阈值必须上抬** —— 否则「条目大多未过期」的正常长跑场景下
+   每次 `bind` 都会全表扫描，那才是真的性能问题。反向（清扫清空整表）则回落下限。
+
+**★ 最重要的一条性质：粘性绝不导致失败**
+
+`sticky_choice` 被抽成**纯函数**，`Some(uid)` = 用它、`None` = 放弃并落回原逻辑。
+**它无法表达「失败」**：uid 为空 / 本请求已试过 / 此刻不可用，任一条不满足即放弃。
+抽成纯函数就是为了让这条性质能被**直接**测到。
+
+**护栏与证伪**（gateway lib **330 → 339**，全绿）
+
+| 护栏 | 守住什么 |
+|---|---|
+| `sticky_key_is_none_without_a_conversation_id` | **不破坏既有使用**：无会话 id（含空串/纯空白）⇒ 粘性整段跳过 |
+| `sticky_key_carries_region_and_model` | 区域与模型必须进键（跨域不串、切模型不粘） |
+| `sticky_choice_falls_back_instead_of_pinning_an_unusable_account` | ★★ 不可用/已试过/空 uid ⇒ 一律放弃 |
+| `sticky_choice_probes_exactly_the_preferred_uid` | 只问被选中的那个 uid |
+| `is_usable_agrees_with_pick_on_each_state` | ★ 判据与 `pick` 同源（行为级印证） |
+| `is_usable_honours_model_scoped_cooldown` | 模型级冷却也要被看到（粘性传的是模型名） |
+| `is_usable_treats_expired_model_cooldown_as_available` | ★ 已过期的模型冷却不得判为不可用 —— `pick` 会先 prune 而 `is_usable` 不 prune，判据必须自带过期判断 |
+| `bind_amortizes_gc_so_long_runs_stay_bounded` | 接上写路径后表**必须有界** |
+| `gc_threshold_is_raised_only_when_a_sweep_frees_nothing` | ★ 摊销的关键分支（见上） |
+| `default_falls_back_to_thirty_minutes` | `new(0)` / `Default` 都落到 30 分钟 |
+
+**证伪**：把 `sticky_choice` 改成忽略 `usable`（= 会钉死不可用账号）⇒ 两条用例红，
+报「账号不可用时必须放弃粘性，绝不能钉死」。还原后按内容校验（变异标记 0 + 关键调用存在）。
+
+**未覆盖（如实说明）**：`relay()` 的**端到端**粘性行为（「绑定后下一轮真的选到同一账号」）
+没有自动化用例 —— 它需要构造 `GatewayState` + mock 上游，本 crate 没有这层脚手架
+（现有 e2e 是 **Trae 侧**的 `trae_gateway_e2e.rs`，不覆盖 WorkBuddy relay）。
+粘性的**决策逻辑**已被纯函数用例覆盖，**接线本身**靠编译器 + 全量回归保证。
+
 
 ### P1-5 official_usage 缓存命中时深拷贝整个大 payload
 
@@ -343,16 +640,120 @@ Global 区域一次 `windows_workbuddy_process_rows_for` ≈ 4 × 141ms ≈ **56
 
 ---
 
-## 5. 待实测确认（本次未取到真机数据）
+#### B7 实施结果（2026-09-28）—— 一条真问题 + 六条**实测后否决**
 
-以下结论依赖数据规模或线程模型，**未实测前不得当作「已确认」**：
+##### ✅ 真问题（**比审计描述的更严重**）：webui 下账号页是 **N×N** 次上游查询
 
-1. **P0-2 的 recharts 占比（复核后新增，优先级最高）**：需先拆一次 chunk 或跑可视化分析，拿到 recharts / radix / 其余 的真实字节数，再决定是否值得引入懒加载的复杂度。
-2. **P0-4 的实际耗时**：强依赖 `~/.workbuddy/projects`、`CodeBuddyExtension/Data` 的日志总量。需在真机计时确认，再决定是否值得做增量解析。（且**须先向作者确认「不缓存」是刻意还是现状**。）
-3. **P1-8 的 `dir_stats` 成本**：取决于 `profiles/*` 快照的文件数，需先统计量级。
-4. **P1-3 分级后各命令的真实耗时**：需用命令耗时日志确认哪些同步命令确实慢（而不是凭「它做了 IO」推断）。
-5. **P0-3 的设备派生成本占比**：需 profile 确认「哈希派生」与「文件 parse」谁是大头，以决定先做哪一项。
-6. **前端 `memo` / 排序的收益**：需 React Profiler 确认重渲染确实是瓶颈（账号数通常为个位数到几十）。
+审计写的是「N+1 请求」。实测逐行读代码后发现是 **N×N**：
+
+- **webui** 的 `get_checkin_status` 是**整端点** —— 它把**全部账号**各查一次上游后一起返回；
+- **桌面端**的同名命令是**单账号**的。
+- 而账号页原本对每个账号调一次 `api.getCheckinStatus` ⇒ webui 下**每次调用都拉全量**
+  ⇒ **N 个账号 = N × N 次上游签到查询**（20 个账号 = **400 次**）。旅行状态同款。
+
+**已修**：在 `api.ts` 新增 `getCheckinStatusMap` / `getTravelStatusMap` 两个**批量入口**，
+把「webui 一次、桌面端逐个」这条**通道差异收口在 api 层**（调用方不必也无法自己判断）。
+账号页改用它们。
+
+**验证（请求计数，不是读代码）**：新增 `scripts/mock-webui-backend.py`（会统计每端点调用次数）
++ `scripts/scenarios/b7-accounts-nplus1.scenario.mjs`：
+
+| 断言 | 修复后 | 旧实现 |
+|---|---|---|
+| `GET /api/checkin/status` | **1** | 3（= 账号数） |
+| `GET /api/travel/status` | **1** | 3 |
+| `GET /api/accounts` | 2（CN + Global 各一次，**不随账号数增长**） | 2 |
+
+**证伪**：把 `fetchTodayCheckinMap` 改回逐账号调用并重建 ⇒ 计数立刻变 **3**，场景变红。
+截图人工核对：3 张卡片各自显示正确的「未签到 · 未旅行」⇒ 批量结果**落对了卡片**，不只是请求变少。
+
+★ 两个**验收工具自身的坑**（都真实踩到，已写进脚本注释）：
+1. **mock 不读请求体 ⇒ HTTP/1.1 keep-alive 协议失步**：未读的 body 被当成下一个请求行，
+   浏览器把后续请求报成「缺少 `Access-Control-Allow-Origin`」的 CORS 失败。
+   症状是**同样的端点时通时不通**、计数不可信。修法是处理前先把 body 读干净。
+2. **不要用 `location.reload()` 重置计数**：它会打断 CDP 的页面上下文，后续 `evaluate`
+   落在旧 context 上（实测：reload 后卡片永远等不到）。正确做法是**每次跑之前重启 mock**。
+
+##### ❌ 实测后**否决**的六条（都写了理由，避免后人重复分析）
+
+| 项 | 否决理由 |
+|---|---|
+| 全量字体包 | **审计的前提不准**：字体用在 **7 处数字展示**（不是「一处」）。且 `unicode-range` 让浏览器**只下载 latin 子集（41 kB）**，另两个子集只嵌不传（68 kB 里 27 kB 永不传输）。要省得手写 `@font-face` —— 维护成本换 0 用户可见收益。 |
+| `donate-*` 改 `import()` 懒加载 | **已经是按需的**：URL 在模块作用域不影响传输时机，`<img>` 只在弹窗打开时才渲染 ⇒ 只在那时下载。改 `import()` 只挪一个字符串，零收益。 |
+| 4 处 Vec 去重 O(n²) | n = 账号数 / 进程数（几十量级），O(n²) 是**微秒级**。改 `HashSet` 要引入第二个结构并保持同步，可读性反而下降。 |
+| SSE 解析器「二次复杂度」 | `drain(..=index)` 的 memmove 确实与剩余长度相关，但**buffer 每次 `feed` 后只剩残行**（有界于 chunk 大小，非流总长）⇒ 单次 `feed` 内 L 只有几条，非真二次。 |
+| `config.rs` 路径函数加 `OnceLock` | **会破坏测试隔离机制**：那些无参路径函数**每次重读进程级 `BUDDY_SWITCH_HOME`** 正是 `HomeOverrideGuard` 能生效的前提（本项目已为此踩过四次假失败）。审计不知这层依赖。 |
+| 图标已修（见下） | — |
+
+##### ✅ 顺手修掉的真浪费：图标按**实际渲染尺寸**缩图
+
+`workbuddy-official-icon.png` 与 `codebuddy-cn-ide-icon.png` 都是 **512×512**，而它们最大只渲染到
+**56 px** / **22 px**（`WorkBuddyMark` / `CodeBuddyCnIdeMark`），且**始终可见**（侧栏 + 账号卡）⇒ 首屏下载。
+
+| 文件 | 前 | 后 | 省 |
+|---|---:|---:|---:|
+| `workbuddy-official-icon.png` | 135.8 kB (512²) | **22.2 kB (192²)** | −84% |
+| `codebuddy-cn-ide-icon.png` | 107.8 kB (512²) | **10.1 kB (96²)** | −91% |
+| 合计 | **243.6 kB** | **32.3 kB** | **−211 kB** |
+
+尺寸取值：最大渲染 56 px × 3 DPR = 168 px ⇒ 192² 留足余量；22 px × 3 = 66 ⇒ 96²。
+**视觉验收**：`scripts/scenarios/b7-icon-quality.scenario.mjs` 把 `<img>` 临时放大到 200 px 后截图
+（15 px 的原尺寸看不出质量），并断言 `naturalWidth` 为 192/96（证明新资源生效、旧 512 已消失）。
+截图人工核对：边缘干净、透明通道完好。
+
+
+---
+
+## 5. 待实测确认 → **B0 已执行（2026-09-28），结论如下**
+
+> **B0 已完成**。量化脚本已固化为 `scripts/bundle-report.config.ts`
+> （`npx vite build --config scripts/bundle-report.config.ts`，产物落 `dist-analyze/`，量完即删）。
+
+### 5.1 P0-2 recharts 占比：**已量出，结论是「值得做」**
+
+按包拆 chunk 后（minified / gzip）：
+
+| chunk | 体积 | gzip | 占比 | 说明 |
+|---|---:|---:|---:|---|
+| `index`（应用代码） | 597.87 kB | 146.78 kB | 40.9% | 全部页面 + 组件 |
+| **`pkg-recharts`** | **407.73 kB** | **109.16 kB** | **27.9%** | recharts **及其传递依赖**（`d3-*` / `victory-vendor` / `lodash` / `react-smooth` / `react-is` …） |
+| `pkg-react` | 193.07 kB | 60.58 kB | 13.2% | react / react-dom / scheduler |
+| `pkg-other` | 124.87 kB | 38.79 kB | 8.5% | 其余零散依赖 |
+| `pkg-radix` | 86.69 kB | 26.77 kB | 5.9% | `@radix-ui/*` |
+| `pkg-app` | 38.70 kB | 14.04 kB | 2.6% | zustand + react-router |
+| `pkg-lucide` | 17.61 kB | 6.13 kB | 1.2% | 图标 |
+| **合计** | **1466.54 kB** | — | 100% | 与审计原文 1,464,712 B 一致 ✓ |
+
+★ **关键**：只把 `recharts` 本身算作 264.92 kB 会**低估一半** —— 它的传递依赖散在 `pkg-other` 里。
+按「家族」合并后是 **407.73 kB / 27.9%**，而它**只被 4 个统计页用到**
+（`TokenStatsPage` / `CreditStatsPage` / `TraeTokenStatsPage` / `TraeCreditsPage`）。
+⇒ **B2（路由懒加载 + manualChunks）确认值得做**，收益上限 ≈ 首屏 JS −28%（约 110 kB gzip）。
+
+### 5.2 P0-4 token 统计：**数据规模已量出，成本确凿**
+
+| 输入 | 实测（本机 2026-09-28） |
+|---|---|
+| `~/.workbuddy/projects`（CN） | **472** 个 jsonl / **889 MB** |
+| `~/.workbuddy-ai/projects`（Global） | **480** 个 jsonl / **1.9 GB** |
+| 合计 | **952 个文件 / ≈2.8 GB** |
+| 纯 I/O 下界（`cat` 全部文件，热缓存） | **2.42 s** |
+
+⇒ `region=all` 的「实时聚合、不缓存」意味着**每个请求**都要过 ≈2.8 GB（I/O 下界 2.4 s，
+**外加 JSON 解析**，实际远高于此）。**成本确凿，缓存应当做**。
+但「不缓存、不落库」被写成设计属性（`token_stats.rs:1048`）且无理由 ⇒ **仍建议加内存缓存、
+绝不落盘**，并在实现时给出明确失效条件（按文件 `(mtime, size)` 判定）。
+`CodeBuddyExtension/Data` 本机仅 **24 KB** ⇒ 该数据源不是瓶颈。
+
+### 5.3 P1-8 `dir_stats`：**本机为 ~0，降级**
+
+`~/.buddy-switch/trae/profiles*` 三个快照目录**文件数均为 0**（总 30 KB）。
+⇒ 本机不存在该成本；只有「用户确实做过大量快照」时才有量级。**从 B7 降级为「有实测数据再做」**。
+
+### 5.4 仍未实测（保持待确认）
+
+1. **P1-3 分级后各命令的真实耗时**：需命令耗时日志确认哪些同步命令确实慢。
+2. **P0-3 的设备派生成本占比**：需 profile 确认「哈希派生」与「文件 parse」谁是大头。
+3. **前端 `memo` / 排序的收益**：需 React Profiler 确认（账号数通常为个位数到几十）。
 
 ---
 

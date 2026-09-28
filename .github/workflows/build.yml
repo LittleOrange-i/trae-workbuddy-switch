@@ -79,6 +79,21 @@ jobs:
                   "bundles": "deb,appimage",
                   "update_arch": "",
               },
+              {
+                  # ⚠️ **只编 CLI，不编桌面 App**（`bundles` 为空 ⇒ 跳过 `Build desktop app`）。
+                  # 桌面 App 走 Tauri，需要 webkit2gtk；在 x64 runner 上交叉编译 arm64 版
+                  # 要开 dpkg 多架构 + 装 `libwebkit2gtk-4.1-dev:arm64`，代价高且易碎，
+                  # 而收益很小（本项目的桌面端不支持该平台）。
+                  # webui 形态是纯 Rust CLI（依赖只有 rustls / rusqlite-bundled），
+                  # 交叉编译很干净 —— 所以这个平台**只发 npm 平台包与 Release 裸二进制**。
+                  "name": "linux-arm64",
+                  "os": "ubuntu-latest",
+                  "target": "aarch64-unknown-linux-gnu",
+                  "cli_bin": "buddy-switch-linux-arm64",
+                  "platform_tag": "linux-arm64",
+                  "bundles": "",
+                  "update_arch": "",
+              },
           ]
           event = os.environ.get("EVENT_NAME", "")
           platform = (os.environ.get("PLATFORM") or "all").strip()
@@ -103,6 +118,16 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.select-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
+    # linux-arm64 是**交叉编译**（runner 只有 x64）。两条变量都只对
+    # `aarch64-unknown-linux-gnu` 这一个目标生效，不会干扰其它平台的原生构建。
+    env:
+      # Rust 链接器
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      # `rusqlite` 走 `bundled` feature ⇒ `libsqlite3-sys` 会用 `cc` **现场编译**
+      # SQLite 的 C amalgamation。不指定交叉 C 编译器，`cc` 就拿 host gcc 产出
+      # x86_64 目标文件 → 链接期报 "file in wrong format"。
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      PKG_CONFIG_ALLOW_CROSS: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -137,11 +162,13 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # `gcc-aarch64-linux-gnu` 是 linux-arm64 交叉编译的链接器/交叉 C 编译器
+      # （配合上面的 job env）；其余几个是 Tauri 桌面端要的，linux-arm64 用不到但装了无害。
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gcc-aarch64-linux-gnu
 
       # dmgbuild writes Finder metadata without opening Finder, so DMGs keep
       # their large icons and drag arrow in headless macOS runners.
@@ -236,7 +263,10 @@ jobs:
           ls -l "dist-bin/${{ matrix.cli_bin }}"
 
       # 桌面 App（mac app / nsis exe / deb + AppImage）
+      # `bundles` 为空的平台（linux-arm64）不编桌面 App —— 见 select-matrix 里的注释。
+      # 它仍然产出 CLI 裸二进制（`Build server binary` 不受本条件影响）。
       - name: Build desktop app
+        if: matrix.bundles != ''
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -336,7 +366,13 @@ jobs:
   publish-platform:
     name: npm platform ${{ matrix.name }}
     needs: [select-matrix, build]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # `vars.PUBLISH_NPM` 是 npm 发布通道的总开关（仓库 Settings → Variables）。
+    # 未配置 / 不等于 'true' ⇒ 整个 npm 通道跳过（job 显示 skipped，不再是 failure）。
+    # 为什么需要它：npmjs 账号注册/访问受限期间，没有 `NPM_TOKEN` 可配，
+    # 每次 tag 都会红 4 个 job、`publish-main` 被 skip —— 那不是事故，是噪音，
+    # 却会把「这次 Release 到底成没成」的判断搅浑（Release 本身一直是 success）。
+    # 恢复发布时只需把变量置为 'true' 并配好 `NPM_TOKEN`，无需改回本文件。
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_NPM == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -378,7 +414,7 @@ jobs:
   publish-main:
     name: Publish npm main package
     needs: [build, publish-platform]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_NPM == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -427,11 +463,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # artifact 里含一份 CLI 裸二进制（build job 的 `Stage CLI binary for npm` 放的，
-      # 供 publish-platform 取用）。它是**中转物**，不属于 Release 资产 ——
-      # Release 只留桌面 App + updater 清单。桌面产物都是 `BuddySwitch…` 大写开头，
-      # 因此按小写前缀 `buddy-switch-` 精确剔除。
+      # artifact 里含一份 CLI 裸二进制（build job 的 `Stage CLI binary for npm` 放的）。
+      # 它的归属取决于 npm 通道是否开启：
+      #   - 开（PUBLISH_NPM=true）：二进制已随平台包发到 npm registry，这里是**中转物**，
+      #     按小写前缀 `buddy-switch-` 精确剔除，Release 只留桌面 App + updater 清单
+      #     （桌面产物都是 `BuddySwitch…` 大写开头，不会误删）。
+      #   - 关（当前默认）：npm 发不出去，那这份二进制就是**唯一的 webui 分发渠道** ——
+      #     必须留在 Release 里让用户直接下载，否则 webui 形态等于没有发布途径。
+      # ⚠️ 别改成无条件保留：桌面端走 Tauri updater，与这些裸二进制无关，
+      #    而 `merge-update-manifests.py` 只 glob `latest-*.json`，留着也不会污染更新清单。
       - name: Drop npm-only CLI payloads
+        if: vars.PUBLISH_NPM == 'true'
         run: |
           ls -1 artifacts
           rm -f artifacts/buddy-switch-*

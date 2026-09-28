@@ -34,12 +34,28 @@
 //! | CN | TraeWork | `TRAE SOLO CN` | `TRAE SOLO CN.exe` | `TraeWork CN` | `SOLO_CN` | TraeWork CN (User) |
 //! | CN | TraeCode | `Trae CN` | `Trae CN.exe` | `TraeCode CN` | `TRAE_CN` | TraeCode CN (User) |
 //! | Global | TraeWork | `TRAE SOLO` | `TRAE SOLO.exe` | `TraeWork` | `SOLO_I18N` | TraeWork (User) |
-//! | Global | TraeCode | `Trae` | `Trae.exe` | `TraeCode`（待实测） | — | 本机未安装 |
+//! | Global | TraeCode | `Trae` | `Trae.exe` | `TraeCode`（待实测） | `TRAE_I18N`（推断，见下） | 本机未安装 |
 //!
 //! ⚠️ **候选名必须互不重叠**：`TRAE SOLO CN` 与 `TRAE SOLO` 只差一个后缀，
 //! `Trae CN` 与 `Trae` 是包含关系。用「包含匹配」判程序位会互相抢
 //! （出现「装了 A、读了 B 的目录」），因此 [`ProgramSpec`] 的候选名一律
 //! **精确逐字比对**，不重叠由单测钉住。
+//!
+//! ## 四个程序位是否都真的接上了（2026-09-28，issue #3）
+//!
+//! 本模块一直有 4 个 [`ProgramSpec`]，但**第 4 个（Global × TraeCode）曾经接不上**：
+//! `platform::variant_for_program` 对它返回 `None`，于是界面上那一格永远是
+//! 「未检测到」。issue #3 报的「不支持 TraeCode」就是这一格。
+//!
+//! 现在 4 个程序位都映射到 [`super::variant::TraeVariant`] 的一个取值
+//! （`TraeWork` / `Trae` / `Global` / `GlobalTraeCode`），探测、启动、切换、
+//! 登录态快照四件事因此都按程序位分家。判据见
+//! `platform::tests::四个程序位全部已建模且自洽`。
+//!
+//! ⚠️ 唯一**推断**（非实测）的是 `TraeCode` 国际版的 `packageType`：本机未装该客户端。
+//! 它只被 [`super::variant::OAuthLine::from_package_type`] 消费，而那个分派
+//! **只区分 `SOLO_*` 与非 `SOLO_*`** ⇒ 任何非 `SOLO_*` 取值都落 TRAE 线（IDE 该用的
+//! 那条钥匙），所以推断错也**不会**把请求打到错的域或换错钥匙。
 //!
 //! ## 展示名：区域前缀 + 程序名
 //!
@@ -214,6 +230,11 @@ const GLOBAL_TRAE_WORK: ProgramSpec = ProgramSpec {
 /// 国际版 TraeCode：**本机未安装**，`nameAlias` / `packageType` 无从实测，
 /// 因此 `package_type` 留 `None`、别名按同族命名规则推断并在此显式标注「待实测」。
 /// 猜测只影响诊断文案；候选名（目录 / exe / 进程）是客户端通用命名，风险可控。
+///
+/// ⚠️ 它与 [`super::variant::GLOBAL_TRAE_CODE_SPEC`] 的 `package_type` **不是同一件事**：
+/// 那边的字段是 `&'static str`（授权页分派必须要一个具体值），填的是同一推断值
+/// `TRAE_I18N`；本字段是**诊断用**、允许诚实留空。两处都写了「未实测」，
+/// 谁先拿到真实客户端就一起更正。
 const GLOBAL_TRAE_CODE: ProgramSpec = ProgramSpec {
     region: TraeRegion::Global,
     program: TraeProgram::TraeCode,

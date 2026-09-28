@@ -472,7 +472,6 @@ export function switchAccount(args: {
   accountId: string;
   region?: Region;
   restart?: boolean;
-  shareSessions?: boolean;
   copySessionIds?: string[];
   /** 会话复制的**来源**版本；缺省与 `region` 相同（同版本内切换）。 */
   sourceRegion?: Region;
@@ -648,6 +647,75 @@ export async function getCheckinStatus(accountId: string, region?: Region): Prom
   return call("get_checkin_status", { accountId, ...regionArg(region) });
 }
 
+/** 单个账号的签到状态条目。 */
+export type CheckinStatusEntry = {
+  ok: boolean;
+  todayCheckedIn: boolean;
+  error?: string;
+  raw?: unknown;
+};
+
+/**
+ * **批量**查询多个账号的今日签到状态（`accountId → 条目`；失败/未命中的账号不出现在结果里）。
+ *
+ * ## 为什么必须有这个批量入口（2026-09-28，B7）
+ *
+ * 两条通道的**同名接口语义不同**：
+ * - **webui** 的 `get_checkin_status` 是**整端点** —— 它把**全部账号**各查一次上游后一起返回；
+ * - **桌面端**的同名命令是**单账号**的。
+ *
+ * 而账号页原本对每个账号调一次 [`getCheckinStatus`] ⇒ 在 webui 下**每次调用都拉全量**，
+ * 于是 **N 个账号 = N × N 次上游签到查询**（20 个账号就是 400 次）。
+ *
+ * 这正是「批量入口必须由 api 层统一提供」的理由：把「webui 一次、桌面端逐个」这条
+ * 通道差异**收口在这里**，调用方不必（也无法）自己判断该用哪种方式。
+ * 若日后桌面端命令也支持批量，只改本函数即可。
+ */
+export async function getCheckinStatusMap(
+  accountIds: string[],
+  region?: Region,
+): Promise<Record<string, CheckinStatusEntry>> {
+  const map: Record<string, CheckinStatusEntry> = {};
+  if (accountIds.length === 0) return map;
+
+  if (demoModeEnabled) {
+    // 演示数据是**按账号**的，逐个取（不发网络请求）。
+    for (const accountId of accountIds) {
+      map[accountId] = await getCheckinStatus(accountId, region);
+    }
+    return map;
+  }
+
+  if (isWebui()) {
+    // ★ 一次批量调用（见上方文档）—— 绝不在这里逐个循环。
+    const all = await httpCall<{
+      accounts: ({ accountId: string } & CheckinStatusEntry)[];
+    }>("get_checkin_status", region ? { region } : undefined);
+    const wanted = new Set(accountIds);
+    for (const item of all.accounts) {
+      if (!wanted.has(item.accountId)) continue;
+      const { accountId, ...rest } = item;
+      map[accountId] = rest;
+    }
+    return map;
+  }
+
+  // 桌面端命令是单账号的，无法再合并 ⇒ 并行发出。
+  await Promise.all(
+    accountIds.map(async (accountId) => {
+      try {
+        map[accountId] = await call<CheckinStatusEntry>("get_checkin_status", {
+          accountId,
+          ...regionArg(region),
+        });
+      } catch {
+        // 单个失败不拖垮整批：调用方按「未命中」处理（保留原值）。
+      }
+    }),
+  );
+  return map;
+}
+
 export function getCreditExpiry(accountId: string, region?: Region): Promise<CreditExpiry> {
   return call("get_credit_expiry", { accountId, ...regionArg(region) });
 }
@@ -707,6 +775,65 @@ export async function getTravelStatus(accountId: string, region?: Region): Promi
       : { label: "untraveled", rewardCredit: null, locationName: null, arriveAt: null };
   }
   return call("get_travel_status", { accountId, ...regionArg(region) });
+}
+
+/**
+ * **批量**查询多个账号的今日旅行状态（`accountId → 状态`；失败/未命中的不出现在结果里）。
+ *
+ * 与 [`getCheckinStatusMap`] 同因同治：webui 的 `get_travel_status` 是**整端点**，
+ * 逐个调用会变成 N 次全量拉取；桌面端命令是单账号的。通道差异收口在这里。
+ */
+export async function getTravelStatusMap(
+  accountIds: string[],
+  region?: Region,
+): Promise<Record<string, TravelStatus>> {
+  const map: Record<string, TravelStatus> = {};
+  if (accountIds.length === 0) return map;
+
+  if (demoModeEnabled) {
+    for (const accountId of accountIds) {
+      map[accountId] = await getTravelStatus(accountId, region);
+    }
+    return map;
+  }
+
+  if (isWebui()) {
+    const all = await httpCall<{
+      accounts: {
+        accountId: string;
+        email: string;
+        label: TravelStatus["label"];
+        rewardCredit: number | null;
+        locationName?: string | null;
+        arriveAt?: number | null;
+      }[];
+    }>("get_travel_status", region ? { region } : undefined);
+    const wanted = new Set(accountIds);
+    for (const item of all.accounts) {
+      if (!wanted.has(item.accountId)) continue;
+      map[item.accountId] = {
+        label: item.label,
+        rewardCredit: item.rewardCredit,
+        locationName: item.locationName ?? null,
+        arriveAt: item.arriveAt ?? null,
+      };
+    }
+    return map;
+  }
+
+  await Promise.all(
+    accountIds.map(async (accountId) => {
+      try {
+        map[accountId] = await call<TravelStatus>("get_travel_status", {
+          accountId,
+          ...regionArg(region),
+        });
+      } catch {
+        // 单个失败不拖垮整批。
+      }
+    }),
+  );
+  return map;
 }
 
 export function getAutoTravelConfig(): Promise<TravelConfig> {

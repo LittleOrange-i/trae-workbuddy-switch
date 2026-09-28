@@ -13,7 +13,7 @@ export const en = {
   "trae.program.traeWork": "TraeWork",
   "trae.program.traeCode": "TraeCode",
   "trae.program.traeWorkGlobal": "TraeWork AI",
-  "trae.program.traeCodePending": "TraeCode (untested)",
+  "trae.program.traeCodeGlobal": "Trae AI",
 
   // =====================================================================
   // trae-account-card.tsx —— Trae account card
