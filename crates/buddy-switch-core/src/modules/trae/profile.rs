@@ -1198,6 +1198,38 @@ pub fn backup_to_slot_for(variant: TraeVariant, slot: &str) -> Result<u64, Strin
     Ok(copied)
 }
 
+/// 客户端**当前**登录态是否结构完整。
+///
+/// ## 判据（2026-09-29 真机实测）
+///
+/// | 状态 | `cloudide` 明文键数 | `iCubeServerData` |
+/// |:---|:---|:---|
+/// | 完整（客户端自己登录后写的） | 9 | **在** |
+/// | 被外部写坏的 | 7 | **不在**（客户端把整份判为无效后删掉了它） |
+///
+/// 判据取「服务端下发的那份缓存在不在」，而不是「键数」—— 键数会随客户端版本变。
+/// 读不到 / 解不开 / 缺键一律返回 `false`：**宁可少写一次槽位，也不要把坏状态灌进去**。
+///
+/// ## 为什么必须有这条（第二次报障的根因）
+///
+/// 切换流程的第 2/3 步会把「客户端当前状态」写进**槽位**（`last` 与「当前账号自己的槽位」），
+/// 而这两处写入都是**覆盖**式的。一份**坏的**当前状态因此会被流程**持续回灌**：
+/// 它自报的 uid 与槽位名一致，`ensure_save_target_matches_client` 那条守卫**看不出问题**
+/// —— 守卫查的是「是不是同一个账号」，不是「这份状态完不完整」。
+///
+/// 后果（2026-09-29 12:01 实测）：客户端被写坏后自报 `uid=Jackey`，第 3 步就把这份坏状态
+/// 写回 `profiles/1189017012674171`；用户再切到 Jackey，恢复出来的就是它 ⇒ **又变成未登录**。
+/// 而且 `last`（回滚兜底）同样被它覆盖 ⇒ 回滚能力一起消失。
+fn client_state_looks_complete(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(icube::storage_path_in_dir(dir)) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    value.get(icube::CLOUDIDE_KEY).is_some() && value.get(icube::SERVER_DATA_KEY).is_some()
+}
+
 /// 写前留档保留份数（见 [`backup_storage_before_write`]）。
 const STORAGE_BACKUP_KEEP: usize = 20;
 
@@ -1510,20 +1542,39 @@ where
     );
 
     // 2. 保存当前登录态到 last 槽位（强制，可回滚兜底）。
+    //
+    // ★ 但**结构不完整的当前状态不许覆盖 last**：`last` 是回滚兜底，被一份坏状态盖掉
+    //   就等于回滚能力一起消失（2026-09-29 实测发生过）。见 [`client_state_looks_complete`]。
     let previous_account = current_account_for(variant);
-    match backup_to_slot_for(variant, LAST_SLOT) {
-        Ok(count) => emit(
-            &mut outcome,
-            SwitchStep::new("backup", "ok", format!("当前登录态已保存到 last 槽位（{count} 个文件）")),
-        ),
-        Err(error) => emit(
+    let current_state_complete = snapshot_data_dir_for(variant)
+        .filter(|dir| dir.is_dir())
+        .as_deref()
+        .map(client_state_looks_complete)
+        .unwrap_or(false);
+    if current_state_complete {
+        match backup_to_slot_for(variant, LAST_SLOT) {
+            Ok(count) => emit(
+                &mut outcome,
+                SwitchStep::new("backup", "ok", format!("当前登录态已保存到 last 槽位（{count} 个文件）")),
+            ),
+            Err(error) => emit(
+                &mut outcome,
+                SwitchStep::new(
+                    "backup",
+                    "skip",
+                    format!("当前登录态未能保存（{error}），继续切换"),
+                ),
+            ),
+        }
+    } else {
+        emit(
             &mut outcome,
             SwitchStep::new(
                 "backup",
                 "skip",
-                format!("当前登录态未能保存（{error}），继续切换"),
+                "客户端当前登录态不完整（缺服务端数据），不覆盖 last 槽位 —— 保留上一次可回滚的现场",
             ),
-        ),
+        );
     }
 
     // 3. 若已知当前账号，额外保存到它自己的槽位，使该账号可被再次切回。
@@ -1536,18 +1587,36 @@ where
     // 未登录态覆盖就**不可逆**了（回滚槽救不回来）。所以这一步必须先过
     // `ensure_save_target_matches_client`，失败时**降级为 skip**、不影响后续切换。
     //
+    // ★★ 但 `ensure_save_target_matches_client` 只查「是不是同一个账号」，**查不出
+    //   「这份状态完不完整」**。2026-09-29 第二次报障正是这么来的：客户端被写坏后
+    //   自报 `uid=Jackey`，本步就把那份坏状态写回 `profiles/1189017012674171`，
+    //   用户再切到 Jackey 恢复出来的就是它 ⇒ 又变成未登录。所以**先过完整性判定**。
+    //
     // 注意 `LAST_SLOT` 的豁免理由：它的语义就是「切换前的现场」，必须允许在客户端
     // 未登录时也照旧写入，否则回滚能力就没了（见第 2 步与守卫的文档）。
     if let Some(previous) = previous_account.as_deref().filter(|uid| *uid != target) {
-        match ensure_save_target_matches_client(variant, previous) {
-            Err(error) => emit(
+        if !current_state_complete {
+            emit(
                 &mut outcome,
                 SwitchStep::new(
                     "backup-current",
                     "skip",
-                    format!("跳过更新 {previous} 的快照：{error}"),
+                    format!(
+                        "跳过更新 {previous} 的快照：客户端当前登录态不完整（缺服务端数据）——\
+                         写进去会把坏状态灌回槽位，之后切到该账号会恢复出未登录"
+                    ),
                 ),
-            ),
+            );
+        } else {
+            match ensure_save_target_matches_client(variant, previous) {
+                Err(error) => emit(
+                    &mut outcome,
+                    SwitchStep::new(
+                        "backup-current",
+                        "skip",
+                        format!("跳过更新 {previous} 的快照：{error}"),
+                    ),
+                ),
             Ok(()) => match backup_to_slot_for(variant, previous) {
                 Ok(count) => emit(
                     &mut outcome,
@@ -1566,6 +1635,7 @@ where
                     ),
                 ),
             },
+            }
         }
     }
 
@@ -2773,6 +2843,44 @@ mod tests {
         // 预检查失败 → 直接 fatal，不进入停止/恢复流程
         assert_eq!(stages.first().copied(), Some("fatal"));
         assert!(!stages.contains(&"stop"));
+    }
+
+    /// ★ 「客户端当前登录态是否完整」必须认**服务端下发的那份缓存**在不在。
+    ///
+    /// 反例（改坏会红）：把判据改成「只看 `cloudide` 在不在」⇒ 被写坏的那份
+    /// （有 `cloudide`、**没有** `iCubeServerData`）会被判成完整，于是它被写回槽位，
+    /// 用户切到该账号又变成未登录 —— 这正是 2026-09-29 的第二次报障。
+    #[test]
+    fn client_state_completeness_requires_the_server_data_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-state-complete-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(dir.join("User").join("globalStorage")).expect("建临时 userData");
+        let storage = icube::storage_path_in_dir(&dir);
+
+        // ① 完整：两个键都在（真机 9 键状态的必要项）。
+        std::fs::write(
+            &storage,
+            r#"{"iCubeAuthInfo://icube.cloudide":"x","iCubeServerData://icube.cloudide":"{}"}"#,
+        )
+        .expect("铺完整态");
+        assert!(client_state_looks_complete(&dir), "两个键都在必须判为完整");
+
+        // ② 被写坏的：只有 `cloudide` —— 复刻 2026-09-29 那份 7 键状态。
+        std::fs::write(&storage, r#"{"iCubeAuthInfo://icube.cloudide":"x"}"#).expect("铺坏态");
+        assert!(
+            !client_state_looks_complete(&dir),
+            "缺服务端数据必须判为**不完整**（否则坏状态会被回灌进槽位）"
+        );
+
+        // ③ 读不到 / 不是 JSON ⇒ 一律不完整（宁可少写一次槽位，也不要把坏状态灌进去）。
+        std::fs::remove_file(&storage).expect("删 storage");
+        assert!(!client_state_looks_complete(&dir));
+        std::fs::write(&storage, "not json").expect("铺非 JSON");
+        assert!(!client_state_looks_complete(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ★ 写前留档必须**只增不改**：连续两次留档要得到**两个**文件，内容各自保留。
