@@ -1006,7 +1006,10 @@ pub fn set_current_account_for(variant: TraeVariant, user_id: &str) -> Result<()
 ///
 /// 读不到（没装 / 没启动过 / 没登录 / 信封解不开）一律 `None`，由调用方决定回落 ——
 /// 本函数**不报错**：状态条少一个账号，远好过整页报错。
-fn client_login_uid_for(variant: TraeVariant) -> Option<String> {
+///
+/// `pub(crate)`：模型清单（[`super::model_list`]）也要用「客户端此刻登录的 uid」
+/// 来在多份缓存之间选对那一份，且必须与它读取的目录**同源**。
+pub(crate) fn client_login_uid_for(variant: TraeVariant) -> Option<String> {
     client_login_uid_in(&icube::login_state_dir_for(variant)?, variant)
 }
 

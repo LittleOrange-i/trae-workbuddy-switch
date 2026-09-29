@@ -56,6 +56,7 @@ import type {
   TraeCapabilities,
   TraeCheckinReport,
   TraeCheckinStatus,
+  TraeClientModelList,
   TraeCreditsOverview,
   TraeDeviceResetReport,
   TraeEnvStatus,
@@ -104,7 +105,8 @@ const DEMO_READ_COMMANDS = new Set([
   "get_trae_checkin_status",
   "get_trae_credits", "get_trae_token_statistics", "get_trae_logs", "get_trae_profiles",
   "get_trae_settings", "get_trae_gateway_config", "trae_gateway_status",
-  "get_trae_gateway_models", "list_trae_api_keys", "get_trae_gateway_logs",
+  "get_trae_gateway_models", "get_trae_client_models", "list_trae_api_keys",
+  "get_trae_gateway_logs",
 ]);
 
 export function isDemoMode(): boolean {
@@ -245,6 +247,8 @@ const ROUTES: Record<string, Route> = {
   save_trae_gateway_config: { method: "POST", path: "/api/trae/gateway/config" },
   trae_gateway_status: { method: "GET", path: "/api/trae/gateway/status" },
   get_trae_gateway_models: { method: "GET", path: "/api/trae/gateway/models" },
+  // 客户端（上游下发）的模型清单：读客户端 state.vscdb 的缓存，随客户端刷新而变。
+  get_trae_client_models: { method: "GET", path: "/api/trae/gateway/client-models" },
   // 多 Key 管理（含归属产品线）：GET 列表 / POST 创建同一路径。
   list_trae_api_keys: { method: "GET", path: "/api/trae/gateway/keys" },
   create_trae_api_key: { method: "POST", path: "/api/trae/gateway/keys" },
@@ -1452,9 +1456,30 @@ export function getTraeGatewayStatus(variant?: TraeVariantId | null): Promise<un
   return call("trae_gateway_status", variantArgs(variant));
 }
 
-/** 对外暴露的模型清单（OpenAI `/v1/models` 形状）。 */
-export function getTraeGatewayModels(): Promise<unknown> {
-  return call("get_trae_gateway_models");
+/**
+ * 网关对外暴露的模型清单（OpenAI `/v1/models` 形状，**随上游刷新**）。
+ *
+ * 与 `getTraeClientModels` **同源**（都读客户端 `state.vscdb` 里的上游清单），
+ * 区别只在形状：这里是扁平去重后的清单 —— 即外部客户端连本网关时看到的那份。
+ * 客户端清单读不到时后端回落静态兜底清单，因此**不会为空**。
+ */
+export function getTraeGatewayModels(variant?: TraeVariantId | null): Promise<unknown> {
+  return call("get_trae_gateway_models", variantArgs(variant));
+}
+
+/**
+ * 客户端（**上游下发**）的模型清单 —— 「随上游刷新」的数据源。
+ *
+ * 读的是 Trae 客户端 `state.vscdb` 里上游下发的清单缓存，因此客户端刷新过之后
+ * 这里读到的就是新清单。`variant` 决定读哪条产品线的客户端；缺省 = 默认变体。
+ *
+ * 读不到（客户端没启动过 / 没登录 / 还没拉过清单）不是错误：
+ * 返回 `source = "missing"` 与可读的 `note`，由界面呈现空态。
+ */
+export function getTraeClientModels(
+  variant?: TraeVariantId | null,
+): Promise<TraeClientModelList> {
+  return call("get_trae_client_models", variantArgs(variant));
 }
 
 /** 多 Key 列表（含归属产品线；不含 hash 与明文）。 */
