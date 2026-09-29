@@ -52,7 +52,14 @@ export function TraeModelList({
   const t = useT();
 
   const groups = data?.groups ?? [];
-  const total = groups.reduce((sum, group) => sum + group.models.length, 0);
+  /**
+   * 摘要用**去重后**的数量。
+   *
+   * 同一模型会在多个 function 分组里重复出现（实测 `solo_work_lite` 与
+   * `solo_work_remote` 内容完全相同），直接累加会得到「共 99 个」这种与
+   * 「网关对外 27 个」对不上的数字 —— 用户会以为哪里算错了。
+   */
+  const total = new Set(groups.flatMap((group) => group.models.map((model) => model.name))).size;
   const loaded = data?.source === "client-cache" && total > 0;
 
   return (
