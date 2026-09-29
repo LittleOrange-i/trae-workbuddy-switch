@@ -93,7 +93,9 @@ export const zh = {
 
   // ---- 页脚按钮 ----
   "trae.comp.card.action.saving": "保存中…",
-  "trae.comp.card.action.saveTip": "把客户端此刻的登录态保存到该账号名下（切换时用它恢复）",
+  // ★ 必须说明「会先关客户端」：备份是文件拷贝，客户端运行时 Cookie / leveldb / SQLite WAL
+  //   被独占锁定，此时拷出来的快照是坏的（切过去会变成未登录）。用户得知道客户端会重启一次。
+  "trae.comp.card.action.saveTip": "把客户端此刻的登录态保存到该账号名下（切换时用它恢复）；会先关闭并重新打开客户端",
   // 保存的目标只能是「该账号此刻登录着的那个程序位」—— 一个都没有时后端守卫也会拒绝，
   // 所以就地禁用并说明，别让用户点了再吃一句看不懂的拒绝。
   "trae.comp.card.action.saveNoLogin": "该账号当前没有登录在任何 Trae 客户端上 —— 先在客户端里登录它，再保存",

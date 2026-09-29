@@ -2036,22 +2036,58 @@ pub fn save_current_login(user_id: &str) -> Result<u64, String> {
 /// 保存当前登录态到指定账号槽位（不切换、不重启客户端；按变体分家）。
 ///
 /// 先过 [`ensure_save_target_matches_client`]：客户端登录着谁，就只能存进谁的槽位。
-/// ⚠️ **已知缺口（2026-09-29，对照参考实现发现，尚未修）**：本函数在**客户端仍在运行**时
-/// 就做文件拷贝，而 `Network/Cookies`、`Local Storage/leveldb`、`state.vscdb` 的 WAL
-/// 在客户端运行时被**独占锁定** —— 拷贝会报错，或更糟地拿到**陈旧内容却「看起来成功」**，
-/// 产出一份**坏快照**（恢复后症状：切换后客户端变成未登录）。
+/// ## ★★ 会**先关闭客户端、备份、再重新拉起**（2026-09-29 修正）
 ///
-/// 参考实现的 `SaveCurrentLogin` 是「**先关客户端 → 备份 → 再拉回**」。
-/// 我们要照做，**前置条件是先有「优雅关闭」**（`PostMessageW(WM_CLOSE)` + 等待，
-/// 参考实现的三级关闭策略）—— 否则「保存登录态」会变成一次**强杀**，
-/// 把用户未保存的编辑器状态一起带走。故本函数**暂不调整顺序**，缺口在此留痕。
+/// 备份是**文件拷贝**，而 `Network/Cookies`、`Local Storage/leveldb`、`state.vscdb`
+/// 的 WAL 在客户端运行时被**独占锁定**：拷贝要么报错，要么更糟地拿到**陈旧内容却
+/// 「看起来成功」**—— 产出一份**坏快照**，之后切到该账号就恢复出未登录。
+///
+/// 本函数原先正是「客户端运行时直接拷」，已改为「**先关 → 备份 → 跑过才拉回**」
+/// （与同类实现的 `SaveCurrentLogin` 同序）。关客户端走
+/// [`platform::kill_client_for`] 的**三级策略**（优雅关闭 → 强杀 → 等退出）——
+/// 优雅关闭这一步是这条修正的**前置**：没有它，「保存登录态」就成了一次强杀，
+/// 会把用户未保存的编辑器状态一起带走。
+///
+/// 只在该客户端**本来就在运行**时才重新拉起 —— 不给用户凭空开一个窗口。
 pub fn save_current_login_for(variant: TraeVariant, user_id: &str) -> Result<u64, String> {
     ensure_save_target_matches_client(variant, user_id)?;
-    let count = backup_to_slot_for(variant, user_id)?;
+
+    let was_running = platform::is_running_for(variant);
+    if was_running {
+        platform::kill_client_for(variant)?;
+    }
+
+    let backup = backup_to_slot_for(variant, user_id);
+
+    // 无论备份成败都要把客户端拉回来 —— 否则「保存登录态」失败一次就把用户的 IDE 关了。
+    let restart = if was_running {
+        match platform::detect_install_for(variant).exe {
+            Some(exe) => platform::launch_client_for(variant, &exe, None),
+            None => Err("找不到客户端可执行文件，未能重新启动".to_string()),
+        }
+    } else {
+        Ok(())
+    };
+
+    let count = match backup {
+        Ok(count) => count,
+        Err(error) => {
+            if let Err(restart_error) = restart {
+                store::append_log(
+                    &paths::switcher_log_file_for(variant),
+                    &format!("保存登录态失败后重新启动客户端也失败: {restart_error}"),
+                );
+            }
+            return Err(error);
+        }
+    };
+    // 备份已经成功，此时启动失败要如实报出来（否则用户以为客户端还开着）。
+    restart?;
+
     let _ = set_current_account_for(variant, user_id);
     store::append_log(
         &paths::switcher_log_file_for(variant),
-        &format!("保存登录态: user={user_id} 文件数={count}"),
+        &format!("保存登录态: user={user_id} 文件数={count}（已先关闭客户端再备份）"),
     );
     Ok(count)
 }

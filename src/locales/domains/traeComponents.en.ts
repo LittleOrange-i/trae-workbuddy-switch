@@ -84,7 +84,7 @@ export const en = {
 
   // ---- Footer buttons ----
   "trae.comp.card.action.saving": "Saving…",
-  "trae.comp.card.action.saveTip": "Save the client's current login state under this account (used to restore when switching)",
+  "trae.comp.card.action.saveTip": "Save the client's current login state under this account (used to restore when switching); the client will be closed and reopened first",
   "trae.comp.card.action.saveNoLogin": "This account is not signed in on any Trae client — sign in on the client first, then save",
   "trae.comp.card.action.refreshing": "Refreshing…",
   "trae.comp.card.action.refreshJwtTip": "Exchange the refresh token for a new JWT",
