@@ -1181,6 +1181,13 @@ pub fn kill_client() -> Result<bool, String> {
 
 /// 优雅关闭的等待上限（秒）：超时就进强杀。
 ///
+/// ⚠️ **刻意不带 `#[cfg(windows)]`**：它们与 [`wait_until_gone`] 在
+/// `kill_client_for` 的**两个**分支里都被用到。
+///
+/// 反面教材（2026-09-29 CI 实测）：最初只给 Windows 分支加了这个等待，常量在非 Windows
+/// 构建里就成了「未使用的常量」⇒ linux/macOS 四个 job 全红、只有 win-x64 绿、**Release 发不出来**。
+/// 让两个分支共用同一套助手，比靠 `#[cfg]` 去门更稳 —— 后者漏一处就整批构建失败。
+///
 /// 3 秒是实测的折中 —— Electron 客户端收到 `WM_CLOSE` 后要把 leveldb / SQLite 落盘，
 /// 大一点的 userData 需要 1~2 秒；再长会让「切换」看起来卡住。
 const GRACEFUL_CLOSE_WAIT_SECS: u64 = 3;
@@ -1277,18 +1284,30 @@ pub fn kill_client_for(variant: super::variant::TraeVariant) -> Result<bool, Str
     }
     #[cfg(not(windows))]
     {
+        // 与 Windows 分支**逐级对称**（SIGTERM ≈ WM_CLOSE）—— 顺带让两个等待常量在
+        // 三平台上都被用到，不必靠 `#[cfg]` 去门（漏门会让非 Windows 构建因
+        // 「未使用的常量」直接失败，2026-09-29 CI 实测过）。
+        // 一级：优雅关闭（`pkill` 不带信号 = SIGTERM）。
+        for name in exe_names_for(variant) {
+            let _ = hidden_command("pkill").args(["-x", name]).output();
+        }
+        if wait_until_gone(variant, GRACEFUL_CLOSE_WAIT_SECS) {
+            return Ok(true);
+        }
+
+        // 二级：强杀。
         let mut killed = false;
         for name in exe_names_for(variant) {
             let output = hidden_command("pkill")
-                .args(["-x", name])
+                .args(["-KILL", "-x", name])
                 .output()
                 .map_err(|e| format!("结束客户端进程失败: {e}"))?;
             if output.status.success() {
                 killed = true;
             }
         }
-        // 给进程一点退出时间，避免紧接着的启动被单实例锁拒绝。
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        // 三级：等进程完全退出（避免紧接着的启动被单实例锁拒）。
+        let _ = wait_until_gone(variant, FORCE_EXIT_WAIT_SECS);
         if killed || !is_running_for(variant) {
             Ok(true)
         } else {

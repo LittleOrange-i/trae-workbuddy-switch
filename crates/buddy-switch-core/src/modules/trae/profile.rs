@@ -2052,6 +2052,18 @@ pub fn save_current_login(user_id: &str) -> Result<u64, String> {
 pub fn save_current_login_for(variant: TraeVariant, user_id: &str) -> Result<u64, String> {
     ensure_save_target_matches_client(variant, user_id)?;
 
+    // ★★ 先确认「确实有东西可备份」，**再**决定要不要关客户端（2026-09-29 修正）。
+    //
+    // 源目录不存在时**直接返回 `backup_to_slot_for` 的报错、完全不碰客户端**：
+    // ① 保留守卫「源目录不存在 ⇒ 放行、报错交给下游」的既定语义
+    //    （见 `save_guard_fails_open_only_when_the_source_dir_is_absent`）；
+    // ② 更要紧的是——**没有东西可备份却先把用户的客户端关了**，是纯粹的破坏：
+    //    实测踩到过（既有用例走这条路径时，把用户正在用的 Trae 关掉，并因为随后
+    //    反复查进程而把测试挂住 12 分钟）。
+    if snapshot_data_dir_for(variant).filter(|dir| dir.is_dir()).is_none() {
+        return backup_to_slot_for(variant, user_id);
+    }
+
     let was_running = platform::is_running_for(variant);
     if was_running {
         platform::kill_client_for(variant)?;
