@@ -269,8 +269,11 @@ pub fn detect_install_for(variant: super::variant::TraeVariant) -> InstallProbe 
 pub fn data_dir_missing_reason(variant: super::variant::TraeVariant) -> String {
     let line = variant.display_name();
     match detect_install_for(variant).exe {
+        // ⚠️ 本函数产出的是**用户直接看见的文案**（toast 描述 / 错误行），不是 Markdown：
+        // 任何 `**粗体**` 都会**逐字**显示成星号（2026-09-29 在 Trae 切换失败的 toast 上
+        // 实测到「但它**从未启动过**」）。要强调就换用「」这类真正会渲染的标点。
         Some(exe) => format!(
-            "已检测到【{line}】客户端（{}），但它**从未启动过** —— 设备凭证是客户端\
+            "已检测到【{line}】客户端（{}），但它从未启动过 —— 设备凭证是客户端\
              首次启动时才写入的，所以现在还读不到。请先启动一次该客户端，\
              等它起来后再重试。",
             exe.display()

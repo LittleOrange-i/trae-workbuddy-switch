@@ -1340,15 +1340,29 @@ export function traeMergeLegacyRegions(): Promise<TraeLegacyMergeReport> {
  * （`api_trae_switch` 里 `body.get("options").unwrap_or(body)`）能容忍平铺。
  * 与 `traeCheckin` 同形；`scripts/check-api-contract.cjs` 的「单 Value 参数」规则
  * 会守住这条不变式。
+ *
+ * ## ★ 失败必须**抛错**，不能把 `success:false` 当正常返回值交出去
+ *
+ * 后端 `switch_account` 的失败是**正常返回**一份带 `steps` 的报告（`success:false`），
+ * 不是传输错误。于是「Promise resolve 了」与「切换成功了」被混为一谈：页面在 resolve
+ * 之后无条件弹「{label}完成」，用户在绿勾里看到的是**一句谎话**。
+ *
+ * 真机现场（2026-09-29 报障「切换成功但程序没打开、标记也没变」）：TraeCode 的目标
+ * 账号没有登录态快照，后端在预检查就 return，`success:false` +「目标快照不存在」，
+ * 而界面弹的是「切换TraeCode账号完成」—— 客户端当然没启动，当前账号标记当然没变。
+ *
+ * 所以在此收口，对齐 WorkBuddy 侧 `switch_account`（走 `Result`：失败即 `Err`，
+ * 前端 `catch` 报错、`toast.success` 只在成功路径上）。**本函数是 Trae 侧唯一入口**，
+ * 在这里判一次，未来新增调用点自动被覆盖，不必指望每个页面都记得看 `success`。
  */
-export function traeSwitchAccount(options: {
+export async function traeSwitchAccount(options: {
   userId: string;
   launch?: boolean;
   proxyPort?: number | null;
   resetDevice?: boolean;
   variant?: TraeVariantId | null;
 }): Promise<TraeSwitchOutcome> {
-  return call("trae_switch_account", {
+  const outcome = await call<TraeSwitchOutcome>("trae_switch_account", {
     options: {
       userId: options.userId,
       launch: options.launch ?? true,
@@ -1357,6 +1371,15 @@ export function traeSwitchAccount(options: {
       variant: options.variant ?? null,
     },
   });
+  if (!outcome?.success) {
+    // 优先用后端给的 `error`（预检查失败时它已是可操作的一整句），
+    // 退一步取最后一步的说明，两者都缺才用通用兜底。
+    const last = outcome?.steps?.[outcome.steps.length - 1];
+    throw new Error(
+      outcome?.error ?? last?.message ?? t("trae.page.accounts.switchIncomplete"),
+    );
+  }
+  return outcome;
 }
 
 /** 保存当前登录态到指定账号槽位。 */

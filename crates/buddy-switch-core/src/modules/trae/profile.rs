@@ -1349,6 +1349,156 @@ pub fn delete_slot_for(variant: TraeVariant, slot: &str) -> Result<(), String> {
     std::fs::remove_dir_all(&dir).map_err(|e| format!("删除快照失败: {e}"))
 }
 
+/// 预检查失败（目标快照不存在）时的**可操作**原因。
+///
+/// ## 为什么必须分两支（2026-09-29 用户报障现场）
+///
+/// 「快照不存在」有**两种成因**，下一步动作完全不同，一句话盖不住：
+///
+/// | 成因 | 事实 | 用户该做什么 |
+/// |:---|:---|:---|
+/// | 客户端数据目录在，只是这个账号没存过 | `profiles*/<uid>` 缺失 | 去点「保存登录态」 |
+/// | 客户端数据目录**不在**（多半是从没启动过） | `%APPDATA%\<客户端>` 缺失 | **保存也做不到**，得先启动客户端并登录 |
+///
+/// 第二支若仍说「请先保存该账号的登录态」，就是个**死循环** —— 用户照着做，
+/// 得到的下一句是「未找到 Trae 客户端数据目录」，永远切不成功。报障原文即：
+/// 「切换成功（提示）但程序没打开、标记也没变」。
+///
+/// ## 判据必须由调用方从**写侧唯一取值点**算出来
+///
+/// `can_save` 只能由 [`snapshot_data_dir_for`]（**写侧**来源，与 [`backup_to_slot_for`]
+/// 的源、[`switch_account`] step 6 的恢复目标**同一个函数**）加 `is_dir()` 得出。
+/// **不得**用 [`platform::select_data_dir_for`]（读 / 展示侧、按活跃度）：它在
+/// 「一个变体多个候选目录」的机器上会给出另一个目录，把「能保存」误判成「不能保存」
+/// —— 那是同一类错误的镜像（见 `ensure_save_target_matches_client` 的 P0 记录）。
+///
+/// ## 第二支复用 [`platform::data_dir_missing_reason`]，不另拼一套说法
+///
+/// 那个函数已经在「导入 / OAuth 前置」两条路径上回答「为什么读不到数据目录」，
+/// 且能区分「装了但从未启动」与「真的没装」。这里再写一句，迟早出现
+/// 「一处说没装、另一处说没启动」的自相矛盾。
+fn missing_snapshot_reason(variant: TraeVariant, target: &str, can_save: bool) -> String {
+    if can_save {
+        format!("账号 {target} 的登录态快照不存在，请先保存该账号的登录态")
+    } else {
+        format!(
+            "账号 {target} 的登录态快照不存在，且现在也无法保存 —— {}",
+            platform::data_dir_missing_reason(variant)
+        )
+    }
+}
+
+/// 区域码的**实测**来源：只有国内版有真机样本。
+///
+/// 返回 `(userRegion 码, usertag 码)`：真机 `userRegion` 是 `"CN"`（大写）、
+/// `usertag` 的值是 `"cn"`（小写），两者**不是**同一个写法。
+///
+/// 国际版没有样本 ⇒ 返回 `None`，调用方**两个键都不写**。
+/// 编一个 `"sg"` 看起来无害，但客户端会拿它去连错的域 —— 那正是本项目
+/// 在「区域分家」上记过的事故形态（详见 `region-and-variant-checklist`）。
+fn region_codes(variant: TraeVariant) -> Option<(&'static str, &'static str)> {
+    (variant.region() == crate::modules::trae::region::TraeRegion::Cn).then_some(("CN", "cn"))
+}
+
+/// 「账号库 → 客户端」：把该账号的凭据**直接写进客户端**的登录态。
+///
+/// ## 为什么需要它（与 WorkBuddy 的切换对齐）
+///
+/// WorkBuddy 的「切换账号」是**写认证文件**：账号库里有什么就写什么，点一下即生效。
+/// Trae 侧此前只有「快照 → 客户端」，于是必须先「在客户端里登录一次、再保存登录态」——
+/// 那一步对**从未启动过的客户端**（本机 CN TraeCode 就是）根本做不到，切换成了死路。
+/// 本函数补上「账号库 → 客户端」这一向，让两条分区的交互形状一致。
+///
+/// ## 写什么 / 不写什么（**宁缺勿造**）
+///
+/// - 写：`iCubeAuthInfo://icube.cloudide`（由 [`icube::build_cloudide_envelope`] 合成）
+///   与 `iCubeAuthInfo://usertag` 里**本账号那一条**；
+/// - **不碰** `iCubeAuthInfo://icube-dc:*` —— 设备凭证按设计由客户端自己写
+///   （自造值会被上游按 20403/20405 拒，见 `device.rs` 的红线）；
+/// - **不写** `iCubeServerData://icube.cloudide` —— 那是服务端下发的账号数据缓存，我们造不出来。
+///
+/// ## ⚠️ 未验证的部分（写在这里，别让它悄悄消失）
+///
+/// 真机 `cloudide` 明文里有两项是**服务端下发**、账号库里没有：`account` 富对象
+/// （邮箱 / 头像 / 手机号 / 区域…，这里只写 `username`）与 `iCubeServerData` 缓存。
+/// **真实客户端是否接受这份「部分登录态」尚未实测**（判定配方见
+/// `docs/trae-login-materialize-probe-2026-09-29.md`）。失败是**可恢复**的：
+/// 切换流程在写之前已把当前登录态备份到 `last` 槽位，`restore` 回去即可。
+///
+/// ## 前置
+///
+/// 调用方必须**已经关掉客户端**（切换流程天然满足）—— 客户端运行时会整体回写
+/// `storage.json`，写进去的东西会被它静默覆盖。
+pub fn materialize_login_in_dir(
+    dir: &Path,
+    variant: TraeVariant,
+    user_id: &str,
+) -> Result<(), String> {
+    if !paths::safe_slot_name(user_id) {
+        return Err(format!("非法的账号 ID: {user_id}"));
+    }
+    let accounts = account::load_accounts_for(variant);
+    let raw = accounts
+        .accounts
+        .iter()
+        .find(|item| item.user_id.as_deref() == Some(user_id))
+        .ok_or_else(|| format!("账号库里没有 {user_id}，无法写入客户端"))?;
+
+    // 真机 `token` 是**裸** JWT（不带 `Cloud-IDE-JWT ` 前缀），账号库里带前缀。
+    let bare = jwt::normalize(&raw.jwt);
+    if bare.is_empty() {
+        return Err(format!("账号 {user_id} 没有 JWT，无法写入客户端"));
+    }
+    let refresh = raw.refresh_token.clone().unwrap_or_default();
+    if refresh.trim().is_empty() {
+        // `refreshToken` 是我们**自己读侧的必填键**（`cloudide_from_plain` 缺它就报 KeyMissing）
+        // ⇒ 缺了写进去等于写一份自己都校验不过的登录态。响亮失败，不静默降级。
+        return Err(format!(
+            "账号 {user_id} 没有 refresh token，无法写入客户端（请先用「OAuth 网页登录」重新授权）"
+        ));
+    }
+
+    let codes = region_codes(variant);
+    let envelope = icube::build_cloudide_envelope(
+        variant,
+        user_id,
+        bare,
+        refresh.trim(),
+        jwt::parse(bare).exp_timestamp,
+        &raw.name,
+        codes.map(|(user_region, _)| user_region),
+    );
+
+    let mut object =
+        icube::read_storage_object_in_dir(dir).map_err(|e| e.user_message(variant))?;
+    object.insert(icube::CLOUDIDE_KEY.to_string(), Value::String(envelope));
+    if let Some((_, tag_code)) = codes {
+        // usertag 是**整机共享**的一张表（实测 `{"<uid>":"cn"}`）⇒ 读旧的、只改自己那一条，
+        // 整体覆盖会抹掉同机其它账号的标签。
+        let merged = icube::merge_usertag_plain(
+            icube::usertag_plain_in_dir(dir).as_deref(),
+            user_id,
+            tag_code,
+        );
+        object.insert(
+            icube::USERTAG_KEY.to_string(),
+            Value::String(icube::tc_encrypt(&merged)),
+        );
+    }
+    icube::write_storage_object_in_dir(dir, &object).map_err(|e| e.user_message(variant))?;
+
+    // ★ 写完立刻**读回来**：与恢复路径同一套复核口径，证明落盘的东西确实是「这个账号」，
+    //   而不是一份写坏的信封（`cloudide_from_plain` 缺必填键会直接报错）。
+    let written =
+        icube::cloudide_auth_info_from_dir(dir, variant).map_err(|e| e.user_message(variant))?;
+    match written.user_id.as_deref() {
+        Some(uid) if uid == user_id => Ok(()),
+        other => Err(format!(
+            "写入客户端后复核失败：期望账号 {user_id}，读回来是 {other:?}"
+        )),
+    }
+}
+
 /// 执行一次完整的账号切换。
 ///
 /// 流程（顺序不可调整，见模块头注释）：
@@ -1373,26 +1523,42 @@ where
         return outcome;
     }
 
-    // 1. 预检查：目标快照必须存在，否则后面的「关闭客户端」会造成一个无法恢复的中间态。
-    let target_slot = match paths::profile_dir_for(variant, &target) {
-        Some(dir) if dir.is_dir() => dir,
-        _ => {
-            emit(
-                &mut outcome,
-                SwitchStep::new(
-                    "fatal",
-                    "fail",
-                    format!("账号 {target} 的登录态快照不存在，请先保存该账号的登录态"),
-                ),
-            );
-            outcome.error = Some("目标快照不存在".into());
-            return outcome;
-        }
-    };
-    let _ = target_slot;
+    // 1. 预检查：决定这次走**哪条路**——「恢复已存快照」还是「账号库直接写客户端」。
+    //
+    // 两条路的**前置条件不同**，且失败原因要分两支（见 [`missing_snapshot_reason`]）：
+    // - 有目标快照 ⇒ 恢复（既有行为，最稳）；
+    // - 没快照、但客户端数据目录在、且账号库里有这个账号的凭据 ⇒ **直接写客户端**
+    //   （`materialize_login_in_dir`）—— 与 WorkBuddy 的「切换＝写认证文件」同形，
+    //   用户不必再走「先在客户端登录一次、再保存登录态」那套仪式。
+    //
+    // 判据与 step 6 的写入目标**同源**（同一个 `snapshot_data_dir_for` + `is_dir`）。
+    let has_snapshot = paths::profile_dir_for(variant, &target)
+        .filter(|dir| dir.is_dir())
+        .is_some();
+    let client_dir = snapshot_data_dir_for(variant).filter(|dir| dir.is_dir());
+    let materialize = !has_snapshot
+        && client_dir.is_some()
+        && account::load_accounts_for(variant)
+            .accounts
+            .iter()
+            .any(|item| item.user_id.as_deref() == Some(target.as_str()));
+    if !has_snapshot && !materialize {
+        let message = missing_snapshot_reason(variant, &target, client_dir.is_some());
+        emit(&mut outcome, SwitchStep::new("fatal", "fail", message.clone()));
+        outcome.error = Some(message);
+        return outcome;
+    }
     emit(
         &mut outcome,
-        SwitchStep::new("precheck", "ok", "目标账号快照已就绪"),
+        SwitchStep::new(
+            "precheck",
+            "ok",
+            if materialize {
+                "目标账号没有快照，将用账号库里的凭据直接写入客户端"
+            } else {
+                "目标账号快照已就绪"
+            },
+        ),
     );
 
     // 2. 保存当前登录态到 last 槽位（强制，可回滚兜底）。
@@ -1523,15 +1689,40 @@ where
             return outcome;
         }
     };
-    match restore_from_slot_in_dir(&restore_dir, variant, &target) {
+    // 6. 写入目标账号的登录态 —— 两条路共用同一个 `restore_dir`：
+    //    · 有快照 ⇒ 恢复快照（既有行为）；
+    //    · 没快照 ⇒ 用账号库里的凭据**直接写客户端**（`materialize_login_in_dir`）。
+    //    两条路的**写入目标与复核目标都是这个值**（构造同源，见上方注释）。
+    let write_result = if materialize {
+        materialize_login_in_dir(&restore_dir, variant, &target).map(|()| None)
+    } else {
+        restore_from_slot_in_dir(&restore_dir, variant, &target).map(Some)
+    };
+    match write_result {
         Ok(count) => emit(
             &mut outcome,
-            SwitchStep::new("restore", "ok", format!("已恢复 {target} 的登录态（{count} 个文件）")),
+            SwitchStep::new(
+                if materialize { "materialize" } else { "restore" },
+                "ok",
+                match count {
+                    Some(count) => format!("已恢复 {target} 的登录态（{count} 个文件）"),
+                    None => format!(
+                        "已用账号库凭据把 {target} 直接写入客户端（无快照；设备凭证保持客户端自己的）"
+                    ),
+                },
+            ),
         ),
         Err(error) => {
             emit(
                 &mut outcome,
-                SwitchStep::new("fatal", "fail", format!("恢复失败: {error}")),
+                SwitchStep::new(
+                    "fatal",
+                    "fail",
+                    format!(
+                        "{}失败: {error}",
+                        if materialize { "写入客户端" } else { "恢复" }
+                    ),
+                ),
             );
             outcome.error = Some(error);
             return outcome;
@@ -2626,11 +2817,183 @@ mod tests {
         };
         let outcome = switch_account(&options, |_| {});
         assert!(!outcome.success);
-        assert_eq!(outcome.error.as_deref(), Some("目标快照不存在"));
+        // 文案本身由 `missing_snapshot_reason_distinguishes_cannot_save_from_not_saved`
+        // 分两支钉住（这里取哪一支取决于**本机有没有该变体的客户端数据目录**，
+        // 断言具体措辞会让本用例在换台机器后假失败）。本用例只管三件事：
+        // 失败原因**点明是哪个账号**、直接 fatal、**不碰客户端**。
+        let error = outcome.error.expect("失败必须给出原因");
+        assert!(
+            error.contains("definitely_no_such_account_slot"),
+            "失败原因必须点明是哪个账号（否则用户无从下手）: {error}"
+        );
         let stages: Vec<&str> = outcome.steps.iter().map(|s| s.stage).collect();
         // 预检查失败 → 直接 fatal，不进入停止/恢复流程
         assert_eq!(stages.first().copied(), Some("fatal"));
         assert!(!stages.contains(&"stop"));
+    }
+
+    /// ★ 「账号库 → 客户端」的写入必须**能被自己读回来**，且 `usertag` 不能抹掉别人的条目。
+    ///
+    /// 反例（改坏会红）：
+    /// - 写进去的信封键名/必填字段错（如漏 `refreshToken`）⇒ `cloudide_from_plain` 报 KeyMissing，
+    ///   第一条断言红；
+    /// - `usertag` 整体覆盖而不是合并 ⇒ 第二条断言里「别人的条目」消失。
+    #[test]
+    fn materialize_login_writes_a_readable_state_and_keeps_other_usertags() {
+        use crate::modules::trae::account::{AccountsFile, RawAccount};
+
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-materialize-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        // 客户端 userData 由**显式入参**给，不走 `%APPDATA%` 探测 —— 测试不碰真机目录。
+        let client = home.join("TRAE SOLO CN");
+        std::fs::create_dir_all(client.join("User").join("globalStorage")).expect("建临时 userData");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&home);
+
+        let mut accounts = AccountsFile::default();
+        accounts.accounts.push(RawAccount {
+            name: "测试账号".into(),
+            user_id: Some("1189017012674171".into()),
+            // 带前缀（账号库的真实形态），写入时必须剥成裸 JWT。
+            jwt: "Cloud-IDE-JWT aaa.bbb.ccc".into(),
+            refresh_token: Some("rt-abc".into()),
+            added_at: None,
+            updated_at: None,
+        });
+        account::save_accounts_for(TraeVariant::TraeWork, &accounts).expect("写账号库");
+
+        // 客户端已有**别人的** usertag（整机共享表）。
+        let mut object = serde_json::Map::new();
+        object.insert(
+            icube::USERTAG_KEY.to_string(),
+            Value::String(icube::tc_encrypt(r#"{"3604620555324748":"cn"}"#)),
+        );
+        std::fs::write(
+            icube::storage_path_in_dir(&client),
+            Value::Object(object).to_string(),
+        )
+        .expect("铺初始 storage.json");
+
+        materialize_login_in_dir(&client, TraeVariant::TraeWork, "1189017012674171").expect("写入应成功");
+
+        let read = icube::cloudide_auth_info_from_dir(&client, TraeVariant::TraeWork)
+            .expect("写完必须能被自己的读侧解出来");
+        assert_eq!(read.user_id.as_deref(), Some("1189017012674171"));
+        assert_eq!(read.refresh_token, "rt-abc");
+        assert_eq!(read.token, "aaa.bbb.ccc", "写进去的必须是**裸** JWT（无前缀）");
+        assert_eq!(read.host, "https://api.trae.cn", "host 必须取该变体的实测端点");
+
+        let usertag = icube::usertag_plain_in_dir(&client).expect("usertag 应可解");
+        let parsed: Value = serde_json::from_str(&usertag).expect("usertag 是 JSON");
+        assert_eq!(
+            parsed.get("3604620555324748").and_then(Value::as_str),
+            Some("cn"),
+            "别人的 usertag 条目不得被覆盖掉: {usertag}"
+        );
+        assert_eq!(
+            parsed.get("1189017012674171").and_then(Value::as_str),
+            Some("cn")
+        );
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// ★ 缺 `refresh_token` 时必须**响亮失败**：写一份自己都校验不过的登录态比不写更坏。
+    #[test]
+    fn materialize_login_refuses_when_refresh_token_is_missing() {
+        use crate::modules::trae::account::{AccountsFile, RawAccount};
+
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-materialize-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let client = home.join("TRAE SOLO CN");
+        std::fs::create_dir_all(client.join("User").join("globalStorage")).expect("建临时 userData");
+        std::fs::write(icube::storage_path_in_dir(&client), "{}").expect("铺空 storage.json");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&home);
+
+        let mut accounts = AccountsFile::default();
+        accounts.accounts.push(RawAccount {
+            name: "无刷新令牌".into(),
+            user_id: Some("u-no-refresh".into()),
+            jwt: "Cloud-IDE-JWT aaa.bbb.ccc".into(),
+            refresh_token: None,
+            added_at: None,
+            updated_at: None,
+        });
+        account::save_accounts_for(TraeVariant::TraeWork, &accounts).expect("写账号库");
+
+        let error = materialize_login_in_dir(&client, TraeVariant::TraeWork, "u-no-refresh")
+            .expect_err("缺 refresh token 必须失败");
+        assert!(error.contains("refresh token"), "{error}");
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `usertag` 合并是**纯函数**：旧表要保留，新账号要写入，空表也能从零建。
+    #[test]
+    fn merge_usertag_plain_keeps_existing_entries() {
+        let merged = icube::merge_usertag_plain(Some(r#"{"a":"cn"}"#), "b", "cn");
+        let parsed: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(parsed.get("a").and_then(Value::as_str), Some("cn"));
+        assert_eq!(parsed.get("b").and_then(Value::as_str), Some("cn"));
+
+        // 旧表不存在 / 是坏 JSON 时不得 panic，从零建。
+        for existing in [None, Some("not json")] {
+            let merged = icube::merge_usertag_plain(existing, "c", "cn");
+            let parsed: Value = serde_json::from_str(&merged).unwrap();
+            assert_eq!(parsed.get("c").and_then(Value::as_str), Some("cn"));
+        }
+
+        // 同 uid 再写一次必须**覆盖**（换区域时不能留旧值）。
+        let merged = icube::merge_usertag_plain(Some(r#"{"b":"cn"}"#), "b", "sg");
+        let parsed: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(parsed.get("b").and_then(Value::as_str), Some("sg"));
+    }
+
+    /// ★ 预检查失败的两支文案：**有数据目录** ⇒ 让用户去保存；**没有** ⇒ 必须解释为什么存不了。
+    ///
+    /// 反例（改坏会红）：两支合并回一句「请先保存该账号的登录态」—— 那在「客户端装了
+    /// 但从没启动过」的机器上是**死循环**（保存同样做不到），正是 2026-09-29 的报障现场：
+    /// 用户看到「切换TraeCode账号完成」，而真机后端其实返回 `success:false`。
+    ///
+    /// 判据 `can_save` 是显式入参，因此**两支都能在本机被跑到**（不受本机装没装影响），
+    /// 不会退化成「只有一支恒真的空护栏」。
+    #[test]
+    fn missing_snapshot_reason_distinguishes_cannot_save_from_not_saved() {
+        // 第二支会经 `platform::data_dir_missing_reason` → `detect_install_for` → `settings::load()`
+        // 读 `store_dir()`，必须持 env 锁（见验证纪律「无参全局路径函数」一条）。
+        let _lock = crate::modules::config::env_lock();
+        let variant = TraeVariant::default();
+        let target = "u-target";
+
+        let saved_able = missing_snapshot_reason(variant, target, true);
+        assert!(saved_able.contains(target), "{saved_able}");
+        assert!(
+            saved_able.contains("请先保存该账号的登录态"),
+            "有数据目录 ⇒ 结论就是「去保存」: {saved_able}"
+        );
+        assert!(
+            !saved_able.contains("无法保存"),
+            "有数据目录时不得说存不了: {saved_able}"
+        );
+
+        let cannot_save = missing_snapshot_reason(variant, target, false);
+        assert!(cannot_save.contains(target), "{cannot_save}");
+        assert!(
+            !cannot_save.contains("请先保存该账号的登录态"),
+            "没有数据目录时不得再让用户去保存（那是死循环）: {cannot_save}"
+        );
+        // 复用 `data_dir_missing_reason` 的结论：两处不得各说一套（改坏任一侧即红）。
+        assert!(
+            cannot_save.contains(&platform::data_dir_missing_reason(variant)),
+            "第二支必须逐字复用 data_dir_missing_reason 的结论: {cannot_save}"
+        );
+        // 两支必须**真的不同** —— 否则「分两支」是假的。
+        assert_ne!(saved_able, cannot_save);
     }
 
     #[test]
