@@ -1007,10 +1007,17 @@ pub fn set_current_account_for(variant: TraeVariant, user_id: &str) -> Result<()
 /// 读不到（没装 / 没启动过 / 没登录 / 信封解不开）一律 `None`，由调用方决定回落 ——
 /// 本函数**不报错**：状态条少一个账号，远好过整页报错。
 fn client_login_uid_for(variant: TraeVariant) -> Option<String> {
-    let dir = icube::login_state_dir_for(variant)?;
-    let info = icube::cloudide_auth_info_from_dir(&dir, variant).ok()?;
-    // `userId` 直接取（信封自己写的，比解 JWT 更直接）；缺失时才解 token ——
-    // 与 `icube_login_candidate_from_dir` 的回落链**同序**，两处不要各写一套。
+    client_login_uid_in(&icube::login_state_dir_for(variant)?, variant)
+}
+
+/// 从**指定目录**读客户端此刻实际登录的账号（回落链与 [`client_login_uid_for`] **同序**）。
+///
+/// 存在的理由：`client_login_uid_for` 取的是**最近活跃**目录，而备份 / 恢复用的是
+/// **写侧**目录（`snapshot_data_dir_for`）—— 真机上两者可以是不同目录（本仓踩过多次）。
+/// 凡「读到的账号」要与「将要写的那个目录」配套时，必须用本函数，不能借道活跃目录。
+fn client_login_uid_in(dir: &Path, variant: TraeVariant) -> Option<String> {
+    let info = icube::cloudide_auth_info_from_dir(dir, variant).ok()?;
+    // `userId` 直接取（信封自己写的，比解 JWT 更直接）；缺失时才解 token。
     info.user_id
         .filter(|uid| !uid.is_empty())
         .or_else(|| jwt::user_id_of(&jwt::authorization_header(&info.token)))
@@ -1523,6 +1530,74 @@ fn missing_snapshot_reason(variant: TraeVariant, target: &str, can_save: bool) -
     }
 }
 
+/// 切换失败后的**回滚**：把 `last` 槽（切换前的现场）恢复回客户端，并把客户端拉回来。
+///
+/// ## 为什么必须有
+///
+/// 没有它，一次「恢复动作成功、但恢复进去的内容不对」的切换会把用户**留在坏状态**里
+/// （客户端未登录），而 `last` 槽里明明躺着切换前那份好的。用户看到的就只是
+/// 「切了个寂寞」—— 既没换成，还回不去了。
+///
+/// 同类实现的「恢复后校验回滚」正是这一步，它的注释写得很直白：恢复后 0 项、
+/// 或关键文件缺失 ⇒ 判定快照无效 ⇒ **从 `last` 回滚到切换前状态并重启客户端**，
+/// 再报 fatal 说明原因。
+///
+/// ## 失败不再递归
+///
+/// 回滚本身失败时**只把原因并进报错**，不再尝试第二次回滚 —— 把一个失败变成一串失败
+/// 只会让用户更难判断该做什么。
+///
+/// ## 返回
+///
+/// `(步骤列表, None)` = 回滚成功（或客户端已拉回）；
+/// `(步骤列表, Some(原因))` = 回滚失败，调用方应把它并进 fatal。
+///
+/// 刻意**返回步骤而不是直接 emit**：调用点的 `emit` 闭包已经可变借用了 `on_step`，
+/// 再传一个 `&mut dyn FnMut` 进去会撞两次可变借用。返回步骤让调用方按原样 emit，
+/// 既绕开借用冲突，也保证步骤顺序仍由调用方一处决定。
+fn rollback_after_failed_switch(
+    restore_dir: &Path,
+    variant: TraeVariant,
+    launch: bool,
+) -> (Vec<SwitchStep>, Option<String>) {
+    let mut steps = Vec::new();
+
+    match restore_from_slot_in_dir(restore_dir, variant, LAST_SLOT) {
+        Ok(count) => steps.push(SwitchStep::new(
+            "rollback",
+            "ok",
+            format!("已回滚到切换前的状态（{count} 个文件）"),
+        )),
+        Err(error) => {
+            let message = format!("回滚到切换前状态也失败了: {error}");
+            steps.push(SwitchStep::new("rollback", "fail", message.clone()));
+            return (steps, Some(message));
+        }
+    }
+
+    // 回滚的目的是「当作没切过」⇒ 客户端该是开着的。切换流程在关客户端那一步已经把它
+    // 关了，这里必须拉回来，否则用户会面对一个「没切换成功、客户端还关了」的界面。
+    if launch {
+        match platform::detect_install_for(variant).exe {
+            Some(exe) => {
+                if let Err(error) = platform::launch_client_for(variant, &exe, None) {
+                    steps.push(SwitchStep::new(
+                        "rollback",
+                        "skip",
+                        format!("已回滚，但重新启动客户端失败: {error}"),
+                    ));
+                }
+            }
+            None => steps.push(SwitchStep::new(
+                "rollback",
+                "skip",
+                "已回滚，但找不到客户端可执行文件，未能重新启动",
+            )),
+        }
+    }
+    (steps, None)
+}
+
 /// 执行一次完整的账号切换。
 ///
 /// 流程（**顺序不可调整**，见模块头注释）：
@@ -1637,9 +1712,24 @@ where
     //
     // ★ 但**结构不完整的当前状态不许覆盖 last**：`last` 是回滚兜底，被一份坏状态盖掉
     //   就等于回滚能力一起消失（2026-09-29 实测发生过）。见 [`client_state_looks_complete`]。
-    let previous_account = current_account_for(variant);
-    let current_state_complete = snapshot_data_dir_for(variant)
-        .filter(|dir| dir.is_dir())
+    //
+    // ★★ `previous_account` 取**客户端此刻实际登录的账号**，而不是 `current_account.txt`
+    //    这个标记文件（2026-09-29 修正）。标记文件只在「本程序成功切过/存过」之后才更新，
+    //    而用户完全可能刚在客户端里**手动登录**了另一个账号 —— 此时标记还停在旧值。
+    //
+    //    后果（第 4b 步）：拿旧值当 `previous` ⇒ 守卫发现「客户端登录的是 B、却要写 A 的槽位」
+    //    ⇒ 跳过 ⇒ **B 的快照永远建不出来**。用户于是以为「必须手动点一次保存登录态」，
+    //    而这正是「明明登录过了，却还是要我先存快照」这个抱怨的机制。
+    //    取实测值后：手动登录 B、再切到 A，**B 的快照会被自动补上**。
+    //
+    //    目录取**写侧**（`snapshot_data_dir_for`，与第 4b 步的备份目标同源）——
+    //    不能借道 `client_login_uid_for` 的「最近活跃」目录，那是另一个来源。
+    let client_dir = snapshot_data_dir_for(variant).filter(|dir| dir.is_dir());
+    let previous_account = client_dir
+        .as_deref()
+        .and_then(|dir| client_login_uid_in(dir, variant))
+        .or_else(|| current_account_for(variant));
+    let current_state_complete = client_dir
         .as_deref()
         .map(client_state_looks_complete)
         .unwrap_or(false);
@@ -1779,6 +1869,31 @@ where
     }
 
     match restore_from_slot_in_dir(&restore_dir, variant, &target) {
+        // ★ 0 项恢复 = 快照空或损坏。此时客户端的旧凭据**已经被清过**
+        //   （`restore_from_slot_in_dir` 先跑 `purge_restore_relatives`），继续往下走
+        //   只会把用户留在一个坏状态里 ⇒ 立刻从 `last` 回滚。
+        Ok(0) => {
+            emit(
+                &mut outcome,
+                SwitchStep::new("restore", "fail", "目标快照为空或损坏（0 项恢复）"),
+            );
+            let (steps, rollback_error) = rollback_after_failed_switch(&restore_dir, variant, true);
+            for step in steps {
+                emit(&mut outcome, step);
+            }
+            let message = match rollback_error {
+                None => format!(
+                    "账号 {target} 的快照为空或损坏，已回滚到切换前状态。\
+                     请在 Trae 客户端里登录 {target} 后重新保存该账号的登录态，再切换。"
+                ),
+                Some(reason) => format!(
+                    "账号 {target} 的快照为空或损坏，且{reason}。请在客户端里确认当前登录状态。"
+                ),
+            };
+            emit(&mut outcome, SwitchStep::new("fatal", "fail", message.clone()));
+            outcome.error = Some(message);
+            return outcome;
+        }
         Ok(count) => emit(
             &mut outcome,
             SwitchStep::new("restore", "ok", format!("已恢复 {target} 的登录态（{count} 个文件）")),
@@ -1807,12 +1922,32 @@ where
             SwitchStep::new("verify", "ok", format!("已确认客户端当前登录为 {target}")),
         ),
         RestoreCheck::Mismatch { actual } => {
-            let message = format!(
-                "切换未生效：恢复后客户端实际登录的是 {actual}，而不是目标账号 {target}。\
-                 该槽位的快照可能是在「保存守卫」上线前被写坏的（内容属于另一个账号）。\
-                 请在 Trae 客户端里登录 {target} 后重新保存该账号的登录态，再切换。"
+            // ★ 恢复动作成功、但恢复进去的**内容属于别人** ⇒ 立刻回滚，
+            //   别把用户留在一个「切了但没换人」的坏状态里（`last` 里有切换前那份好的）。
+            emit(
+                &mut outcome,
+                SwitchStep::new(
+                    "verify",
+                    "fail",
+                    format!("恢复后客户端实际登录的是 {actual}，不是目标账号 {target}"),
+                ),
             );
-            emit(&mut outcome, SwitchStep::new("verify", "fail", message.clone()));
+            let (steps, rollback_error) = rollback_after_failed_switch(&restore_dir, variant, true);
+            for step in steps {
+                emit(&mut outcome, step);
+            }
+            let message = match rollback_error {
+                None => format!(
+                    "切换未生效：恢复后客户端实际登录的是 {actual}，而不是目标账号 {target}。\
+                     该槽位的快照可能是在「保存守卫」上线前被写坏的（内容属于另一个账号），\
+                     已回滚到切换前状态。请在 Trae 客户端里登录 {target} 后重新保存该账号的登录态，再切换。"
+                ),
+                Some(reason) => format!(
+                    "切换未生效：恢复后客户端实际登录的是 {actual}，而不是目标账号 {target}，\
+                     且{reason}。请在客户端里确认当前登录状态。"
+                ),
+            };
+            emit(&mut outcome, SwitchStep::new("fatal", "fail", message.clone()));
             outcome.error = Some(message);
             return outcome;
         }
