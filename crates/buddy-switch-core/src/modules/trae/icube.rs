@@ -113,11 +113,6 @@ pub(crate) const ICUBE_DC_PREFIX: &str = "iCubeAuthInfo://icube-dc:";
 /// `pub(crate)` 而非私有：`profile.rs` 的导入诊断要**只看键是否存在**（不解密）
 /// 就能说清「凭据在不在」，共用同一个常量避免两处字面量漂移。
 pub(crate) const CLOUDIDE_KEY: &str = "iCubeAuthInfo://icube.cloudide";
-/// `uid → 区域码` 的**整机共享**小表（实测明文形如 `{"3604620555324748":"cn"}`）。
-///
-/// 写侧（`profile::materialize_login_in_dir`）也要用：换账号时得把新账号并进去，
-/// 否则客户端可能按旧账号的区域去连。
-pub(crate) const USERTAG_KEY: &str = "iCubeAuthInfo://usertag";
 /// 同文件的机器标识（`DeviceInfo.MachineID` 取它）。
 const TELEMETRY_MACHINE_ID: &str = "telemetry.machineId";
 
@@ -324,60 +319,6 @@ pub fn tc_decrypt(b64: &str, mode: TcMode) -> Result<String, IcubeError> {
 /// `#[cfg(test)]` 调用计数：证明两个键走的是**同一条** [`tc_decrypt`]。
 #[cfg(test)]
 static TC_DECRYPT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// `n` 字节随机盐（信封头里的 `random` 段）。
-///
-/// 熵源：`uuid::Uuid::new_v4()`（走 OS CSPRNG），按需拼接 —— 与 [`random_hex`] 同一取舍：
-/// **刻意不引 `rand`**，本仓已有 `uuid`，再加一个随机源只会让依赖树更复杂。
-fn random_bytes(n: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(n + 16);
-    while out.len() < n {
-        out.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
-    }
-    out.truncate(n);
-    out
-}
-
-/// `tc` 信封**加密**（[`tc_decrypt`] 的逆）。
-///
-/// ## 盐必须随机（不要为了「可复现」改成固定值）
-///
-/// 客户端的信封盐每次写入都不同。固定盐有两个实际后果：① 同一账号两次写入产生
-/// **逐字节相同**的密文，是可被识别的指纹；② 「文件到底有没有被改写」无法从字节判断，
-/// 排查时会得出错误结论。测试要确定性时走 `#[cfg(test)]` 的 `seal_envelope`（固定盐）。
-///
-/// ## 与 [`tc_decrypt`] 的对称性由单测钉住
-///
-/// 两侧的 `derive_keys` / `TC_HEADER` / `Pkcs7` 任一处漂移，`tc_encrypt_round_trips`
-/// 就会变红。
-pub fn tc_encrypt(plain: &str) -> String {
-    seal_with_salt_and_tag(
-        plain.as_bytes(),
-        &sha512(plain.as_bytes()),
-        &random_bytes(RANDOM_LEN),
-    )
-}
-
-/// 信封封装本体：`TC_HEADER ‖ random ‖ AES-128-CBC(SHA512(body) ‖ body)`。
-///
-/// 盐与摘要都是显式入参，因此测试能造「固定盐」「错误摘要」这类负例。
-fn seal_with_salt_and_tag(body: &[u8], tag: &[u8; SHA512_LEN], random: &[u8]) -> String {
-    use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
-    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
-
-    debug_assert_eq!(random.len(), RANDOM_LEN, "盐长度必须是 {RANDOM_LEN}");
-    let (key, iv) = derive_keys(random, &TcMode::Aes.pepper());
-    let mut plain = Vec::with_capacity(SHA512_LEN + body.len());
-    plain.extend_from_slice(tag);
-    plain.extend_from_slice(body);
-    let cipher =
-        Aes128CbcEnc::new((&key).into(), (&iv).into()).encrypt_padded_vec_mut::<Pkcs7>(&plain);
-    let mut raw = Vec::with_capacity(HEADER_LEN + RANDOM_LEN + cipher.len());
-    raw.extend_from_slice(&TC_HEADER);
-    raw.extend_from_slice(random);
-    raw.extend_from_slice(&cipher);
-    base64::engine::general_purpose::STANDARD.encode(raw)
-}
 
 /// 从 storage.json 对象里取某个键并解密。
 ///
@@ -615,118 +556,6 @@ struct StorageSnapshot {
     object: Map<String, Value>,
 }
 
-/// 该 userData 目录下 `storage.json` 的路径（**唯一取值点**）。
-///
-/// 读侧（[`load_storage_from_dir`]）与写侧（[`write_storage_object_in_dir`]）共用它 ——
-/// 两处各拼一次路径，迟早出现「读的是 A 文件、写的是 B 文件」这种只在真机暴露的分叉。
-pub(crate) fn storage_path_in_dir(dir: &std::path::Path) -> std::path::PathBuf {
-    dir.join("User").join("globalStorage").join("storage.json")
-}
-
-/// 读该目录 `storage.json` 的**顶层对象**（写侧用；读侧走 [`load_storage_from_dir`]）。
-pub(crate) fn read_storage_object_in_dir(
-    dir: &std::path::Path,
-) -> Result<Map<String, Value>, IcubeError> {
-    let path = storage_path_in_dir(dir);
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| IcubeError::StorageUnreadable(format!("{}: {e}", path.display())))?;
-    let value: Value = serde_json::from_str(&raw)
-        .map_err(|e| IcubeError::StorageUnreadable(format!("{}: {e}", path.display())))?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| IcubeError::StorageUnreadable("storage.json 顶层不是对象".into()))
-}
-
-/// 原子写回该目录的 `storage.json`。
-///
-/// ⚠️ **调用方必须先关掉客户端**（`platform::kill_client_for`）：客户端运行时会缓存
-/// 整个对象并在退出时整体回写，我们写进去的东西会被它**静默覆盖**。
-/// 切换流程天然满足这条（先关后写），单独调用本函数时必须自己保证。
-pub(crate) fn write_storage_object_in_dir(
-    dir: &std::path::Path,
-    object: &Map<String, Value>,
-) -> Result<(), IcubeError> {
-    let text = serde_json::to_string(object)
-        .map_err(|e| IcubeError::StorageUnreadable(format!("序列化 storage.json 失败: {e}")))?;
-    crate::modules::trae::store::atomic_write_text(&storage_path_in_dir(dir), &text)
-        .map_err(IcubeError::StorageUnreadable)
-}
-
-/// 合成 `iCubeAuthInfo://icube.cloudide` 的信封（**账号库 → 客户端** 的写侧）。
-///
-/// ## 只写「能忠实写出的字段」，缺的**宁可不写**
-///
-/// 真机明文有 8 个字段（实测形状见 `docs/trae-login-materialize-probe-2026-09-29.md`）。
-/// 账号库只提供得了其中 5 个，另有 2 个（`refreshExpiredAt` / `tokenReleaseAt`）与
-/// 1 个富对象（`account`：邮箱 / 头像 / 手机号 / 区域…）是**服务端下发**的，我们拿不到。
-///
-/// 取舍：**不编造**。缺的字段直接不出现在 JSON 里，让客户端按「缺失」处理，
-/// 而不是塞一个看起来像真的的假值（假值会让后续排查一路被误导）。
-/// `account` 只写 `username`（我们有展示名），其余子字段省略。
-///
-/// `user_region` 由调用方给：**只有 CN 有实测值**（`{"_aiRegion":"CN","region":"CN"}`），
-/// 国际版未知 ⇒ 传 `None` 就不写这个键。
-pub fn build_cloudide_envelope(
-    variant: TraeVariant,
-    user_id: &str,
-    bare_token: &str,
-    refresh_token: &str,
-    expired_at: Option<i64>,
-    account_name: &str,
-    user_region: Option<&str>,
-) -> String {
-    let host = crate::modules::trae::endpoints_for(variant).account_base;
-    let mut object = Map::new();
-    object.insert("token".into(), Value::String(bare_token.to_string()));
-    object.insert(
-        "refreshToken".into(),
-        Value::String(refresh_token.to_string()),
-    );
-    object.insert("host".into(), Value::String(host.to_string()));
-    object.insert("userId".into(), Value::String(user_id.to_string()));
-    if let Some(seconds) = expired_at {
-        // 真机是 **ISO 串**（24 字符、毫秒 + `Z`），不是 epoch 数字 —— 见 `expiredAt` 的实测。
-        if let Some(moment) = chrono::DateTime::from_timestamp(seconds, 0) {
-            object.insert(
-                "expiredAt".into(),
-                Value::String(moment.to_owned().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-            );
-        }
-    }
-    if let Some(region) = user_region {
-        let mut inner = Map::new();
-        inner.insert("_aiRegion".into(), Value::String(region.to_string()));
-        inner.insert("region".into(), Value::String(region.to_string()));
-        object.insert("userRegion".into(), Value::Object(inner));
-    }
-    let mut account = Map::new();
-    account.insert("username".into(), Value::String(account_name.to_string()));
-    object.insert("account".into(), Value::Object(account));
-
-    tc_encrypt(&Value::Object(object).to_string())
-}
-
-/// 把一条 `uid → 区域码` 并进 `iCubeAuthInfo://usertag` 的明文（纯函数，便于单测）。
-///
-/// `usertag` 是**整机共享**的一张表（实测内容形如 `{"3604620555324748":"cn"}`），
-/// 因此写入时必须**读旧的、只改自己那一条**，不能整体覆盖 —— 覆盖会抹掉同机其它账号的标签。
-pub fn merge_usertag_plain(existing_plain: Option<&str>, user_id: &str, region: &str) -> String {
-    let mut map = existing_plain
-        .and_then(|plain| serde_json::from_str::<Value>(plain).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    map.insert(user_id.to_string(), Value::String(region.to_string()));
-    Value::Object(map).to_string()
-}
-
-/// 读某个 userData 目录里 `usertag` 的明文（解不开 / 不存在都返回 `None`）。
-pub(crate) fn usertag_plain_in_dir(dir: &std::path::Path) -> Option<String> {
-    let object = read_storage_object_in_dir(dir).ok()?;
-    let b64 = object.get(USERTAG_KEY)?.as_str()?;
-    tc_decrypt(b64, TcMode::Aes).ok()
-}
-
 /// 读取**该变体**的 storage.json（目录由 [`platform::select_data_dir_for`] 限定）。
 ///
 /// 参考实现跨变体扫全部候选目录并取第一个命中 —— 本项目**不照抄**（见模块头差异 1）。
@@ -751,7 +580,10 @@ fn load_storage_from_dir(
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_string();
-    let path = storage_path_in_dir(dir);
+    let path = dir
+        .join("User")
+        .join("globalStorage")
+        .join("storage.json");
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| IcubeError::StorageUnreadable(format!("{}: {e}", path.display())))?;
     let value: Value = serde_json::from_str(&raw)
@@ -1110,11 +942,21 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEc5xtFi4XpzYjFuYwN0sBaUzcnrds\n\
     pub(crate) const TEST_RANDOM: [u8; RANDOM_LEN] = [7u8; RANDOM_LEN];
 
     /// 按 `tc` 信封格式**加密**一段明文（复刻 byteCrypto 的写侧）。
-    ///
-    /// 委托生产侧的 [`super::seal_with_salt_and_tag`] —— 测试与生产共用同一条封装，
-    /// 否则「测试造的信封生产能解、生产写的信封测试解不开」这类分叉无从发现。
     pub(crate) fn seal_envelope(body: &[u8], tag: &[u8; SHA512_LEN]) -> String {
-        super::seal_with_salt_and_tag(body, tag, &TEST_RANDOM)
+        use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+        type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+
+        let (key, iv) = derive_keys(&TEST_RANDOM, &TcMode::Aes.pepper());
+        let mut plain = Vec::with_capacity(SHA512_LEN + body.len());
+        plain.extend_from_slice(tag);
+        plain.extend_from_slice(body);
+        let cipher = Aes128CbcEnc::new((&key).into(), (&iv).into())
+            .encrypt_padded_vec_mut::<Pkcs7>(&plain);
+        let mut raw = Vec::with_capacity(HEADER_LEN + RANDOM_LEN + cipher.len());
+        raw.extend_from_slice(&TC_HEADER);
+        raw.extend_from_slice(&TEST_RANDOM);
+        raw.extend_from_slice(&cipher);
+        base64::engine::general_purpose::STANDARD.encode(raw)
     }
 
     /// 用**正确的**摘要封装一段明文。
@@ -2036,39 +1878,6 @@ mod tests {
         assert!(
             login_state_dir_for(variant).is_none(),
             "两个候选都没有登录态时必须是 None"
-        );
-    }
-
-    /// ★ [`tc_encrypt`] 与 [`tc_decrypt`] 必须**互为逆**（含非 ASCII）。
-    ///
-    /// 反例：任一侧的 `derive_keys` / `TC_HEADER` / `Pkcs7` 漂移 ⇒ 立刻红。
-    /// 同时钉住「盐每次随机」这条 —— 固定盐会让同一账号两次写入产生逐字节相同的密文
-    /// （可识别指纹），也让「文件到底有没有被改写」无法从字节判断。
-    #[test]
-    fn tc_encrypt_round_trips_and_uses_a_fresh_salt() {
-        for plain in ["{}", r#"{"userId":"u1"}"#, "中文与 emoji 🚀"] {
-            let sealed = tc_encrypt(plain);
-            assert_eq!(
-                tc_decrypt(&sealed, TcMode::Aes).expect("自产信封必须能解开"),
-                plain,
-                "明文 = {plain:?}"
-            );
-        }
-        // ★ 空明文**不被支持**，且这是**读侧的既定判定**（不是本函数的缺陷）：
-        //   `tc_decrypt` 把「解密后 ≤ SHA512 摘要长度」判成信封损坏（只有摘要、没有正文）。
-        //   把这条边界钉住，免得后人看到「空串往返失败」去改读侧，把真损坏放进来。
-        //   我们的写入路径产出的都是 JSON（永远非空），因此不影响使用。
-        assert!(
-            tc_decrypt(&tc_encrypt(""), TcMode::Aes).is_err(),
-            "空明文应被读侧判为信封损坏 —— 这条边界是刻意的"
-        );
-
-        let first = tc_encrypt("same");
-        let second = tc_encrypt("same");
-        assert_ne!(first, second, "盐必须每次随机");
-        assert_eq!(
-            tc_decrypt(&first, TcMode::Aes).unwrap(),
-            tc_decrypt(&second, TcMode::Aes).unwrap()
         );
     }
 }

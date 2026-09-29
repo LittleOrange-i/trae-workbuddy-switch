@@ -149,3 +149,54 @@ start "" "D:\Programs\TRAE SOLO CN\TRAE SOLO CN.exe"
 
 **规则**：任何会走到 `switch_account` 的用例，**必须**用 `TempEnv`（它同时隔离两个变量），
 或者干脆别在单测里走那条路径 —— 用沙箱化的 E2E 覆盖。
+
+---
+
+## 7. ★★ 真机实测结论：**客户端拒绝，整条移除**（2026-09-29 11:40）
+
+用户报障：「traecode 和 traework 切换后变成非登录状态了，并没有真的切换账号」。
+
+### 现场取证（只读探针，逐槽位 dump `cloudide` 明文）
+
+| 位置 | uid | 明文键数 | `iCubeServerData` | 判断 |
+|:---|:---|:---|:---|:---|
+| 活客户端 `TRAE SOLO CN` | Jackey | **7** | **❌ 已被删掉** | 我们写的部分信封 |
+| 活客户端 `Trae CN` | Jackey | **7** | ❌ 已被删掉 | 同上 |
+| 槽位 `trae_work/1189017012674171` | Jackey | 7 | ❌ | 同上 |
+| 槽位 `trae_work/3604620555324748` | **JackDev** | **9** | **✅ 在** | ★ 完整快照 |
+| 槽位 `trae_work/last` | **JackDev** | **9** | ✅ 在 | ★ 完整快照 |
+| 槽位 `trae_cn/last` | **JackDev** | **9** | ✅ 在 | ★ 完整快照 |
+
+### 机制（由取证反推）
+
+客户端读到一个**缺 `iCubeServerData`、且 `account` 只有 `username`** 的 `cloudide` 之后，
+**把整份登录态判为无效并清掉了 `iCubeServerData`** ⇒ 两个客户端双双变成未登录。
+
+更可能的判据是**账号不一致**：注入的 token 属于 Jackey，而客户端里缓存的服务端数据
+（`account` / `iCubeServerData`）还是 JackDev 的 ⇒ 被检出。**这两个字段都是服务端下发的，
+账号库里没有，也造不出来。**
+
+⇒ **「账号库 → 客户端」这条路线到此为止**：不是「不忠实但也许能用」，是**确定不可用**。
+
+### 处置
+
+- `switch_account` 的预检查**回到**「目标快照必须存在，否则 fatal」；
+- `materialize_login_in_dir` / `tc_encrypt` / `build_cloudide_envelope` / `merge_usertag_plain`
+  及 icube 写侧 helpers **全部删除**（留成死代码只会诱人再走一次）；
+- `scripts/scenarios/trae-switch-materialize.scenario.mjs` 删除；
+- `docs` 保留本文 —— 它记录的是**为什么不能做**，比代码更有价值。
+
+### 数据恢复
+
+`profiles/3604620555324748`、`profiles/last`、`profiles_trae_cn/last` 里各有一份
+**完整**（9 键 + `iCubeServerData` + `icube-dc`）的 JackDev 登录态 —— 那是客户端在
+本机被写坏之前自己刷新出来的完整快照。把它们恢复到客户端即可恢复 JackDev 的登录
+（需要先关掉客户端）。**账号库里没有的东西（`account` 富对象 / `iCubeServerData`）只在这几个槽位里有。**
+
+### ★ 教训（本轮最贵的一条）
+
+我在 §3 判定「不忠实」之后，只把风险**写进注释**就继续实现了，理由是「用户要求与 WorkBuddy
+交互一致」。**「不忠实」不等于「可用但降级」——它可能是「会毁掉用户现有登录态」。**
+量化只做到「我们缺哪些字段」，**没有做到「客户端接不接受」**，而后者才是决定性的。
+⇒ 凡是**写用户真实客户端状态**的改动，**必须先在沙箱化的真实客户端上验过**，
+不能拿「注释里写了风险」当验收。
