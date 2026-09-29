@@ -1198,6 +1198,72 @@ pub fn backup_to_slot_for(variant: TraeVariant, slot: &str) -> Result<u64, Strin
     Ok(copied)
 }
 
+/// 写前留档保留份数（见 [`backup_storage_before_write`]）。
+const STORAGE_BACKUP_KEEP: usize = 20;
+
+/// 写客户端登录态**之前**，把 `storage.json` 留一份带时间戳的档（**只增不改**）。
+///
+/// ## 为什么不能只靠 `last` 槽位（2026-09-29 事故的根因之一）
+///
+/// `last` 每切一次就被 [`backup_to_slot_for`] **整体覆盖** —— 它是「上一次的状态」，
+/// 不是「历史」。事故当天，唯一一份原始 `cloudide`（含**服务端下发**的 `account` 富对象）
+/// 就是这么没的：当前状态一旦被写坏，`last` 也跟着变成坏的，**再没有可回退的副本**，
+/// 只能靠账号库里的 JWT 重建一份**残缺**的登录态。
+///
+/// 本函数提供那个缺失的「只增不改的载体」：按 UTC 时间戳命名，**永不覆盖**。
+///
+/// ## 形态与保留策略
+///
+/// `trae/backups/storage/<变体>/<UTC 时间戳>.json`。文件名带毫秒 ⇒ 同一秒内两次调用
+/// 也不会互相覆盖。只保留最近 [`STORAGE_BACKUP_KEEP`] 份（文件名即时间戳，字典序 = 时间序）。
+///
+/// ## 失败**不阻断**写入
+///
+/// 与 `region_migrate::write_backup` 同一取舍：磁盘满 / 权限异常时留档失败，
+/// 不该让用户连账号都切不了。但**调用方必须把失败报出来**（`warning` 步），不许静默。
+pub fn backup_storage_before_write(dir: &Path, variant: TraeVariant) -> Result<String, String> {
+    let source = icube::storage_path_in_dir(dir);
+    if !source.is_file() {
+        return Err(format!("客户端还没有 storage.json：{}", source.display()));
+    }
+    let dest_dir = paths::trae_dir()
+        .join("backups")
+        .join("storage")
+        .join(variant.as_str());
+    std::fs::create_dir_all(&dest_dir).map_err(|e| format!("创建留档目录失败：{e}"))?;
+    let stamp = chrono::Utc::now()
+        .format("%Y-%m-%dT%H-%M-%S-%3fZ")
+        .to_string();
+    // 同一毫秒内的两次调用也不能互相覆盖 —— 「只增不改」这条不能靠时钟精度来保证。
+    let mut dest = dest_dir.join(format!("{stamp}.json"));
+    let mut suffix = 2;
+    while dest.exists() {
+        dest = dest_dir.join(format!("{stamp}-{suffix}.json"));
+        suffix += 1;
+    }
+    std::fs::copy(&source, &dest).map_err(|e| format!("留档失败：{e}"))?;
+    prune_storage_backups(&dest_dir, STORAGE_BACKUP_KEEP)?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// 只保留最近 `keep` 份留档。抽出来是为了能用一个小的 `keep` 直接测「只增不改 + 有上限」。
+fn prune_storage_backups(dir: &Path, keep: usize) -> Result<(), String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map_err(|e| format!("读留档目录失败：{e}"))?
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter(|name| name.ends_with(".json"))
+        .collect();
+    if names.len() <= keep {
+        return Ok(());
+    }
+    names.sort();
+    for stale in &names[..names.len() - keep] {
+        let _ = std::fs::remove_file(dir.join(stale));
+    }
+    Ok(())
+}
+
 /// 把指定槽位的快照恢复到客户端（默认变体，兼容壳）。
 pub fn restore_from_slot(slot: &str) -> Result<u64, String> {
     restore_from_slot_for(TraeVariant::default(), slot)
@@ -1571,6 +1637,26 @@ where
             return outcome;
         }
     };
+
+    // 5.5 ★ 写前留档：把**即将被覆盖的那份** `storage.json` 复制到只增不改的时间戳文件里。
+    //
+    // 位置刻意在这里（目录已定、尚未写入）。失败只报警告不阻断 —— 留档是保险，
+    // 不该让用户因此切不了账号；但也**不许静默**，所以状态是 `skip` 而不是 `ok`。
+    match backup_storage_before_write(&restore_dir, variant) {
+        Ok(path) => emit(
+            &mut outcome,
+            SwitchStep::new("backup-storage", "ok", format!("写前已留档：{path}")),
+        ),
+        Err(error) => emit(
+            &mut outcome,
+            SwitchStep::new(
+                "backup-storage",
+                "skip",
+                format!("写前留档失败（不阻断切换）：{error}"),
+            ),
+        ),
+    }
+
     match restore_from_slot_in_dir(&restore_dir, variant, &target) {
         Ok(count) => emit(
             &mut outcome,
@@ -2687,6 +2773,70 @@ mod tests {
         // 预检查失败 → 直接 fatal，不进入停止/恢复流程
         assert_eq!(stages.first().copied(), Some("fatal"));
         assert!(!stages.contains(&"stop"));
+    }
+
+    /// ★ 写前留档必须**只增不改**：连续两次留档要得到**两个**文件，内容各自保留。
+    ///
+    /// 反例（改坏会红）：文件名不带时间戳（或同名直接覆盖）⇒ 第二次盖掉第一次，
+    /// `assert_ne!(first, second)` 失败。**这条正是 2026-09-29 事故缺的那块**：
+    /// `last` 槽位每切一次就被整体覆盖，于是「唯一一份原始登录态」没有副本可回退，
+    /// 只能拿账号库里的 JWT 重建一份**残缺**的。
+    #[test]
+    fn backup_storage_before_write_never_overwrites() {
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-storage-backup-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let client = home.join("TRAE SOLO CN");
+        std::fs::create_dir_all(client.join("User").join("globalStorage")).expect("建临时 userData");
+        let storage = icube::storage_path_in_dir(&client);
+        let guard = crate::modules::config::HomeOverrideGuard::set(&home);
+
+        std::fs::write(&storage, r#"{"first":1}"#).expect("铺第一版");
+        let first = backup_storage_before_write(&client, TraeVariant::TraeWork).expect("第一次留档");
+        std::fs::write(&storage, r#"{"second":2}"#).expect("铺第二版");
+        let second =
+            backup_storage_before_write(&client, TraeVariant::TraeWork).expect("第二次留档");
+
+        assert_ne!(first, second, "两次留档必须是两个文件，不能互相覆盖");
+        assert_eq!(
+            std::fs::read_to_string(&first).expect("读第一份"),
+            r#"{"first":1}"#,
+            "第一份的内容必须原样留着"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second).expect("读第二份"),
+            r#"{"second":2}"#
+        );
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// ★ 留档不能无限增长：只保留文件名最大的 `keep` 份（文件名即 UTC 时间戳 ⇒ 字典序 = 时间序）。
+    #[test]
+    fn prune_storage_backups_keeps_the_newest() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-storage-prune-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        for name in ["c.json", "a.json", "d.json", "b.json"] {
+            std::fs::write(dir.join(name), "x").expect("铺留档");
+        }
+        prune_storage_backups(&dir, 2).expect("裁剪");
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .expect("列目录")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec!["c.json".to_string(), "d.json".to_string()],
+            "必须保留文件名最大的两份"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ★ 预检查失败的两支文案：**有数据目录** ⇒ 让用户去保存；**没有** ⇒ 必须解释为什么存不了。

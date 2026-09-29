@@ -556,6 +556,14 @@ struct StorageSnapshot {
     object: Map<String, Value>,
 }
 
+/// 该 userData 目录下 `storage.json` 的路径（**唯一取值点**）。
+///
+/// 读侧（[`load_storage_from_dir`]）与**写前留档**（`profile::backup_storage_before_write`）
+/// 共用它 —— 两处各拼一次路径，迟早出现「读的是 A 文件、备份的是 B 文件」这种只在真机暴露的分叉。
+pub(crate) fn storage_path_in_dir(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("User").join("globalStorage").join("storage.json")
+}
+
 /// 读取**该变体**的 storage.json（目录由 [`platform::select_data_dir_for`] 限定）。
 ///
 /// 参考实现跨变体扫全部候选目录并取第一个命中 —— 本项目**不照抄**（见模块头差异 1）。
@@ -580,10 +588,7 @@ fn load_storage_from_dir(
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_string();
-    let path = dir
-        .join("User")
-        .join("globalStorage")
-        .join("storage.json");
+    let path = storage_path_in_dir(dir);
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| IcubeError::StorageUnreadable(format!("{}: {e}", path.display())))?;
     let value: Value = serde_json::from_str(&raw)
