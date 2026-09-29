@@ -82,8 +82,13 @@ pub struct CoreEntry {
 ///    - `logs/`：`extract_local_jwt_for` 会扫
 ///      `logs/**/trae.ai-code-completion/completion.log` 里的明文 JWT。
 ///      不清 ⇒ 切到 A 之后导入仍读到 B 的 token，症状就是「切换后账号不变」。
-///    - SQLite 边车文件（`-wal` / `-shm` / `-journal`）：不删会让 SQLite
+///    - SQLite 的 `-wal` / `-shm` / `-journal`：不删会让 SQLite
 ///      下次打开时**回放旧事务**，把上一账号的页写回刚恢复的库里，症状同上。
+///
+/// ⚠️ **`-wal` / `-shm` 同时也在快照清单里**（见 [`CORE_ENTRIES`] 的 2b 两条）——
+/// 两者不矛盾：先清掉客户端那一对**旧的**，再覆盖上快照里那一对**与主库配套的**。
+/// 只做前者会让「强杀时还留在 WAL 里的最新登录写入」永久丢失（2026-09-29 实测症状：
+/// 切换后客户端变成未登录）。`-journal` 只在清除侧 —— 快照不需要它。
 ///
 /// **因此：新增任何凭据来源时，要么把它加进本清单，要么加进清除清单。**
 pub const CORE_ENTRIES: &[CoreEntry] = &[
@@ -101,6 +106,23 @@ pub const CORE_ENTRIES: &[CoreEntry] = &[
         relative: "User/globalStorage/state.vscdb.backup",
         kind: EntryKind::File,
         label: "令牌数据库备份",
+    },
+    // ★★ WAL / SHM 必须与主库**成对快照**（2026-09-29 对照参考实现补上）。
+    //
+    // 我们的关客户端是 `taskkill /F`（强杀），而 SQLite 的 WAL 在**强杀时不会
+    // checkpoint 回主库** —— 最新的登录写入很可能只存在于 `-wal` 里。
+    // 只拷主库 ⇒ 快照缺最新写入；恢复侧又会把客户端的 `-wal`/`-shm` 清掉（防回放旧事务）
+    // ⇒ 最终客户端拿到的是一份**缺最新登录数据**的库 ⇒ 症状正是「切换后变成未登录」。
+    // 顺序上「先清后覆盖」保证拿到的是**快照里那一对**（见 `restore_from_slot_in_dir`）。
+    CoreEntry {
+        relative: "User/globalStorage/state.vscdb-wal",
+        kind: EntryKind::File,
+        label: "令牌数据库 WAL（强杀后最新写入常在此）",
+    },
+    CoreEntry {
+        relative: "User/globalStorage/state.vscdb-shm",
+        kind: EntryKind::File,
+        label: "令牌数据库 SHM（与 WAL 成对）",
     },
     CoreEntry {
         relative: "machineid",
@@ -126,6 +148,19 @@ pub const CORE_ENTRIES: &[CoreEntry] = &[
         relative: "Local Storage/config.db",
         kind: EntryKind::File,
         label: "本地存储",
+    },
+    // ★ `Local Storage/leveldb` 是 **web 侧（icube webview）的登录/偏好 KV**。
+    // 只快照 `config.db` 而不含 leveldb ⇒ 恢复后 webview 侧仍是上一账号的内容，
+    // 与 `storage.json` / `state.vscdb` 对不上（2026-09-29 对照参考实现补上）。
+    CoreEntry {
+        relative: "Local Storage/leveldb",
+        kind: EntryKind::Dir,
+        label: "web 侧登录/偏好 KV",
+    },
+    CoreEntry {
+        relative: "Session Storage",
+        kind: EntryKind::Dir,
+        label: "会话存储",
     },
     CoreEntry {
         relative: "Network",
@@ -160,7 +195,9 @@ const RESTORE_PURGE_RELATIVES: &[&str] = &[
     // ── 明文凭据来源：客户端扩展日志（跨账号累积，且不在快照内） ──
     "logs",
     // ── SQLite 边车文件：三件套都要清，缺一个就会回放 ──
-    // 主库 `state.vscdb` 本身由 `CORE_ENTRIES` 覆盖，这里只处理它的附属文件。
+    // ⚠️ `-wal` / `-shm` 清掉之后**会被快照里那一对覆盖回来**（它们在 `CORE_ENTRIES` 里）——
+    //    清除的目的只是「别让客户端残留的旧 WAL 与快照主库错配」，不是「不要 WAL」。
+    //    只清不补 = 丢掉强杀时尚未 checkpoint 的最新登录写入（2026-09-29 实测症状）。
     "User/globalStorage/state.vscdb-wal",
     "User/globalStorage/state.vscdb-shm",
     "User/globalStorage/state.vscdb-journal",
@@ -1488,9 +1525,23 @@ fn missing_snapshot_reason(variant: TraeVariant, target: &str, can_save: bool) -
 
 /// 执行一次完整的账号切换。
 ///
-/// 流程（顺序不可调整，见模块头注释）：
-/// 预检查目标快照 → 保存当前到 `last` → （已知 uid 时）保存当前到其槽位 →
-/// （可选）重置设备标识 → 关闭客户端 → 恢复目标快照 → （可选）启动客户端。
+/// 流程（**顺序不可调整**，见模块头注释）：
+/// ① 预检查目标快照 → ②（可选）重置设备标识 → ③ **关闭客户端** →
+/// ④ 保存当前到 `last` → ④b（已知 uid 时）保存当前到其槽位 →
+/// ⑥ 恢复目标快照 → ⑥b 写前留档 → ⑥.5 复核 → ⑦（可选）启动客户端。
+///
+/// ## ★★ ③ 必须在 ④/④b **之前**（2026-09-29 对照参考实现修正）
+///
+/// 备份是**文件拷贝**，而客户端运行时会**独占锁定**若干登录态文件
+/// （`Network/Cookies`、`Local Storage/leveldb`、`state.vscdb` 的 WAL…）。
+/// 在锁下拷贝只有两种结局：**报错**，或者更糟——**拿到陈旧内容却「看起来成功」**。
+/// 两种情况都会产出一份**坏快照**，恢复后的症状是「切换后客户端变成未登录」。
+///
+/// 本函数原先正是「先备份后关客户端」（第 2/3 步在第 5 步之前），已按参考实现的
+/// `switch_flow` 顺序（先 `stop_app` 再 `backup_current`）改正。
+/// ⚠️ `save_current_login_for`（「保存登录态」按钮）**仍然是旧顺序**——它需要在
+/// 关客户端之前先具备「优雅关闭」（否则强杀会丢用户未保存的编辑器状态），
+/// 而那一步尚未实现。见该函数的说明。
 pub fn switch_account<F>(options: &SwitchOptions, mut on_step: F) -> SwitchOutcome
 where
     F: FnMut(&SwitchStep),
@@ -1541,7 +1592,48 @@ where
         SwitchStep::new("precheck", "ok", "目标账号快照已就绪"),
     );
 
-    // 2. 保存当前登录态到 last 槽位（强制，可回滚兜底）。
+    // 2. 设备标识重置（可选）。
+    if options.reset_device {
+        match crate::modules::trae::platform::reset_device_identity_for(variant) {
+            Ok(report) => {
+                let ok = report
+                    .get("resetCount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                emit(
+                    &mut outcome,
+                    SwitchStep::new("device", "ok", format!("设备标识已重置（{ok} 项）")),
+                );
+            }
+            Err(error) => emit(
+                &mut outcome,
+                SwitchStep::new("device", "skip", format!("设备标识重置被跳过: {error}")),
+            ),
+        }
+    }
+
+    // 3. 关闭客户端（**必须先关**：备份与恢复都在文件锁下会失败/拿到陈旧内容）。
+    match platform::kill_client_for(variant) {
+        Ok(true) => emit(
+            &mut outcome,
+            SwitchStep::new("stop", "ok", "已关闭 Trae 客户端"),
+        ),
+        Ok(false) => emit(
+            &mut outcome,
+            SwitchStep::new("stop", "skip", "Trae 客户端未在运行"),
+        ),
+        Err(error) => {
+            // 关不掉就不能恢复：此时恢复必然被客户端覆盖，会造成「看起来切了实际没切」。
+            emit(
+                &mut outcome,
+                SwitchStep::new("fatal", "fail", format!("无法关闭 Trae 客户端: {error}")),
+            );
+            outcome.error = Some(error);
+            return outcome;
+        }
+    }
+
+    // 4. 保存当前登录态到 last 槽位（强制，可回滚兜底）。
     //
     // ★ 但**结构不完整的当前状态不许覆盖 last**：`last` 是回滚兜底，被一份坏状态盖掉
     //   就等于回滚能力一起消失（2026-09-29 实测发生过）。见 [`client_state_looks_complete`]。
@@ -1577,7 +1669,7 @@ where
         );
     }
 
-    // 3. 若已知当前账号，额外保存到它自己的槽位，使该账号可被再次切回。
+    // 4b. 若已知当前账号，额外保存到它自己的槽位，使该账号可被再次切回。
     //
     // ★ 不变式：**凡把「客户端当前状态」写入「账号槽位」的路径，都必须过守卫；
     //   `LAST_SLOT`（回滚槽）是唯一豁免。**
@@ -1639,47 +1731,6 @@ where
         }
     }
 
-    // 4. 设备标识重置（可选）。
-    if options.reset_device {
-        match crate::modules::trae::platform::reset_device_identity_for(variant) {
-            Ok(report) => {
-                let ok = report
-                    .get("resetCount")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                emit(
-                    &mut outcome,
-                    SwitchStep::new("device", "ok", format!("设备标识已重置（{ok} 项）")),
-                );
-            }
-            Err(error) => emit(
-                &mut outcome,
-                SwitchStep::new("device", "skip", format!("设备标识重置被跳过: {error}")),
-            ),
-        }
-    }
-
-    // 5. 关闭客户端（恢复文件时若客户端在运行，会被其内存缓存覆盖回去）。
-    match platform::kill_client_for(variant) {
-        Ok(true) => emit(
-            &mut outcome,
-            SwitchStep::new("stop", "ok", "已关闭 Trae 客户端"),
-        ),
-        Ok(false) => emit(
-            &mut outcome,
-            SwitchStep::new("stop", "skip", "Trae 客户端未在运行"),
-        ),
-        Err(error) => {
-            // 关不掉就不能恢复：此时恢复必然被客户端覆盖，会造成「看起来切了实际没切」。
-            emit(
-                &mut outcome,
-                SwitchStep::new("fatal", "fail", format!("无法关闭 Trae 客户端: {error}")),
-            );
-            outcome.error = Some(error);
-            return outcome;
-        }
-    }
-
     // 6. 恢复目标快照。
     //
     // ★ 目标目录在这里**只算一次**，并把它**显式传给**第 6 步（写入）与第 6.5 步（复核）。
@@ -1708,7 +1759,7 @@ where
         }
     };
 
-    // 5.5 ★ 写前留档：把**即将被覆盖的那份** `storage.json` 复制到只增不改的时间戳文件里。
+    // 6b. ★ 写前留档：把**即将被覆盖的那份** `storage.json` 复制到只增不改的时间戳文件里。
     //
     // 位置刻意在这里（目录已定、尚未写入）。失败只报警告不阻断 —— 留档是保险，
     // 不该让用户因此切不了账号；但也**不许静默**，所以状态是 `skip` 而不是 `ok`。
@@ -1985,6 +2036,15 @@ pub fn save_current_login(user_id: &str) -> Result<u64, String> {
 /// 保存当前登录态到指定账号槽位（不切换、不重启客户端；按变体分家）。
 ///
 /// 先过 [`ensure_save_target_matches_client`]：客户端登录着谁，就只能存进谁的槽位。
+/// ⚠️ **已知缺口（2026-09-29，对照参考实现发现，尚未修）**：本函数在**客户端仍在运行**时
+/// 就做文件拷贝，而 `Network/Cookies`、`Local Storage/leveldb`、`state.vscdb` 的 WAL
+/// 在客户端运行时被**独占锁定** —— 拷贝会报错，或更糟地拿到**陈旧内容却「看起来成功」**，
+/// 产出一份**坏快照**（恢复后症状：切换后客户端变成未登录）。
+///
+/// 参考实现的 `SaveCurrentLogin` 是「**先关客户端 → 备份 → 再拉回**」。
+/// 我们要照做，**前置条件是先有「优雅关闭」**（`PostMessageW(WM_CLOSE)` + 等待，
+/// 参考实现的三级关闭策略）—— 否则「保存登录态」会变成一次**强杀**，
+/// 把用户未保存的编辑器状态一起带走。故本函数**暂不调整顺序**，缺口在此留痕。
 pub fn save_current_login_for(variant: TraeVariant, user_id: &str) -> Result<u64, String> {
     ensure_save_target_matches_client(variant, user_id)?;
     let count = backup_to_slot_for(variant, user_id)?;
@@ -2062,17 +2122,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn core_entries_cover_the_nine_login_state_categories() {
-        // 参考实现精准备份 9 类文件；这里允许更多，但每个关键类别都必须在列。
+    fn core_entries_cover_the_login_state_categories() {
+        // 与参考实现的精准备份清单逐条对齐（**允许更多，但这几类必须在列**）。
+        // 2026-09-29 补上四项：SQLite 的 `-wal`/`-shm`（强杀时最新登录写入常只在这里）
+        // 与 `Local Storage/leveldb` / `Session Storage`（web 侧登录 KV）。
+        // 漏掉它们 ⇒ 快照缺最新登录数据 ⇒ 客户端恢复后变成未登录。
         let relatives: Vec<&str> = CORE_ENTRIES.iter().map(|e| e.relative).collect();
         for required in [
             "User/globalStorage/storage.json",
             "User/globalStorage/state.vscdb",
+            "User/globalStorage/state.vscdb-wal",
+            "User/globalStorage/state.vscdb-shm",
             "machineid",
             "aha",
             "Preferences",
             "Local State",
+            "Local Storage/leveldb",
             "Local Storage/config.db",
+            "Session Storage",
             "Network",
             "Partitions/trae-webview",
         ] {
@@ -2081,7 +2148,30 @@ mod tests {
                 "核心文件清单缺少 {required}"
             );
         }
-        assert!(CORE_ENTRIES.len() >= 9, "至少覆盖 9 类核心文件");
+        assert!(CORE_ENTRIES.len() >= 13, "至少覆盖 13 类核心文件");
+    }
+
+    /// ★ `-wal` / `-shm` 必须**同时在**「快照清单」与「清除清单」里。
+    ///
+    /// 只在清除侧 ⇒ 强杀时尚未 checkpoint 的最新登录写入被永久丢掉（症状：恢复后客户端
+    /// 变成未登录，2026-09-29 实测）；只在快照侧 ⇒ 客户端残留的旧 WAL 与快照主库错配，
+    /// SQLite 打开时回放上一账号的事务。**两条都不能省。**
+    #[test]
+    fn sqlite_sidecars_are_both_snapshotted_and_purged() {
+        let relatives: Vec<&str> = CORE_ENTRIES.iter().map(|e| e.relative).collect();
+        for sidecar in [
+            "User/globalStorage/state.vscdb-wal",
+            "User/globalStorage/state.vscdb-shm",
+        ] {
+            assert!(
+                relatives.contains(&sidecar),
+                "{sidecar} 必须在**快照**清单里（否则强杀时留在 WAL 的最新登录写入会丢）"
+            );
+            assert!(
+                RESTORE_PURGE_RELATIVES.contains(&sidecar),
+                "{sidecar} 必须在**清除**清单里（否则客户端残留的旧 WAL 会与快照主库错配）"
+            );
+        }
     }
 
     #[test]
