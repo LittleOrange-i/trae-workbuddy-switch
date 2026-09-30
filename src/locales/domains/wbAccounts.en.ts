@@ -7,6 +7,7 @@
 export const en = {
   // ---- Page: account management ----
   "wbAccounts.page.title": "Accounts",
+  "wbAccounts.page.regionSwitchAria": "Switch between the CN and Global versions",
   "wbAccounts.page.subtitle": "Manage {product} accounts, credits and check-in status for both the CN and global versions; the two account stores stay isolated.",
   "wbAccounts.page.addTitle": "Add & migrate accounts",
   "wbAccounts.page.addSubtitle": "Quickly add a new account, or restore from an existing environment",

@@ -6,10 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { DemoAction } from "@/components/demo-action";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import * as api from "@/lib/api";
 import { useT } from "@/lib/i18n";
-import { REGIONS, regionDescriptor } from "@/lib/region";
 import { cn } from "@/lib/utils";
 import type { TranslationKey } from "@/locales/zh";
 import type { CatalogSource, Region } from "@/lib/types";
@@ -29,10 +27,17 @@ function formatTime(ts: number | null): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-/** 模型列表：按 region 切换，展示来源徽标（实时 / 已保存 / 内置）与刷新按钮（P0-4 / P0-12 / P1-7）。 */
-export function ModelList({ className }: { className?: string }) {
+/**
+ * 模型列表：展示来源徽标（实时 / 已保存 / 内置）与刷新按钮（P0-4 / P0-12 / P1-7）。
+ *
+ * ## 版本由页面传入（受控），组件内**不再自带版本选择器**
+ *
+ * 改造前这里有个内部 `Tabs`，与页面上的接入地址 / 账号池 / 接入指引各自为政：
+ * 在这张卡里切到国际版，页面其他部分还停在国内版 —— 同一个「当前版本」在四个地方
+ * 各说各话。现在与 Trae 侧一致：**页面持有唯一版本，本组件只负责渲染**。
+ */
+export function ModelList({ region, className }: { region: Region; className?: string }) {
   const t = useT();
-  const [region, setRegion] = useState<Region>("cn");
   const [refreshing, setRefreshing] = useState(false);
   const snapshot = useGatewayStore((s) => s.models[region]);
   const refreshModels = useGatewayStore((s) => s.refreshModels);
@@ -54,18 +59,8 @@ export function ModelList({ className }: { className?: string }) {
   return (
     <Card className={cn("gap-0 py-0", className)}>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm font-semibold">{t("wbStats.gateway.modelList")}</span>
-          <Tabs value={region} onValueChange={(value) => setRegion(value as Region)}>
-            <TabsList>
-              {REGIONS.map((r) => (
-                <TabsTrigger key={r} value={r}>
-                  {regionDescriptor(r).versionLabel}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
-        </div>
+        {/* 版本不在这里显示也不在这里切：页头切换器是唯一入口（与 Trae 侧同口径）。 */}
+        <span className="text-sm font-semibold">{t("wbStats.gateway.modelList")}</span>
         <DemoAction>
           <Button variant="ghost" size="sm" onClick={() => void onRefresh()} disabled={refreshing}>
             {refreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}

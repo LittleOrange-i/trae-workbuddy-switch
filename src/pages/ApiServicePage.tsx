@@ -7,6 +7,7 @@ import { AccountPoolCard, AUTO_OPTION, WB_POOL_TILES } from "@/components/gatewa
 import { IntegrationGuide } from "@/components/gateway/integration-guide";
 import { ModelList } from "@/components/gateway/model-list";
 import { RequestLog } from "@/components/gateway/request-log";
+import { WorkbuddyRegionSwitch } from "@/components/workbuddy-region-switch";
 import { DemoAction } from "@/components/demo-action";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -26,9 +27,10 @@ import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { poolOf, resolveGatewayBaseUrl, resolveGatewayRunning } from "@/lib/gateway";
-import { REGIONS, regionDescriptor } from "@/lib/region";
+import { regionDescriptor } from "@/lib/region";
 import { cn } from "@/lib/utils";
 import type { AccountStrategy, ApiKeyRecord, GatewayConfig, Region } from "@/lib/types";
+import { useWorkbuddyRegion } from "@/lib/use-workbuddy-region";
 import { useGatewayStore } from "@/stores/gateway";
 
 const LOOPBACK = "127.0.0.1";
@@ -49,9 +51,23 @@ function representativeKey(keys: ApiKeyRecord[], region: Region): string | null 
   return active ? `${active.prefix}…` : null;
 }
 
-/** 「API 服务」页：网关开关、监听、Base URL、Key、模型、策略、接入指引、请求日志（P0-11）。 */
+/**
+ * 「API 服务」页：网关开关、监听、Base URL、Key、模型、账号池、接入指引、请求日志（P0-11）。
+ *
+ * ## 版本是**页面级唯一**的（2026-09-30 与 Trae 页统一）
+ *
+ * 改造前这一页的版本轴散在四处且互不联动：接入地址并排两行、账号池并排两张、
+ * 模型清单与接入指引各自内置一个 Tabs。用户在模型清单里切到国际版，
+ * 上面的账号池还停在国内版 —— 同一页「当前版本」各说各话。
+ *
+ * 现在与 Trae 侧同一套心智模型：**页头唯一入口（`WorkbuddyRegionSwitch`）→
+ * 整页跟随 → 子组件只渲染不选择**。版本由 URL 的 `?region=` 承载（可刷新、可分享、
+ * 配合前进后退），见 `useWorkbuddyRegion`。
+ */
 export default function ApiServicePage() {
   const t = useT();
+  // 只取当前值：切换动作由页头的 `WorkbuddyRegionSwitch` 自己发起（它才是那个入口）。
+  const [region] = useWorkbuddyRegion();
   const config = useGatewayStore((s) => s.config);
   const status = useGatewayStore((s) => s.status);
   const keys = useGatewayStore((s) => s.keys);
@@ -63,8 +79,8 @@ export default function ApiServicePage() {
   const [portDraft, setPortDraft] = useState(String(config.port));
   const [saving, setSaving] = useState(false);
   const [riskOpen, setRiskOpen] = useState(false);
-  /** 正在打开哪个版本的数据目录（只驱动按钮转圈）。 */
-  const [openingDir, setOpeningDir] = useState<Region | null>(null);
+  /** 数据目录按钮是否正在打开（只驱动按钮转圈）。 */
+  const [openingDir, setOpeningDir] = useState(false);
 
   useEffect(() => {
     void loadAll();
@@ -117,8 +133,8 @@ export default function ApiServicePage() {
    * 非 Windows 时后端返回**结构化 `Unsupported`**（不是假成功）：此时如实把
    * 「当前平台不支持」提示给用户，而不是弹一句「已打开」却什么都没发生。
    */
-  async function onOpenDataDir(region: Region) {
-    setOpeningDir(region);
+  async function onOpenDataDir() {
+    setOpeningDir(true);
     try {
       const result = await api.openWorkbuddyDataDir(region);
       if (result?.capability) {
@@ -131,7 +147,7 @@ export default function ApiServicePage() {
     } catch (e) {
       toast.error(t("wbStats.gateway.toast.dirOpenFailed"), { description: api.asError(e) });
     } finally {
-      setOpeningDir(null);
+      setOpeningDir(false);
     }
   }
 
@@ -140,11 +156,13 @@ export default function ApiServicePage() {
 
   return (
     <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+      {/* 版本入口在**标题下方**（两个模块统一的位置）：整页跟随它。 */}
       <header className="mb-6">
         <h1 className="text-[28px] font-semibold tracking-tight">{t("wbStats.gateway.title")}</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           {t("wbStats.gateway.desc")}
         </p>
+        <WorkbuddyRegionSwitch className="mt-4" />
       </header>
 
       {error && (
@@ -241,56 +259,51 @@ export default function ApiServicePage() {
         )}
       </Card>
 
-      {/* 接入地址（按版本） */}
+      {/* 接入地址：只显示**当前版本**（版本在页头切换，不在这里并排）。 */}
       <Card className="mb-6 gap-0 py-0">
-        <div className="border-b border-border/60 px-5 py-3">
-          <span className="text-sm font-semibold">{t("wbStats.gateway.addrByVersion")}</span>
+        <div className="flex flex-wrap items-center gap-3 border-b border-border/60 px-5 py-3">
+          <span className="text-sm font-semibold">{t("wbStats.gateway.addr")}</span>
         </div>
-        <div className="divide-y divide-border/60">
-          {REGIONS.map((region) => (
-            <div key={region} className="px-5 py-4">
-              <div className="text-sm font-medium">{regionDescriptor(region).gatewayLabel}</div>
-              <div className="mt-2 flex flex-wrap items-center gap-3">
-                <span className="text-xs text-muted-foreground">Base URL</span>
-                <code className="rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs">{baseUrl}</code>
-                <Button variant="ghost" size="sm" onClick={() => void copyText(baseUrl, t("wbStats.gateway.baseUrlCopied"))}>
-                  <Copy />
-                  {t("wbStats.gateway.copy")}
-                </Button>
-                {/* 「打开数据目录」按**版本**给：WorkBuddy 的 CN / 国际数据目录是两个，
-                    放在这里用户一眼知道打开的是哪个（Trae 只有一条产品线，故它在网关卡）。 */}
-                <DemoAction>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={openingDir !== null}
-                    aria-label={t("wbStats.gateway.openDataDirAria", {
-                      version: regionDescriptor(region).versionLabel,
-                    })}
-                    onClick={() => void onOpenDataDir(region)}
-                  >
-                    {openingDir === region ? <Loader2 className="animate-spin" /> : <FolderOpen />}
-                    {t("wbStats.gateway.openDataDir")}
-                  </Button>
-                </DemoAction>
-              </div>
-              <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                <span>API Key</span>
-                <code className="font-mono">
-                  {representativeKey(keys, region) ?? t("wbStats.gateway.keyPlaceholder")}
-                </code>
-              </div>
-            </div>
-          ))}
+        <div className="px-5 py-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-xs text-muted-foreground">Base URL</span>
+            <code className="rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs">{baseUrl}</code>
+            <Button variant="ghost" size="sm" onClick={() => void copyText(baseUrl, t("wbStats.gateway.baseUrlCopied"))}>
+              <Copy />
+              {t("wbStats.gateway.copy")}
+            </Button>
+            {/* 打开的是**当前版本**的数据目录：WorkBuddy 的 CN / 国际数据目录是两个，
+                页头切到哪版就打开哪版（不再并排两行让用户自己认）。 */}
+            <DemoAction>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={openingDir}
+                aria-label={t("wbStats.gateway.openDataDirAria", {
+                  version: regionDescriptor(region).versionLabel,
+                })}
+                onClick={() => void onOpenDataDir()}
+              >
+                {openingDir ? <Loader2 className="animate-spin" /> : <FolderOpen />}
+                {t("wbStats.gateway.openDataDir")}
+              </Button>
+            </DemoAction>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+            <span>API Key</span>
+            <code className="font-mono">
+              {representativeKey(keys, region) ?? t("wbStats.gateway.keyPlaceholder")}
+            </code>
+          </div>
         </div>
       </Card>
 
       <ApiKeyTable className="mb-6" />
-      {REGIONS.map((region) => (
-        <RegionPoolCard key={region} region={region} />
-      ))}
-      <ModelList className="mb-6" />
-      <IntegrationGuide baseUrl={baseUrl} className="mb-6" />
+      {/* 只渲染当前版本的池（版本在页头切换）。Key 表与请求日志**不做版本过滤**：
+          它们是「跨版本的管理视图」，逐行带归属即可（与 Trae 侧同口径）。 */}
+      <RegionPoolCard region={region} />
+      <ModelList region={region} className="mb-6" />
+      <IntegrationGuide baseUrl={baseUrl} region={region} className="mb-6" />
       <RequestLog />
 
       {/* 非回环监听风险确认 */}
@@ -390,7 +403,8 @@ function RegionPoolCard({ region }: { region: Region }) {
         { value: AUTO_OPTION, label: t("shared.gateway.pool.preferredAuto") },
         { value: MAX_CREDITS_OPTION, label: t("shared.gateway.pool.strategyMaxCredits") },
       ]}
-      title={`${t("shared.gateway.pool.title")} · ${regionDescriptor(region).versionLabel}`}
+      // 不传 `title`：与 Trae 侧一致用默认的「账号池」——版本由**页头切换器**承担，
+      // 卡内再挂一次版本后缀只是噪音（Trae 的池卡同样不标区域）。
       className="mb-6"
     />
   );

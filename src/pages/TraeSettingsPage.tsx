@@ -1100,16 +1100,13 @@ export default function TraeSettingsPage() {
   return (
     <div className="mx-auto min-w-0 w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
       <header className="mb-10 sm:mb-12">
-        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold tracking-tight">{t("trae.page.settings.title")}</h1>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              {t("trae.page.settings.subtitle")}
-            </p>
-          </div>
-          {/* 产品线切换器：设置项本身按产品线分家，切到这里改的就是对应那条线的配置。 */}
-          <TraeVariantSwitch className="shrink-0" />
-        </div>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("trae.page.settings.title")}</h1>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+          {t("trae.page.settings.subtitle")}
+        </p>
+        {/* 区域入口在**标题下方**（两个模块统一的位置）：设置项本身按区域分家，
+            切到这里改的就是对应那个区域的配置。 */}
+        <TraeVariantSwitch className="mt-4" />
       </header>
 
       {error && (

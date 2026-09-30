@@ -16,7 +16,6 @@ import {
 import { Bar, CartesianGrid, ComposedChart, Line, LineChart, XAxis, YAxis } from "recharts";
 
 import { DemoAction } from "@/components/demo-action";
-import { TraeVariantSwitch } from "@/components/trae-variant-switch";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -264,16 +263,14 @@ export default function TraeTokenStatsPage() {
 
   return (
     <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
-      <header className="mb-6 flex min-w-0 flex-wrap items-end justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.token.title")}</h1>
-          <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            {t("trae.stats.token.subtitle")}
-          </p>
-        </div>
-        <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
-          {/* 产品线切换器：Trae 分区的每个页面都可切，位置固定在页头右侧动作区。 */}
-          <TraeVariantSwitch />
+      <header className="mb-6">
+        <div className="flex min-w-0 flex-wrap items-end justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.token.title")}</h1>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+              {t("trae.stats.token.subtitle")}
+            </p>
+          </div>
           <DemoAction>
             <Button variant="outline" size="sm" disabled={loading} onClick={() => void refresh()}>
               {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
@@ -281,6 +278,14 @@ export default function TraeTokenStatsPage() {
             </Button>
           </DemoAction>
         </div>
+        {/*
+          ★ 这里**不再**放区域切换器（`TraeVariantSwitch`）。
+
+          本页的数据范围由下方的「版本范围条」决定（`TraeTokenScope`，四档含「全部」），
+          页面根本不读 `useTraeVariant` —— 也就是说原来那个页头切换器**切了不影响任何数据**，
+          却让用户以为「切到国际版就只看国际版」。同一页两个版本类控件、只有一个有效，
+          是明确的误导。区域维度已经由范围条里的「国内版 / 国际版 / 全部」表达。
+        */}
       </header>
 
       {/* 数据源边界：不写清楚，用户会把「数字小」当成 bug。**必须保留。** */}

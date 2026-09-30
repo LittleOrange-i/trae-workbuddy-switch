@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
 import { TraeVariantMark } from "@/components/product-marks";
+import { VariantSwitch } from "@/components/variant-switch";
 import * as api from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { TRAE_VARIANT_FALLBACK } from "@/lib/trae-variant-status";
 import type { TraeRegionId, TraeVariantStatus } from "@/lib/trae-types";
-import { cn } from "@/lib/utils";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 
 /**
@@ -87,62 +87,37 @@ export function TraeVariantSwitch({
   const items: TraeVariantStatus[] =
     probed && probed.length > 0 ? probed : fallback;
 
+  // 视觉交给共用的 `VariantSwitch`（与 WorkBuddy 侧同一种语言）；
+  // 本组件只负责「探测状态 → 映射成条目」这一层。
   return (
-    <div
-      className={cn(
-        "inline-flex items-center gap-1 rounded-xl border border-border bg-muted/40 p-1",
-        className,
-      )}
-      role="tablist"
-      aria-label={t("trae.variant.switch.aria")}
-    >
-      {items.map((item) => {
-        const active = item.variant === variant;
+    <VariantSwitch
+      className={className}
+      value={variant}
+      onChange={(next) => setVariant(next as TraeRegionId)}
+      ariaLabel={t("trae.variant.switch.aria")}
+      items={items.map((item) => {
         const state = item.running
           ? t("trae.variant.switch.running")
           : item.installed
             ? t("trae.variant.switch.installed")
             : t("trae.variant.switch.notDetected");
-        const title = item.version
-          ? t("trae.variant.switch.tipVersion", {
-              label: item.variantLabel,
-              state,
-              version: item.version,
-            })
-          : t("trae.variant.switch.tip", { label: item.variantLabel, state });
-        return (
-          <button
-            key={item.variant}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            onClick={() => setVariant(item.variant as TraeRegionId)}
-            title={title}
-            className={cn(
-              "inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs outline-none transition-colors",
-              "focus-visible:ring-2 focus-visible:ring-ring/50",
-              active
-                ? "bg-background font-medium text-foreground shadow-sm"
-                : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-            )}
-          >
-            {/* 图标用该区域**主程序**的（区域自身不是客户端）。 */}
-            <TraeVariantMark variant={item.programs?.[0]?.variant ?? item.variant} size={18} />
-            <span>{item.variantLabel}</span>
-            {/* 运行状态点：`installed` 但未运行时用暗点，未安装则完全不显示点——
-                这里只表达「此刻在不在跑」，安装与否放在 title 里，不占视觉额度。 */}
-            {item.installed && (
-              <span
-                aria-hidden
-                className={cn(
-                  "size-1.5 rounded-full",
-                  item.running ? "bg-emerald-500" : "bg-muted-foreground/40",
-                )}
-              />
-            )}
-          </button>
-        );
+        return {
+          value: item.variant,
+          label: item.variantLabel,
+          // 图标用该区域**主程序**的（区域自身不是客户端）。
+          mark: <TraeVariantMark variant={item.programs?.[0]?.variant ?? item.variant} size={16} />,
+          // 圆点表达「此刻在不在跑」：在跑=主色、装了没跑=灰、没装=空圈。
+          // 客户端版本号等信息放 title，不占视觉额度。
+          presence: item.running ? "active" : item.installed ? "idle" : "absent",
+          title: item.version
+            ? t("trae.variant.switch.tipVersion", {
+                label: item.variantLabel,
+                state,
+                version: item.version,
+              })
+            : t("trae.variant.switch.tip", { label: item.variantLabel, state }),
+        };
       })}
-    </div>
+    />
   );
 }

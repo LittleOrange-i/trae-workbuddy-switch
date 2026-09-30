@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { TraeVariantMark } from "@/components/product-marks";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { VariantSwitch } from "@/components/variant-switch";
 import { useT } from "@/lib/i18n";
 import {
   TRAE_VARIANT_FALLBACK,
@@ -10,17 +10,17 @@ import {
   type TraeVariantLogins,
 } from "@/lib/trae-variant-status";
 import type { TraeRegionId, TraeVariantStatus } from "@/lib/trae-types";
-import { cn } from "@/lib/utils";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 
 /**
- * 页头下方的**全宽产品线状态条**（账号页专用，替代页头右侧的 `TraeVariantSwitch`）。
+ * 标题下方的**区域状态条**（账号页专用：比 `TraeVariantSwitch` 多一行「各线登录态」）。
  *
- * ## 结构照 WorkBuddy `AccountsPage.tsx` 的 region Tabs
+ * ## 渲染已并入共用的 `VariantSwitch`（2026-09-30）
  *
- * `Tabs + TabsList(h-auto gap-1 p-1)` + **两行 Tab**：
- * 第一行「状态圆点 + 变体名」，第二行「已登录: 账号名 / 未登录 / 未检测到」。
- * 状态圆点配色对齐 `AccountsPage.tsx` 的 `RegionTab`。
+ * 原先这里自己写了一份「两行 Tab」（第一行状态圆点 + 变体名，第二行登录态），
+ * 与 WorkBuddy 账号页的 `RegionTab` 是两份同款实现 —— 注释里那句
+ * 「结构照 WorkBuddy `AccountsPage.tsx` 的 region Tabs」正是漂移的前兆。
+ * 现在两侧都由 `VariantSwitch` 渲染，本组件只负责**探测 + 映射**。
  *
  * ## 载体仍是 URL `?line=`（`useTraeVariant`）
  *
@@ -114,55 +114,34 @@ export function TraeVariantBar({
 
   const resolvedLogins = logins ?? fetchedLogins;
 
+  // 渲染交给**共用的** `VariantSwitch`（与 WorkBuddy 账号页同一套视觉），
+  // 本组件只负责「探测各线状态 → 映射成条目」这一层。
   return (
-    <Tabs value={variant} onValueChange={(value) => setVariant(value as TraeRegionId)} className={className}>
-      <TabsList className="h-auto gap-1 p-1">
-        {items.map((item) => {
-          // 区域条目的登录态取**该区域主程序**（首个程序位）的 —— 登录态是客户端级的，
-          // 而区域标识（`cn`/`global`）本身没有对应的客户端。
-          const mark = item.programs?.[0]?.variant ?? item.variant;
-          const login = resolvedLogins[mark] ?? null;
-          const active = item.variant === variant;
-          const presence = login ? "logged-in" : item.installed ? "installed" : "absent";
+    <VariantSwitch
+      className={className}
+      value={variant}
+      onChange={(next) => setVariant(next as TraeRegionId)}
+      ariaLabel={t("trae.variant.switch.aria")}
+      items={items.map((item) => {
+        // 区域条目的登录态取**该区域主程序**（首个程序位）的 —— 登录态是客户端级的，
+        // 而区域标识（`cn`/`global`）本身没有对应的客户端。
+        const mark = item.programs?.[0]?.variant ?? item.variant;
+        const login = resolvedLogins[mark] ?? null;
+        return {
+          value: item.variant,
+          label: item.variantLabel,
+          // 图标用该区域**主程序**的（区域自己不是客户端）。
+          mark: <TraeVariantMark variant={mark} size={15} />,
+          presence: login ? "active" : item.installed ? "idle" : "absent",
           // `login.name` 已经是「账号库里的名字，查不到则回落 uid」——
           // 回落链刻意只写在 `loadTraeVariantLogins` 一处，见 `TraeVariantLogin.name`。
-          const presenceText = login
+          detail: login
             ? t("trae.variant.bar.loggedIn", { name: login.name })
             : item.installed
               ? t("trae.variant.bar.notLoggedIn")
-              : t("trae.variant.bar.notDetected");
-          return (
-            <TabsTrigger
-              key={item.variant}
-              value={item.variant}
-              className="h-auto flex-col items-start gap-0.5 rounded-lg px-4 py-2 text-left"
-            >
-              <span
-                className={cn(
-                  "flex items-center gap-1.5 text-[13px] font-medium",
-                  active ? "text-foreground" : "text-muted-foreground",
-                )}
-              >
-                <span
-                  className={cn(
-                    "inline-block size-2 rounded-full",
-                    presence === "logged-in"
-                      ? "bg-primary"
-                      : presence === "installed"
-                        ? "bg-muted-foreground/40"
-                        : "border border-muted-foreground/50",
-                  )}
-                  aria-hidden="true"
-                />
-                {/* 图标同登录态：区域用**主程序**的图标（区域自己不是客户端）。 */}
-                <TraeVariantMark variant={mark} size={15} />
-                {item.variantLabel}
-              </span>
-              <span className="pl-3.5 text-[11px] font-normal text-muted-foreground">{presenceText}</span>
-            </TabsTrigger>
-          );
-        })}
-      </TabsList>
-    </Tabs>
+              : t("trae.variant.bar.notDetected"),
+        };
+      })}
+    />
   );
 }

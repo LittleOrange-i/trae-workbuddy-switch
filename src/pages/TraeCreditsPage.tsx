@@ -224,17 +224,14 @@ export default function TraeCreditsPage() {
 
   return (
     <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
-      <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.credits.title")}</h1>
-          <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            {t("trae.stats.credits.subtitle")}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {/* 产品线切换器：Trae 分区的每个页面都可切，位置固定在页头右侧动作区。
-              侧栏已合并为单个 `Trae` 入口，产品线的选择在这里。 */}
-          <TraeVariantSwitch />
+      <header className="mb-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.credits.title")}</h1>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+              {t("trae.stats.credits.subtitle")}
+            </p>
+          </div>
           <DemoAction>
             <Button variant="outline" size="sm" disabled={refreshing} onClick={() => void refreshCredits()}>
               {refreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
@@ -242,6 +239,9 @@ export default function TraeCreditsPage() {
             </Button>
           </DemoAction>
         </div>
+        {/* 区域入口在**标题下方**（两个模块统一的位置）：整页跟随它。
+            侧栏已合并为单个 `Trae` 入口，区域的选择在这里。 */}
+        <TraeVariantSwitch className="mt-4" />
       </header>
 
       {error && (

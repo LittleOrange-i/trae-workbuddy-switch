@@ -6,7 +6,6 @@ import { Card } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { copyText } from "@/lib/clipboard";
 import { useT, type Translate } from "@/lib/i18n";
-import { REGIONS, regionDescriptor } from "@/lib/region";
 import { cn } from "@/lib/utils";
 import type { ApiKeyRecord, Region } from "@/lib/types";
 import { useGatewayStore } from "@/stores/gateway";
@@ -80,12 +79,27 @@ function snippetFor(t: Translate, tool: ToolKey, baseUrl: string, rootUrl: strin
   }
 }
 
-/** 接入指引 Tabs（Cursor / Cline / Continue / Claude Code / OpenWebUI / Cherry Studio），带复制按钮（P0-9）。 */
-export function IntegrationGuide({ baseUrl, className }: { baseUrl: string; className?: string }) {
+/**
+ * 接入指引 Tabs（Cursor / Cline / Continue / Claude Code / OpenWebUI / Cherry Studio），带复制按钮（P0-9）。
+ *
+ * ## 版本由页面传入（受控）
+ *
+ * 改造前这里自带一个「国内版 Key / 国际版 Key」的 Tabs，与页面上的接入地址、
+ * 账号池、模型清单各切各的。现在与 Trae 侧一致：版本在**页头唯一入口**切换，
+ * 本组件只按传入的版本取对应 Key（`representativeKey`）。
+ */
+export function IntegrationGuide({
+  baseUrl,
+  region,
+  className,
+}: {
+  baseUrl: string;
+  region: Region;
+  className?: string;
+}) {
   const t = useT();
   const keys = useGatewayStore((s) => s.keys);
   const [tool, setTool] = useState<ToolKey>("cursor");
-  const [region, setRegion] = useState<Region>("cn");
   const [copied, setCopied] = useState(false);
 
   const rootUrl = baseUrl.replace(/\/v1\/?$/, "");
@@ -101,17 +115,9 @@ export function IntegrationGuide({ baseUrl, className }: { baseUrl: string; clas
   return (
     <Card className={cn("gap-0 py-0", className)}>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-3">
+        {/* 版本不在这里显示也不在这里切：页头切换器是唯一入口（与 Trae 侧同口径）。 */}
         <span className="text-sm font-semibold">{t("wbStats.gateway.guide")}</span>
         <div className="flex flex-wrap items-center gap-2">
-          <Tabs value={region} onValueChange={(value) => setRegion(value as Region)}>
-            <TabsList>
-              {REGIONS.map((r) => (
-                <TabsTrigger key={r} value={r}>
-                  {regionDescriptor(r).versionLabel} Key
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
           <Button variant="outline" size="sm" onClick={() => void onCopy()}>
             {copied ? <Check /> : <Copy />}
             {t("wbStats.gateway.copyCode")}

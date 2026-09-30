@@ -11,6 +11,7 @@
 export const zh = {
   // ---- 页面：账号管理 ----
   "wbAccounts.page.title": "账号管理",
+  "wbAccounts.page.regionSwitchAria": "切换国内版 / 国际版",
   "wbAccounts.page.subtitle": "分别管理国内版与国际版 {product} 账号、积分和签到状态，两版账号库互相隔离。",
   "wbAccounts.page.addTitle": "添加与迁移账号",
   "wbAccounts.page.addSubtitle": "快速接入新账号，或从已有环境恢复",

@@ -129,11 +129,11 @@ interface AccountsSnapshot {
  * 卡片栅格 → 各确认 Dialog。用户在两个分区之间切换时不需要重新学习界面。
  *
  * **文案与数据源按 Trae 实情落地**，不搬 WorkBuddy 的：
- * - 版本切换的**语义与 WorkBuddy 完全对应**（国内版 / 国际版），差别只在**控件位置**：
- *   WorkBuddy 在页头右侧放一枚窄切换器，Trae 用页头下方的**全宽状态条**
- *   （`trae-variant-bar.tsx`）—— 它还要并排显示每个区域各自的登录账号与程序位状态，
- *   窄控件放不下。承载标识见 `useTraeVariant`（返回**区域**；旧值 `trae_work`/`trae_cn`
- *   一律回落国内版，否则老书签会去读空库）；
+ * - 版本切换的**语义与 WorkBuddy 完全对应**（国内版 / 国际版），控件也**同源**
+ *   （`variant-switch.tsx`，位置同在标题下方）。本页用 `TraeVariantBar` 是因为它比通用款
+ *   多一行「各区域登录了哪个账号」——账号页正需要这层信息，其他页面用单行的
+ *   `TraeVariantSwitch` 即可。承载标识见 `useTraeVariant`（返回**区域**；旧值
+ *   `trae_work`/`trae_cn` 一律回落国内版，否则老书签会去读空库）；
  * - 卡片头部的**程序切换按钮**（该区域的每个 Trae 程序各一枚）对应 WorkBuddy 卡片上的
  *   WorkBuddy / CodeBuddy IDE / CodeBuddy CLI 三枚按钮——都是「把这个账号挂到哪个
  *   客户端上」。这个维度 Trae 叫**程序位**（TraeWork / TraeCode，见 `TraeProgram`），
@@ -738,7 +738,7 @@ export default function TraeAccountsPage() {
         </div>
       </header>
 
-      {/* 全宽产品线状态条（替代页头右侧的 `TraeVariantSwitch`）。
+      {/* 区域状态条（在**标题下方**，与另一模块同一位置；比通用款多一行「各区域登录态」）。
           `value` / `onValueChange` 映射到 URL `?line=`（`useTraeVariant`）；切换**只改 URL**，
           由下方既有 `loadAll` 重取四份数据——**不**用 `TabsContent` 为每个变体各放一个面板，
           那会让两个面板各自挂载一次取数、每次切换都触发重复请求。 */}

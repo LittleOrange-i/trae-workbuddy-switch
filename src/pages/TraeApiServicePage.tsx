@@ -304,15 +304,13 @@ export default function TraeApiServicePage() {
 
   return (
     <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
-      <header className="mb-6 flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
-        <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.api.title")}</h1>
-          <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            {t("trae.stats.api.subtitle")}
-          </p>
-        </div>
-        {/* 产品线切换器：Trae 分区的每个页面都可切，位置固定在页头右侧。 */}
-        <TraeVariantSwitch className="shrink-0" />
+      {/* 区域入口在**标题下方**（两个模块统一的位置）：整页跟随它。 */}
+      <header className="mb-6">
+        <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.api.title")}</h1>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+          {t("trae.stats.api.subtitle")}
+        </p>
+        <TraeVariantSwitch className="mt-4" />
       </header>
 
       {error && (

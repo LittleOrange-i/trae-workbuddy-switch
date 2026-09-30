@@ -22,8 +22,8 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { VariantSwitch, type VariantSwitchItem } from "@/components/variant-switch";
 import {
   Dialog,
   DialogContent,
@@ -162,40 +162,38 @@ function presenceText(presence: RegionPresence, status: AppStatus | null, t: Tra
   return t("wbAccounts.common.notDetected");
 }
 
-function RegionTab({ region, active }: { region: Region; active: boolean }) {
-  const status = useAccountsStore((s) => (region === "cn" ? s.status : s.global.status));
-  const accounts = useAccountsStore((s) => (region === "cn" ? s.accounts : s.global.accounts));
-  const descriptor = regionDescriptor(region);
-  const presence = regionPresence(status, accounts);
+/**
+ * 两个版本的切换条目，交给**共用的** [`VariantSwitch`] 渲染。
+ *
+ * 与 Trae 账号页的同类条目**同形**（状态圆点 + 版本名 + 第二行状态文字），
+ * 差异只在数据来源：这里读**账号库 / 客户端安装状态**，Trae 那边读各客户端进程状态。
+ * 改造前两边各写一份 Tab 渲染（Trae 那份的注释里就写着「结构照 WorkBuddy AccountsPage」），
+ * 现在合成同一个组件，避免再漂移。
+ */
+function useRegionSwitchItems(): VariantSwitchItem[] {
+  const cnStatus = useAccountsStore((s) => s.status);
+  const cnAccounts = useAccountsStore((s) => s.accounts);
+  const globalStatus = useAccountsStore((s) => s.global.status);
+  const globalAccounts = useAccountsStore((s) => s.global.accounts);
   const t = useT();
 
-  return (
-    <TabsTrigger
-      value={region}
-      className="h-auto flex-col items-start gap-0.5 rounded-lg px-4 py-2 text-left"
-    >
-      <span className={cn("flex items-center gap-1.5 text-[13px] font-medium", active ? "text-foreground" : "text-muted-foreground")}>
-        <span
-          className={cn(
-            "inline-block size-2 rounded-full",
-            presence === "logged-in"
-              ? "bg-primary"
-              : presence === "installed"
-                ? "bg-muted-foreground/40"
-                : "border border-muted-foreground/50",
-          )}
-        />
-        {descriptor.versionLabel}
-        <span className="text-muted-foreground/70">{descriptor.displayName}</span>
-      </span>
-      <span className="pl-3.5 text-[11px] font-normal text-muted-foreground">{presenceText(presence, status, t)}</span>
-    </TabsTrigger>
-  );
+  return REGIONS.map((region) => {
+    const status = region === "cn" ? cnStatus : globalStatus;
+    const accounts = region === "cn" ? cnAccounts : globalAccounts;
+    const presence = regionPresence(status, accounts);
+    return {
+      value: region,
+      label: regionDescriptor(region).versionLabel,
+      presence: presence === "logged-in" ? "active" : presence === "installed" ? "idle" : "absent",
+      detail: presenceText(presence, status, t),
+    };
+  });
 }
 
 export default function AccountsPage() {
   const [activeRegion, setActiveRegion] = useState<Region>("cn");
   const fetchAllRegions = useAccountsStore((s) => s.fetchAllRegions);
+  const regionItems = useRegionSwitchItems();
   const t = useT();
 
   useEffect(() => {
@@ -204,26 +202,24 @@ export default function AccountsPage() {
 
   return (
     <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+      {/* 版本入口在**标题下方**（两个模块统一的位置）：整页跟随它。 */}
       <header className="mb-6">
         <h1 className="text-[28px] font-semibold tracking-tight">{t("wbAccounts.page.title")}</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           {t("wbAccounts.page.subtitle", { product: "WorkBuddy" })}
         </p>
+        <VariantSwitch
+          className="mt-4"
+          value={activeRegion}
+          onChange={(next) => setActiveRegion(next as Region)}
+          ariaLabel={t("wbAccounts.page.regionSwitchAria")}
+          items={regionItems}
+        />
       </header>
 
-      <Tabs value={activeRegion} onValueChange={(value) => setActiveRegion(value as Region)}>
-        <TabsList className="mb-6 h-auto gap-1 p-1">
-          {REGIONS.map((region) => (
-            <RegionTab key={region} region={region} active={activeRegion === region} />
-          ))}
-        </TabsList>
-        <TabsContent value="cn">
-          <RegionPanel region="cn" />
-        </TabsContent>
-        <TabsContent value="global">
-          <RegionPanel region="global" />
-        </TabsContent>
-      </Tabs>
+      {/* 只渲染当前版本的区块（等价于原先 `TabsContent` 的惰性挂载：
+          未选中的版本不取数、不挂载）。 */}
+      {activeRegion === "cn" ? <RegionPanel region="cn" /> : <RegionPanel region="global" />}
     </div>
   );
 }
