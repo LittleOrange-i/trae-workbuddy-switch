@@ -113,6 +113,43 @@ fn validate_home_override(raw: &str) -> Result<PathBuf, OverrideReject> {
     Ok(path)
 }
 
+/// **启动前护栏**：`BUDDY_SWITCH_HOME` 被设置但**不合法**时，返回一句可直接打印的拒绝理由。
+///
+/// ## 为什么需要它（2026-09-30 真实事故）
+///
+/// [`home_dir`] 的既有契约是「不合法 ⇒ 一次性警告 + **回落真实 home**」。那对
+/// 「嵌在别人进程里的库」是合理的，但对**独立服务**是**危险的默认值**：
+/// 调用方明明设了隔离目录，却因为目录还没建好而**静默**跑在真实 home 上 ——
+/// 账号、网关 Key、签到 / 积分记录全写到用户真实数据里，而唯一的提示是一行
+/// 可能被 `| head` / `| tail` 吞掉的 stderr 警告。
+///
+/// ⇒ 独立入口（`buddy-switch serve` / `status`）改用本函数做 **fail-closed**：
+/// 拒绝启动并让人去修变量，而不是替他决定「那就用真实数据吧」。
+/// **未设置该变量时行为完全不变**（正常使用真实 home）。
+///
+/// **纯函数**（入参就是取值，不读环境变量、不打印、无副作用），因此可以并行单测 ——
+/// 环境变量是进程级全局状态，在并行测试里是竞态源。
+pub fn home_override_refusal(value: Option<&str>) -> Option<String> {
+    let raw = value?;
+    if raw.trim().is_empty() {
+        // 与 [`home_dir_override`] 一致：未设置 / 空白 = 没有覆盖意图。
+        return None;
+    }
+    let reject = validate_home_override(raw).err()?;
+    Some(format!(
+        "环境变量 {BUDDY_SWITCH_HOME_ENV}={raw:?} 不合法（{}）。\n\
+         继续启动会**静默回落到真实用户主目录**，把账号 / 网关 Key / 签到与积分记录\
+         写到真实数据上（2026-09-30 踩过）。\n\
+         请修正该变量（指向一个**已存在的绝对目录**），或取消设置后重试。",
+        reject.describe()
+    ))
+}
+
+/// 读环境变量版的 [`home_override_refusal`]（独立入口的启动护栏用）。
+pub fn env_home_override_refusal() -> Option<String> {
+    home_override_refusal(std::env::var(BUDDY_SWITCH_HOME_ENV).ok().as_deref())
+}
+
 /// 保证同一进程内「[`BUDDY_SWITCH_HOME_ENV`] 被忽略」的警告**只打印一次**：否则每个
 /// 落到 `home_dir()` 的调用都会重复刷屏。
 static HOME_OVERRIDE_WARNED: Once = Once::new();
@@ -1572,6 +1609,30 @@ mod tests {
             Err(OverrideReject::NotDir)
         );
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// ★★ 独立入口的启动护栏：覆盖值**被设置但不合法**时必须给出拒绝理由。
+    ///
+    /// 反例（改坏会红）：退回「警告 + 回落真实 home」⇒ 调用方以为在隔离环境里跑，
+    /// 实际把账号 / 网关 Key / 签到与积分记录写到用户真实数据上（2026-09-30 真实事故）。
+    #[test]
+    fn home_override_refusal_only_for_set_but_invalid_values() {
+        // 未设置 / 空白：没有覆盖意图 ⇒ 放行（与改造前一致）。
+        assert!(home_override_refusal(None).is_none());
+        assert!(home_override_refusal(Some("   ")).is_none());
+
+        // 合法：已存在的绝对目录 ⇒ 放行。
+        let dir = std::env::temp_dir();
+        assert!(home_override_refusal(Some(dir.to_str().expect("utf8"))).is_none());
+
+        // 不合法 ⇒ 拒绝，理由必须点名变量、原因、后果与修法。
+        for bad in [".", "relative-home", "/no/such/dir/buddy-switch-home"] {
+            let message = home_override_refusal(Some(bad))
+                .unwrap_or_else(|| panic!("{bad} 必须被拒绝"));
+            assert!(message.contains(BUDDY_SWITCH_HOME_ENV), "{message}");
+            assert!(message.contains("已存在的绝对目录"), "要说清修法：{message}");
+            assert!(message.contains("真实"), "要说清后果：{message}");
+        }
     }
 
     /// F2：每种拒绝原因都有可读文案（面向用户的一次性警告）。

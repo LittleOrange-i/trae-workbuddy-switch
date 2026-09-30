@@ -29,7 +29,8 @@ export const DEFAULT_TRAE_GATEWAY_CONFIG: TraeGatewayConfig = {
   logKeep: 200,
   logBodies: false,
   maxBodyMb: 8,
-  defaultModel: "deepseek-v4-flash",
+  // 与 Rust 侧 `TRAE_DEFAULT_MODEL` 同源（换名要一起改，否则「配置没加载出来」时会显示旧名）。
+  defaultModel: "deepseek-v4.1-flash",
   maxRotate: 3,
   // 空串 = 不指定账号（自动择优）。
   preferredUid: "",

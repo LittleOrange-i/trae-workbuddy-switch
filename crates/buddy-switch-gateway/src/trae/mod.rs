@@ -79,11 +79,71 @@ pub const TRAE_APP_ID: &str = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8";
 pub const TRAE_IDE_VERSION: &str = "0.1.50";
 pub const TRAE_IDE_VERSION_CODE: &str = "20260811";
 
-/// `function` 字段取值。
-pub const TRAE_FUNCTION: &str = "solo_work_lite";
+/// `function` 字段取值 —— **按程序位分家**（2026-09-30 实测，issue #4「看得见、调不动」）。
+///
+/// ## 为什么必须分家（实测现场）
+///
+/// 上游按 `function` 做**白名单**：不属于该 function 的模型一律回
+/// `event:error` / `code 4001 param is invalid`。实测（见
+/// `routes.rs::tests::probe_traecode_model_names`）：
+///
+/// | function | 模型 | 结果 |
+/// |:---|:---|:---|
+/// | `solo_work_lite` | `glm-5.3` | ✅ |
+/// | `solo_work_lite` | `glm-5.3-flash` | ❌ 4001 |
+/// | `chat_v3` | `glm-5.3-flash` | ✅ |
+/// | `solo_agent` | `glm-5.3-flash` | ✅ |
+/// | `solo_work_lite` | `Doubao-Seed-Code`（只在 `solo_coder` 分组里） | ❌ 4001 |
+///
+/// 写死成 `solo_work_lite` 时，TraeCode 的模型（`glm-5.3-flash` 等）**必然调不动**；
+/// 同时 TraeWork 对外清单里那些**不属于 `solo_work_lite`** 的模型也调不动
+/// （见 [`payload::models_response_for`] 的口径）。
+///
+/// ## 取值依据
+///
+/// 分组名直接来自客户端自己的清单键（`state.vscdb` 的
+/// `<uid><分隔符>AI.agent.model.model_list_map`）—— 那是上游下发的原始分组，
+/// 不是我方命名的。TraeWork 的 chat 分组是 `solo_work_lite`（改造前就在用），
+/// TraeCode 的 chat 分组是 `chat_v3`（`solo_agent` 实测也能过，但那是 agent 分组，
+/// 与 OpenAI 兼容网关的纯 chat 语义不符，故不取）。
+///
+/// ⚠️ **国际版两个程序位从未对真实上游跑通过**（本机无可用国际凭据），
+/// 这里按**程序**派生（`TraeWork` 家族 → `solo_work_lite`、TraeCode 家族 → `chat_v3`），
+/// 与「产品线不改变端点、region 才改变端点」的既有结论同向 —— 但**未实测**。
+pub const TRAE_FUNCTION_SOLO_WORK: &str = "solo_work_lite";
+pub const TRAE_FUNCTION_CHAT_V3: &str = "chat_v3";
+
+/// 取该程序位该用的 `function`（见 [`TRAE_FUNCTION_SOLO_WORK`] 的实测表）。
+///
+/// 判据是**程序**而不是区域：`TraeWork` / `Global` 都是 TraeWork 客户端，
+/// `Trae` / `GlobalTraeCode` 都是 TraeCode 客户端。
+pub fn function_for(variant: TraeVariant) -> &'static str {
+    match variant {
+        TraeVariant::TraeWork | TraeVariant::Global => TRAE_FUNCTION_SOLO_WORK,
+        TraeVariant::Trae | TraeVariant::GlobalTraeCode => TRAE_FUNCTION_CHAT_V3,
+    }
+}
 
 /// 未指定模型时的默认值。
-pub const TRAE_DEFAULT_MODEL: &str = "deepseek-v4-flash";
+///
+/// ## 为什么是 `deepseek-v4.1-flash` 而不是老的 `deepseek-v4-flash`（2026-09-30 实测换名）
+///
+/// 老值 `deepseek-v4-flash` 是**客户端早已不再提供**的旧名（客户端现在叫
+/// `deepseek-v4.1-flash`）；它经 `model_config` 的别名仍能打通上游（实测），
+/// 但「默认模型」是用户**看得见**的一格（模型卡的「默认 X」），指向一个客户端里
+/// 找不到的名字，就是 issue #4 那句「内容滞后」的最后一处。
+///
+/// 新值实测（`probe_traecode_model_names` 的 Y1，`solo_work_lite` 下）：
+/// `config_name=deepseek-v4.1-flash` + `model_name=deepseek-v4.1-flash__dev` → **上游接受**。
+///
+/// ⚠️ 换名会改掉「不带 `model` 的请求」实际调用的模型，因此
+/// [`TraeGatewayConfig::load`] 带一条**窄迁移**：只把落盘值恰好等于
+/// [`LEGACY_DEFAULT_MODEL`] 的改写成新值（那个值是程序自己写进去的，用户改不了它），
+/// 并打印一行说明。其他值一律不动。
+pub const TRAE_DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
+
+/// 历史默认值：只用于**一次性迁移**（见 [`TRAE_DEFAULT_MODEL`] 的说明）。
+pub const LEGACY_DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
 /// 单请求体上限默认值（MB）。与 WorkBuddy 网关保持一致。
 pub const DEFAULT_MAX_BODY_MB: usize = 8;
@@ -167,11 +227,31 @@ impl TraeGatewayConfig {
     pub fn load() -> Self {
         let file = paths::api_gateway_file();
         if let Ok(text) = std::fs::read_to_string(&file) {
-            if let Ok(config) = serde_json::from_str::<TraeGatewayConfig>(&text) {
+            if let Ok(mut config) = serde_json::from_str::<TraeGatewayConfig>(&text) {
+                config.migrate_legacy_default_model();
                 return config;
             }
         }
         TraeGatewayConfig::default()
+    }
+
+    /// **窄迁移**：把历史默认模型改写成当前默认（见 [`TRAE_DEFAULT_MODEL`] 的说明）。
+    ///
+    /// 只认**恰好等于** [`LEGACY_DEFAULT_MODEL`] 的落盘值 —— 那个值是程序自己在
+    /// [`TraeGatewayConfig::default`] 里写进去的（界面没有编辑入口），所以改写它
+    /// 不会覆盖用户的任何选择。其他值（包括用户手改过的）一律不动。
+    ///
+    /// 刻意**只改内存不落盘**：落盘交给下一次 `save()`。这样「读一次配置」不会产生
+    /// 写副作用（只读路径不该改文件），而任何一次真正的保存都会把新值带下去。
+    fn migrate_legacy_default_model(&mut self) {
+        if self.default_model.trim() == LEGACY_DEFAULT_MODEL {
+            eprintln!(
+                "[trae-gateway] 默认模型由历史值 {} 迁移为 {}（前者已不在客户端清单里；\
+                 如需其它模型请手改 api_gateway.json 的 default_model）",
+                LEGACY_DEFAULT_MODEL, TRAE_DEFAULT_MODEL
+            );
+            self.default_model = TRAE_DEFAULT_MODEL.to_string();
+        }
     }
 
     /// 原子写回配置文件。
@@ -605,6 +685,40 @@ pub fn log_file() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    /// ★★ 护栏：默认模型**只在恰好等于历史值时**被迁移（其余值一律不动）。
+    ///
+    /// 反例（改坏会红）：
+    /// - 迁移条件写成 `contains` / `starts_with` ⇒ 用户手改的
+    ///   `deepseek-v4-flash-x` 会被悄悄改成别的模型；
+    /// - 干脆不迁移 ⇒ 老用户永远看到「默认 deepseek-v4-flash」这个客户端里
+    ///   早已不存在的名字（issue #4「内容滞后」的最后一处）。
+    #[test]
+    fn legacy_default_model_is_migrated_narrowly() {
+        assert_ne!(TRAE_DEFAULT_MODEL, LEGACY_DEFAULT_MODEL);
+        assert_eq!(
+            TraeGatewayConfig::default().default_model,
+            TRAE_DEFAULT_MODEL,
+            "默认配置必须直接用当前默认值"
+        );
+
+        let mut legacy = TraeGatewayConfig {
+            default_model: LEGACY_DEFAULT_MODEL.to_string(),
+            ..Default::default()
+        };
+        legacy.migrate_legacy_default_model();
+        assert_eq!(legacy.default_model, TRAE_DEFAULT_MODEL, "恰好等于旧值 ⇒ 迁移");
+
+        // 其余值（用户手改过的、或只差一个字符的）**一律不动**。
+        for keep in ["glm-5.3", "deepseek-v4-flash-x", "DeepSeek-V4-Flash", ""] {
+            let mut config = TraeGatewayConfig {
+                default_model: keep.to_string(),
+                ..Default::default()
+            };
+            config.migrate_legacy_default_model();
+            assert_eq!(config.default_model, keep, "只有恰好等于旧值才迁移：{keep:?}");
+        }
+    }
     use super::*;
     use std::collections::BTreeSet;
 

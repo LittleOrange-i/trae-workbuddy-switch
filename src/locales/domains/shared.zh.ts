@@ -113,8 +113,9 @@ export const zh = {
   // 「待实测」是**状态标注**，不是品牌名 —— 它是这条目唯一需要翻译的部分。
   "shared.demo.trae.program.codePending": "TraeCode（待实测）",
   // ---- Trae：API Key 名 / 网关诊断 / 日志 ----
-  "shared.demo.trae.key.cursorCn": "Cursor (国内版)",
-  "shared.demo.trae.key.cherryGlobal": "Cherry (国际版)",
+  "shared.demo.trae.key.cursorCn": "Cursor (TraeWork)",
+  "shared.demo.trae.key.cherryGlobal": "Cherry (TraeWork AI)",
+  "shared.demo.trae.key.continueCode": "Continue (TraeCode)",
   "shared.demo.trae.key.legacy": "旧 Key（升级迁移）",
   "shared.demo.trae.diagnose.main": "主号(7481920:可用,积分=120)",
   "shared.demo.trae.diagnose.altA": "小号 A(7481999:冷却中,积分=65)",

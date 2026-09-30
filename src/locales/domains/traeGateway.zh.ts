@@ -35,19 +35,24 @@ export const zh = {
   // =====================================================================
   "trae.gateway.models.title": "模型清单",
   "trae.gateway.models.summary": "共 {count} 个 · 默认 {model}",
-  "trae.gateway.models.note": "清单读自 Trae 客户端的本地缓存（上游下发），客户端刷新后这里会跟着变。",
+  "trae.gateway.models.note": "清单读自 Trae 客户端的本地缓存（上游下发），客户端刷新后这里会跟着变；网关对外清单（/v1/models）按 API Key 的归属程序位取，两条程序位的内容不同。",
   "trae.gateway.models.empty": "暂无模型数据。",
   "trae.gateway.models.refresh": "重新读取",
+  "trae.gateway.models.program": "选择目标客户端",
+  "trae.gateway.models.programTip": "读取【{label}】客户端的模型清单",
   "trae.gateway.models.source": "来源",
   "trae.gateway.models.sourceCache": "客户端缓存",
   "trae.gateway.models.sourceMissing": "未读取",
   "trae.gateway.models.readAt": "读取于 {time}",
+  "trae.gateway.models.readFrom": "读取自 {label} 客户端",
   "trae.gateway.models.gatewayCount": "网关对外 {count} 个",
+  "trae.gateway.models.gatewayCountFor": "网关对外 {count} 个（{program}）",
   "trae.gateway.models.groupCount": "{count} 个",
   "trae.gateway.models.badgeDefault": "默认",
   "trae.gateway.models.badgeNew": "新",
   "trae.gateway.models.badgeBeta": "Beta",
   "trae.gateway.models.badgeCustom": "自定义",
+  "trae.gateway.models.badgeNotServed": "网关不提供",
   "trae.gateway.models.context": "上下文 {tokens}",
 
   // =====================================================================
@@ -120,7 +125,7 @@ export const zh = {
 
   // ---- 表头 ----
   "trae.gateway.key.name": "名称",
-  "trae.gateway.key.col.variant": "归属版本",
+  "trae.gateway.key.col.variant": "归属程序位",
   "trae.gateway.key.col.prefix": "前缀",
   "trae.gateway.key.col.createdAt": "创建时间",
   "trae.gateway.key.col.lastUsed": "最近使用",
@@ -128,9 +133,9 @@ export const zh = {
   "trae.gateway.key.col.actions": "操作",
 
   // ---- 创建对话框 ----
-  "trae.gateway.key.createDesc": "每个 Key 只能访问其归属版本的模型与账号池。",
+  "trae.gateway.key.createDesc": "每个 Key 只能访问其归属程序位的模型与账号池 —— TraeWork 与 TraeCode 的可调模型不同。",
   "trae.gateway.key.namePlaceholder": "例如 Cursor",
-  "trae.gateway.key.variant": "归属版本",
+  "trae.gateway.key.variant": "归属程序位",
   "trae.gateway.key.cancel": "取消",
   "trae.gateway.key.createSubmit": "创建",
 

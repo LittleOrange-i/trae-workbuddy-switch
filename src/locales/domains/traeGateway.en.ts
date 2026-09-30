@@ -27,19 +27,24 @@ export const en = {
   // =====================================================================
   "trae.gateway.models.title": "Model list",
   "trae.gateway.models.summary": "{count} total · default {model}",
-  "trae.gateway.models.note": "This list is read from the Trae client's local cache (pushed by upstream), so it follows the client's refresh.",
+  "trae.gateway.models.note": "This list is read from the Trae client's local cache (pushed by upstream), so it follows the client's refresh; the exposed list (/v1/models) follows the API key's owned client, and the two clients differ.",
   "trae.gateway.models.empty": "No model data yet.",
   "trae.gateway.models.refresh": "Reload",
+  "trae.gateway.models.program": "Select target client",
+  "trae.gateway.models.programTip": "Read the model list of the {label} client",
   "trae.gateway.models.source": "Source",
   "trae.gateway.models.sourceCache": "Client cache",
   "trae.gateway.models.sourceMissing": "Not loaded",
   "trae.gateway.models.readAt": "Read at {time}",
+  "trae.gateway.models.readFrom": "Read from the {label} client",
   "trae.gateway.models.gatewayCount": "{count} exposed by gateway",
+  "trae.gateway.models.gatewayCountFor": "{count} exposed by gateway ({program})",
   "trae.gateway.models.groupCount": "{count}",
   "trae.gateway.models.badgeDefault": "Default",
   "trae.gateway.models.badgeNew": "New",
   "trae.gateway.models.badgeBeta": "Beta",
   "trae.gateway.models.badgeCustom": "Custom",
+  "trae.gateway.models.badgeNotServed": "Not served",
   "trae.gateway.models.context": "Context {tokens}",
 
   // =====================================================================
@@ -112,7 +117,7 @@ export const en = {
 
   // ---- Table headers ----
   "trae.gateway.key.name": "Name",
-  "trae.gateway.key.col.variant": "Owned version",
+  "trae.gateway.key.col.variant": "Owned client",
   "trae.gateway.key.col.prefix": "Prefix",
   "trae.gateway.key.col.createdAt": "Created",
   "trae.gateway.key.col.lastUsed": "Last used",
@@ -120,9 +125,9 @@ export const en = {
   "trae.gateway.key.col.actions": "Actions",
 
   // ---- Create dialog ----
-  "trae.gateway.key.createDesc": "Each key can only access the models and account pool of its own version.",
+  "trae.gateway.key.createDesc": "Each key can only reach the models and account pool of its owned client — TraeWork and TraeCode offer different models.",
   "trae.gateway.key.namePlaceholder": "e.g. Cursor",
-  "trae.gateway.key.variant": "Owned version",
+  "trae.gateway.key.variant": "Owned client",
   "trae.gateway.key.cancel": "Cancel",
   "trae.gateway.key.createSubmit": "Create",
 

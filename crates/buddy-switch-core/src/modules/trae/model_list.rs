@@ -72,6 +72,16 @@ pub struct ClientModel {
     pub is_preset: bool,
     pub is_new: bool,
     pub is_beta: bool,
+    /// 是否**第三方 / 自定义路由**条目（上游 `provider` 非空，或 `custom_model_id` 有值）。
+    ///
+    /// 网关发给上游的是 `config_name` / `model_name` 这套字段，对这类条目**无效**：
+    /// 本机实测 `openrouter//stealth/ox-alpha`（`provider = "openrouter"`，
+    /// `custom_model_id = "2445846658"`）在 `solo_work_lite` 下被上游
+    /// `4001 param is invalid` 拒（见 `buddy-switch-gateway` 的 `probe_work_list_names`）。
+    ///
+    /// ⇒ 网关侧 [`buddy_switch_gateway::trae::payload`] 的对外清单会**过滤掉**它们；
+    /// 界面按「在不在对外清单里」逐个打「网关不提供」标记，两处口径一致。
+    pub is_bypass: bool,
     /// 默认上下文窗口（`context_window_size.default`），取不到为 `None`。
     pub context_window: Option<i64>,
     /// 单次回复上限（`prompt_max_tokens`），取不到为 `None`。
@@ -399,6 +409,11 @@ fn parse_model(value: &Value) -> Option<ClientModel> {
         is_preset: bool_field(value, "is_preset"),
         is_new: bool_field(value, "is_new"),
         is_beta: bool_field(value, "is_beta"),
+        is_bypass: !string_field(value, "provider").is_empty()
+            || value
+                .get("custom_model_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty()),
         context_window: value
             .get("context_window_size")
             .and_then(|size| size.get("default"))
@@ -609,6 +624,29 @@ mod tests {
             );
             cleanup(&root);
         }
+    }
+
+    /// ★★ 护栏：**第三方 / 自定义路由**条目必须被标出来（`provider` 非空或 `custom_model_id` 有值）。
+    ///
+    /// 网关发给上游的是 `config_name` / `model_name` 这套字段，对这类条目**无效** ——
+    /// 实测 `openrouter//stealth/ox-alpha`（`provider = "openrouter"`）在 `solo_work_lite`
+    /// 下被上游 `4001` 拒。漏标 ⇒ 它会进对外清单，成为又一个「看得见、调不动」。
+    #[test]
+    fn parse_model_marks_third_party_routes_as_bypass() {
+        let raw = r#"{
+            "g": [
+                {"name":"openrouter//stealth/ox-alpha","provider":"openrouter","custom_model_id":"2445846658"},
+                {"name":"custom-with-id","provider":"","custom_model_id":" 42 "},
+                {"name":"blank-provider","provider":"   ","custom_model_id":null},
+                {"name":"normal","provider":"","custom_model_id":null}
+            ]
+        }"#;
+        let groups = parse_groups(raw);
+        let models = &groups[0].models;
+        assert!(models[0].is_bypass, "provider 非空 ⇒ bypass");
+        assert!(models[1].is_bypass, "custom_model_id 非空（含空白）⇒ bypass");
+        assert!(!models[2].is_bypass, "provider 全空白 ⇒ 不是 bypass");
+        assert!(!models[3].is_bypass, "两者都空 ⇒ 正常条目");
     }
 
     /// ★ 护栏：脏值一律归一，**绝不让非字符串传到展示层**（本仓踩过 React 白屏）。

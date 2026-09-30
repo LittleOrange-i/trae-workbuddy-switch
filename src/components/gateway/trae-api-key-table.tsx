@@ -20,20 +20,61 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
-import { traeRegionLabelOf } from "@/lib/trae-types";
+import { traeRegionLabelOf, traeVariantLabel } from "@/lib/trae-types";
+import { allPrograms } from "@/lib/trae-variant-status";
 import type { TraeApiKeyRecord, TraeVariantId } from "@/lib/trae-types";
 import { cn } from "@/lib/utils";
 
 /**
- * 归属取值集合 = **两个区域**（国内版 / 国际版）。
+ * 归属取值集合 = **4 个程序位**（区域 × 程序）。
  *
- * ⚠️ 2026-09-21 由「产品线」改为「区域」，这不是文案调整：账号库按区域分家之后，
- * 网关的账号池本来就是一个区域一个（`pool.rs::sync_for` → `entries_for_region`），
- * 而国内两个程序位读到的是**同一本**库。继续把两个国内程序位列为两个选项，会得到
- * 「两把 Key 走同一个池、却记着不同归属」，且**根本建不出国际版 Key** ——
- * Token 统计的「国际版」档因此恒为空。选项集合必须与后端的分区维度一致。
+ * ## ⚠️ 2026-09-30 由「区域」改为「程序位」（issue #4 的实测结论）
+ *
+ * 2026-09-21 曾把它收成两个区域，理由是「程序位不决定 Key 能用哪些账号」——
+ * 那句话在**账号**维度上仍然成立（池是区域级的，`pool.rs::sync_for` →
+ * `entries_for_region`），但它**不完整**：程序位还决定两件事，
+ * 而这两件事恰好是「Key 能不能调到某个模型」的全部：
+ *
+ * 1. `/v1/models` 列**哪份客户端清单**（TraeWork 与 TraeCode 是两份不同的缓存）；
+ * 2. 请求体里的 **`function`** —— 上游按 function 做白名单（2026-09-30 实测），
+ *    `solo_work_lite` 只认 TraeWork 那批，TraeCode 的 `glm-5.3-flash` 一律
+ *    `4001 param is invalid`。
+ *
+ * ⇒ 只列区域时，**建不出 TraeCode 的 Key**，那条产品线的模型永远调不动
+ * （正是 issue #4 后续报障里「看得见、调不动」的另一半）。
+ *
+ * 选项集合取自共享兜底表（`allPrograms()`，与账号卡片、模型卡同源），
+ * **不在本文件里另立一份会漂移的清单**。
  */
-const VARIANTS: TraeVariantId[] = ["cn", "global"];
+const PROGRAMS = allPrograms();
+
+/**
+ * 区域标识 → 程序位：`cn` 落到该区域的**主程序**（TraeWork）。
+ *
+ * 与后端 `TraeVariant::parse("cn") == TraeWork` **同向**（见 Rust 侧该函数的说明：
+ * 区域标识必须落到主程序才安全，否则「保存登录态」这类程序级操作会读错客户端）。
+ *
+ * 用途有两处，都不能省：
+ * 1. `Select` 的 value 必须是选项集合里的值，否则下拉显示空白（页面只有区域维度）；
+ * 2. 归属列展示 —— 否则「两把行为完全相同的 Key」一个显示「国内版」、一个显示「TraeWork」。
+ *
+ * `global` / `trae_work` / `trae_cn` / `global_trae_code` 原样返回（它们本来就是程序位标识）。
+ */
+function normalizeProgramId(variant: TraeVariantId): TraeVariantId {
+  return variant === "cn" ? "trae_work" : variant;
+}
+
+/**
+ * 归属列展示用：程序位名。
+ *
+ * 兜底走 `traeVariantLabel()` —— 认不出的取值宁可显示它的本名，
+ * 也不要在界面上替后端发明一个程序位。
+ */
+function programLabelOf(variant: TraeVariantId): string {
+  const normalized = normalizeProgramId(variant);
+  return PROGRAMS.find((program) => program.variant === normalized)?.label
+    ?? traeVariantLabel(variant);
+}
 
 function formatDate(ts: number): string {
   if (!ts) return "—";
@@ -47,11 +88,10 @@ function formatDate(ts: number): string {
  *
  * ## 与 WorkBuddy 版的两处刻意差异
  *
- * 1. **「归属版本」列的取值是区域**（国内版 / 国际版），与 WorkBuddy 的 region 同义：
- *    Key 绑定 `variant`，决定它走**哪个区域的账号池**。展示走 `traeVariantLabel()`
- *    （与 Rust `TraeRegion::display_name()` 同源）。传 `"cn"` 与传 `"trae_work"`
- *    都会落进国内库（后端把区域标识解析到该区域主程序），但**下拉只列区域**：
- *    程序位是「写进哪个客户端」的执行轴，不决定 Key 能用哪些账号。
+ * 1. **「归属程序位」列的取值是程序位**（区域 × 程序，共 4 个）：Key 绑定 `variant`，
+ *    由它同时决定**走哪个区域的账号池**（池是区域级的）与**列哪份客户端清单 + 请求体带
+ *    哪个 `function`**（见 `PROGRAMS` 的说明）。展示走 `programLabelOf()`（程序位名），
+ *    badge 的 `title` 里带归属区域。
  * 2. **不搬 `Region` / `useGatewayStore`**：那是 WorkBuddy 网关的 store 耦合。
  *    本组件自持数据（无 store），列表直接调 `list_trae_api_keys`。
  *
@@ -59,7 +99,13 @@ function formatDate(ts: number): string {
  */
 export function TraeApiKeyTable({
   className,
-  /** 创建默认归属的**区域**（由页面传入当前 `?line=`，缺省 `cn` = 国内版）。 */
+  /**
+   * 创建时的默认归属（由页面传入当前 `?line=`，缺省 `cn` = 国内版）。
+   *
+   * 传进来的可能是**区域标识**（页面只有区域维度），故一律经
+   * [`normalizeProgramId`] 归一成程序位 —— 否则 `Select` 的 value 与选项对不上，
+   * 下拉会显示空白。
+   */
   defaultVariant = "cn",
   /** 数据变化（创建 / 吊销 / 删除）后的回调，供页面刷新网关状态里的 Key 前缀。 */
   onChanged,
@@ -73,7 +119,7 @@ export function TraeApiKeyTable({
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
-  const [variant, setVariant] = useState<TraeVariantId>(defaultVariant);
+  const [variant, setVariant] = useState<TraeVariantId>(() => normalizeProgramId(defaultVariant));
   const [creating, setCreating] = useState(false);
   const [plaintext, setPlaintext] = useState<{ value: string; name: string } | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<TraeApiKeyRecord | null>(null);
@@ -100,7 +146,7 @@ export function TraeApiKeyTable({
 
   function openCreate() {
     setName("");
-    setVariant(defaultVariant);
+    setVariant(normalizeProgramId(defaultVariant));
     setCreateOpen(true);
   }
 
@@ -203,8 +249,12 @@ export function TraeApiKeyTable({
                     <tr key={key.id} className="border-t border-border/60">
                       <td className="py-2 pr-4 font-medium">{key.name}</td>
                       <td className="py-2 pr-4">
-                        <Badge variant="secondary" className="rounded-md">
-                          {traeRegionLabelOf(key.variant)}
+                        <Badge
+                          variant="secondary"
+                          className="rounded-md"
+                          title={traeRegionLabelOf(key.variant)}
+                        >
+                          {programLabelOf(key.variant)}
                         </Badge>
                       </td>
                       <td className="py-2 pr-4 font-mono text-xs text-muted-foreground">{key.prefix}…</td>
@@ -275,9 +325,9 @@ export function TraeApiKeyTable({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {VARIANTS.map((item) => (
-                    <SelectItem key={item} value={item}>
-                      {traeRegionLabelOf(item)}
+                  {PROGRAMS.map((program) => (
+                    <SelectItem key={program.variant} value={program.variant}>
+                      {program.label}
                     </SelectItem>
                   ))}
                 </SelectContent>

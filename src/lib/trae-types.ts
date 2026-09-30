@@ -116,14 +116,22 @@ export function traeVariantLabel(variant: TraeVariantId): string {
  * `TraeVariantId` → **区域**展示名（国内版 / 国际版）。
  *
  * 与 {@link traeVariantLabel} 的分工：后者回答「这个标识自己是谁」（程序位就叫程序名），
- * 本函数只回答「它落在哪个区域」。凡是**按区域分区**的展示都必须用本函数 ——
- * 目前有两处：API Key 的「归属版本」列、Token 统计的版本分档。
+ * 本函数只回答「它落在哪个区域」。
+ *
+ * ## 用途（2026-09-30 收窄）
+ *
+ * 原先它的两个用途之一是 API Key 的「归属」列 —— **那个用法已撤掉**：
+ * 程序位现在真的决定行为（`/v1/models` 列哪份清单、请求体带哪个 `function`，
+ * 见 `trae-api-key-table.tsx` 的 `PROGRAMS`），所以列里必须显示**程序位**，
+ * 显示区域会让「TraeWork 与 TraeCode 两把 Key」看起来一模一样。
+ * 现在它只服务于「只关心账号体系落在哪一档」的场景 —— 目前是 API Key 归属 badge
+ * 的 `title`（提示该 Key 走哪本账号库）。
  *
  * ⚠️ 为什么不能直接用 `traeVariantLabel`：历史上写进 Key 记录的是**改造前的产品线标识**
  * （`trae_work` / `trae_cn`），而那两个产品线**都是国内构建**。照 `traeVariantLabel`
- * 显示就会得到「TraeWork / TraeCode」两个名字，而网关对它们的行为**完全相同**
+ * 显示就会得到「TraeWork / TraeCode」两个名字，而它们在**账号库**维度上完全相同
  * （同一本国内账号库、同一个池、Token 统计里同属「国内版」一档）——
- * 界面上于是出现一处**假差异**：看起来归属不同，实际毫无区别。
+ * 本函数回答的正是那个维度。
  *
  * 未建模的组合（例如国际版程序位，本机未安装）交回 {@link traeVariantLabel}，
  * **不猜**：宁可显示它的本名，也不要替后端发明一个区域。
@@ -702,6 +710,48 @@ export interface TraeClientModelList {
 export interface TraeClientModelGroup {
   function: string;
   models: TraeClientModel[];
+}
+
+/**
+ * 模型清单卡的**一个数据源**：本区域内某条**程序位**的客户端清单。
+ *
+ * ## 为什么清单要按程序位分开（issue #4 的现场）
+ *
+ * 模型清单是**客户端级**的：Trae Work 与 TraeCode 是两个客户端、两份
+ * `state.vscdb`，上游下发给它们的 function 分组与模型集合**完全不同**
+ * （实测 Trae Work = `solo_work_lite` / `solo_coder` / `agent` …，
+ * TraeCode = `builder` / `chat_v3` / `solo_agent` …）。
+ * TraeCode 专有的模型（如 `glm-5.3-flash`）**只存在于 TraeCode 那份缓存里** ——
+ * 只读区域主程序（TraeWork）时它永远不会出现，这正是用户报障
+ * 「traecode 专有的 glm-5.3-flash 没有加载出来」的原因。
+ *
+ * `variant` 是**回传给后端的程序位标识**（`trae_work` / `trae_cn` /
+ * `global` / `global_trae_code`），不是区域标识 —— 传区域只会拿到主程序那份。
+ */
+export interface TraeModelSource {
+  /** 程序位标识（直接喂给 `get_trae_client_models`）。 */
+  variant: TraeVariantId;
+  /** 程序位展示名（`TraeWork` / `TraeCode` / `TraeWork AI` / `Trae AI`）。 */
+  label: string;
+  /** 该程序位的客户端清单；未取到（后端不可用）为 `null`。 */
+  data: TraeClientModelList | null;
+  /**
+   * 该程序位下**网关对外清单**的模型 id（`get_trae_gateway_models(variant)`）。
+   *
+   * 与 `data` 口径不同：`data` 是该客户端的**全部**分组（同一模型会在多个分组里重复出现），
+   * 这里只列该程序位 `function` **真能调**的那批 —— 也就是**归属该程序位的 API Key**
+   * 连本网关时，外部客户端在 `/v1/models` 实际看到的清单。`null` = 没取到。
+   *
+   * 两个用途：
+   * 1. 条数 = `gatewayNames.length`（卡片上的「网关对外 N 个」）；
+   * 2. **逐个标记**：客户端清单里有、但这里没有的模型，就是「看得见、调不动」的那批
+   *    （实测：TraeWork 全分组 27 条里 11 条不属于 `solo_work_lite`，一律 `4001`）。
+   *    卡片据此给它们打「网关不提供」标记，把同一个坑一次堵死。
+   *
+   * ⚠️ 必须**按程序位各取一次**：`/v1/models` 只列该程序位 `function` 能调的模型
+   * （见 Rust 侧 `payload::models_response_for`），两条程序位的清单**不一样**。
+   */
+  gatewayNames: string[] | null;
 }
 
 /** 客户端模型清单里的单个模型（字段已由后端归一）。 */

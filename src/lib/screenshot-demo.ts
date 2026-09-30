@@ -1030,31 +1030,62 @@ function demoTraeGatewayStatus(): unknown {
   };
 }
 
+/**
+ * TraeWork 的对外清单（演示用）= 本机实测的 `solo_work_lite` 分组。
+ *
+ * ⚠️ 名字必须与**客户端清单里逐字相同**（含大小写）：真实后端的 `/v1/models` 返回的
+ * 就是客户端清单里的 `name`，卡片据此逐个标记「网关提不提供」。演示数据若写成小写
+ * （例如 `doubao-seed-2.1-pro`），就会把**每一个**芯片都标成「网关不提供」——
+ * 演示图会变成假象。
+ */
 const TRAE_GATEWAY_MODEL_NAMES = [
-  "doubao-seed-2.1-pro", "doubao-seed-2.1-turbo", "doubao-seed-2.0-code",
-  "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2", "glm-5.3", "glm-5-turbo",
-  "glm-5", "kimi-k2.7-code", "kimi-k3", "kimi-k2.6", "minimax-m3",
-  "qwen-3.7-plus", "sagitta", "aquila",
+  "Doubao-Seed-Evolving", "Doubao-Seed-2.1-Pro", "Doubao-Seed-2.1-Turbo",
+  "step-5-preview", "glm-5.3", "glm-5.2", "deepseek-v4.1-flash",
+  "DeepSeek-V4-Flash-Official", "DeepSeek-V4-Pro-Official", "kimi-k3",
+  "kimi-k2.7-code", "kimi-k2.6", "minimax-m3", "qwen3.8-max",
+  "qwen-3.7-plus",
 ];
 
-function demoTraeGatewayModels(): unknown {
+/**
+ * TraeCode 的对外清单（演示用）。
+ *
+ * 与 TraeWork 那份**刻意不同**：`/v1/models` 按 API Key 的归属程序位取，
+ * 且只列该程序位 `function` 能调的那批（上游按 function 做白名单，2026-09-30 实测）。
+ * 演示站若两份给一样的名字，就会把「归属程序位真的改变对外清单」这件事藏起来。
+ */
+const TRAE_GATEWAY_MODEL_NAMES_TRAE_CODE = [
+  "Doubao-Seed-Evolving", "Doubao-Seed-2.1-Pro", "step-5-preview",
+  "glm-5.3-flashx", "glm-5.3-flash", "glm-5.3", "glm-5.2",
+  "deepseek-v4.1-flash", "kimi-k3", "qwen3.8-flash", "qwen3.8-max",
+];
+
+/** `args.variant` 决定给哪份清单（缺省 = TraeWork，与后端默认变体一致）。 */
+function demoTraeGatewayModels(args?: Record<string, unknown>): unknown {
+  const names =
+    args?.variant === "trae_cn" || args?.variant === "global_trae_code"
+      ? TRAE_GATEWAY_MODEL_NAMES_TRAE_CODE
+      : TRAE_GATEWAY_MODEL_NAMES;
   return {
     object: "list",
-    data: TRAE_GATEWAY_MODEL_NAMES.map((name) => ({
+    data: names.map((name) => ({
       id: name, object: "model", created: 1753600000, owned_by: "trae",
     })),
   };
 }
 
 /**
- * 演示用的**客户端（上游下发）**模型清单。
+ * 演示用的**客户端（上游下发）**模型清单，**按程序位各一份**。
  *
  * 刻意与 `demoTraeGatewayModels` 的静态清单**不同**（多出 `Doubao-Seed-Evolving`、
  * `deepseek-v4.1-flash` 这类真实名字，且按 function 分成两组）—— 截图要能看出
  * 「这是客户端里那份随上游刷新的清单，不是写死的对外清单」，否则演示站会掩盖两者的差别。
  * 目录与 uid 一律是**明显的虚构值**，不照抄任何真机数据。
+ *
+ * ⚠️ 两条程序位给的是**不同内容**（TraeCode 那份带 `builder` / `chat_v3` 分组与
+ * 专有的 `glm-5.3-flash`）：演示站必须能看出「切程序位会换一份清单」，
+ * 否则这个选择器在截图里看起来像个假控件。
  */
-function demoTraeClientModels(): TraeClientModelList {
+function demoTraeClientModels(args?: Record<string, unknown>): TraeClientModelList {
   const model = (
     name: string,
     displayName: string,
@@ -1071,6 +1102,35 @@ function demoTraeClientModels(): TraeClientModelList {
     contextWindow: 256000,
     promptMaxTokens: 224000,
   });
+
+  if (args?.variant === "trae_cn") {
+    return {
+      variant: "trae_cn",
+      variantLabel: "Trae",
+      source: "client-cache",
+      readAt: 1753600000000,
+      dataDir: "C:\\Users\\Demo\\AppData\\Roaming\\Trae CN",
+      uid: "7000000000000002",
+      groups: [
+        {
+          function: "chat_v3",
+          models: [
+            model("Doubao-Seed-Evolving", "Seed-Evolving"),
+            model("glm-5.3-flash", "GLM-5.3-Flash"),
+            model("glm-5.3", "GLM-5.3"),
+            model("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash"),
+            model("openrouter//stealth/ox-alpha", "ox-alpha"),
+          ],
+        },
+        {
+          function: "builder",
+          models: [model("Doubao-Seed-Code", "Seed-Code", true)],
+        },
+      ],
+      note: null,
+    };
+  }
+
   return {
     variant: "trae_work",
     variantLabel: "Trae Work",
@@ -1087,6 +1147,9 @@ function demoTraeClientModels(): TraeClientModelList {
           model("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash"),
           model("glm-5.3", "GLM-5.3"),
           model("kimi-k3", "Kimi-K3"),
+          // 真实客户端清单里每个分组都带这一条（`provider = "openrouter"`）——
+          // 演示数据也要有，否则「第三方路由条目被标成网关不提供」这条断言在演示下无从验证。
+          model("openrouter//stealth/ox-alpha", "ox-alpha"),
         ],
       },
       {
@@ -1099,22 +1162,28 @@ function demoTraeClientModels(): TraeClientModelList {
 }
 
 /**
- * 演示用的 Trae 多 Key 列表（含**两个区域**各一把 + 一条历史归属）。
+ * 演示用的 Trae 多 Key 列表（**4 个程序位各一把** + 一条历史归属）。
  *
- * 刻意给出不同 `variant`（`cn` / `global`；第三条保留改造前的 `trae_work`）与一条已吊销：
- * 截图要能看出「归属版本」列与「状态」列的差异，否则演示站会掩盖归属列的存在。
- * 第三条同时是**历史数据**的样本 —— 升级前建的 Key 存的是**产品线**标识，而那个产品线
- * 属于国内区域，因此它与第一条在界面上**必须都显示「国内版」**（走 `traeRegionLabelOf`）。
- * 若哪天有人把归属列改回按标识自身取名，这一行会显示成「TraeWork」，与第一行并列成
- * 一处**假差异** —— 那时这张演示图就是回归证据。
+ * 刻意覆盖全部 4 个程序位（`trae_work` / `trae_cn` / `global` / `global_trae_code`
+ * 中的前三个，第四个本机未装国际版 TraeCode，演示里也不假装有），
+ * 加一条**改造前建的历史 Key**（存的是区域标识 `cn`，且已吊销）：
+ * 截图要能看出「归属程序位」列与「状态」列的差异，否则演示站会掩盖归属列的存在。
+ *
+ * ⚠️ **回归证据（2026-09-30 方向反转，别照着旧注释改回去）**：
+ * 那条历史 Key 存的是 `cn`，后端 `TraeVariant::parse("cn")` 落**区域主程序 TraeWork**，
+ * 因此它与第一条**必须都显示「TraeWork」**。旧注释要求它显示「国内版」——
+ * 那个口径已随「归属列改回程序位」作废（程序位现在真的决定 `/v1/models` 与 `function`）。
+ * 若哪天有人把归属列改回按区域取名，这条会显示成「国内版」，与第一条并列成一处**假差异**。
+ *
  * 明文 / hash 一律不出现（与真实 `list_response` 的脱敏白名单一致）。
  */
 function demoTraeApiKeys(): { keys: TraeApiKeyRecord[] } {
   return {
     keys: [
-      { id: "demo-trae-key-1", name: t("shared.demo.trae.key.cursorCn"), variant: "cn", prefix: "sk-trae-9f2c", createdAt: atLocalTime(3, 17, 3), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 17, 10) },
-      { id: "demo-trae-key-2", name: t("shared.demo.trae.key.cherryGlobal"), variant: "global", prefix: "sk-trae-4b7e", createdAt: atLocalTime(2, 9, 40), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 41) },
-      { id: "demo-trae-key-3", name: t("shared.demo.trae.key.legacy"), variant: "trae_work", prefix: "sk-trae-0a1b…cdef", createdAt: atLocalTime(9, 8, 0), revokedAt: atLocalTime(1, 12, 30), revoked: true, lastUsedAt: atLocalTime(3, 10, 5) },
+      { id: "demo-trae-key-1", name: t("shared.demo.trae.key.cursorCn"), variant: "trae_work", prefix: "sk-trae-9f2c", createdAt: atLocalTime(3, 17, 3), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 17, 10) },
+      { id: "demo-trae-key-2", name: t("shared.demo.trae.key.continueCode"), variant: "trae_cn", prefix: "sk-trae-6d18", createdAt: atLocalTime(2, 20, 12), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 58) },
+      { id: "demo-trae-key-3", name: t("shared.demo.trae.key.cherryGlobal"), variant: "global", prefix: "sk-trae-4b7e", createdAt: atLocalTime(2, 9, 40), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 41) },
+      { id: "demo-trae-key-4", name: t("shared.demo.trae.key.legacy"), variant: "cn", prefix: "sk-trae-0a1b…cdef", createdAt: atLocalTime(9, 8, 0), revokedAt: atLocalTime(1, 12, 30), revoked: true, lastUsedAt: atLocalTime(3, 10, 5) },
     ],
   };
 }
@@ -1330,8 +1399,8 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     case "get_trae_logs": return demoTraeLogs(args);
     case "get_trae_gateway_config": return demoTraeGatewayConfig();
     case "trae_gateway_status": return demoTraeGatewayStatus();
-    case "get_trae_gateway_models": return demoTraeGatewayModels();
-    case "get_trae_client_models": return demoTraeClientModels();
+    case "get_trae_gateway_models": return demoTraeGatewayModels(args);
+    case "get_trae_client_models": return demoTraeClientModels(args);
     case "list_trae_api_keys": return demoTraeApiKeys();
     case "get_trae_gateway_logs": return demoTraeGatewayLogs();
     default: throw new Error(t("shared.demo.error.missingReadOnly", { command }));

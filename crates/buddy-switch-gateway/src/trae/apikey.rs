@@ -1,9 +1,14 @@
-//! Trae 多 API Key 存储：**只存 sha256 哈希 + 前缀 + 归属产品线**，明文仅创建时返回一次。
+//! Trae 多 API Key 存储：**只存 sha256 哈希 + 前缀 + 归属程序位**，明文仅创建时返回一次。
 //!
 //! 落盘 `~/.buddy-switch/trae/api_gateway_keys.json`（见 [`paths::api_gateway_keys_file`]）。
 //! 与 WorkBuddy 的 [`crate::apikey::ApiKeyStore`] 同构（每次操作都读盘、无进程内缓存，
 //! 使「独立监听」与「宿主合并路由」两份实例看到同一批 Key），差异只有一处：
-//! 把 `region: Region` 换成了 `variant: TraeVariant`（**归属产品线**）。
+//! 把 `region: Region` 换成了 `variant: TraeVariant`。
+//!
+//! ⚠️ 该 `variant` 自 2026-09-30 起是**程序位**（区域 × 程序，4 个取值），不再是
+//! 「产品线」也不是「区域」：它同时决定 `/v1/models` 列哪份客户端清单与请求体带哪个
+//! `function`（见 [`super::routes::TraeKeyVariant`]）。旧值 `cn` / `global` 仍可读，
+//! 经 `TraeVariant::parse` 落**区域主程序**（TraeWork），老 Key 行为不变。
 //!
 //! ## 两条**零回归**前提（改动这里前务必先读）
 //!

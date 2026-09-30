@@ -48,7 +48,26 @@ use super::{
     TRAE_IDE_VERSION_CODE, TRAE_LLM_CHAT_PATH,
 };
 
-/// 请求扩展：承载 Bearer Key 的**归属产品线**，供 handler 选择对应的账号池。
+/// 请求扩展：承载 Bearer Key 的**归属标识**，供 handler 选择对应的账号池与 `function`。
+///
+/// ## ★ 键里存的是**程序位**（2026-09-30 起可带 TraeCode）
+///
+/// 键记录由前端「归属程序位」下拉创建，取值是 4 个程序位：
+/// `trae_work`（国内 TraeWork）/ `trae_cn`（国内 TraeCode）/ `global`（国际 TraeWork）/
+/// `global_trae_code`（国际 TraeCode）。旧值 `cn` / `global` 经 [`TraeVariant::parse`]
+/// 仍落**区域主程序**（TraeWork），老键行为不变。
+///
+/// 这里拿到的变体同时决定两件事，**两者必须同源**：
+/// 1. `/v1/models` 列哪份客户端清单（[`payload::models_response_for`]）；
+/// 2. 请求体里的 `function`（[`super::function_for`]）。
+///
+/// 只改其一就会出现「列得出来、调不动」—— 这正是 issue #4 的形态：
+/// TraeCode 的模型（`glm-5.3-flash`）曾被写死的 `solo_work_lite` 一律拒成
+/// `4001 param is invalid`（2026-09-30 上游实测，见
+/// [`super::function_for`] 的实测表与 `tests::probe_traecode_model_names`）。
+///
+/// 账号池是**区域级**的（`pool.rs` 用 `entries_for_region`），两条程序位共用一本库，
+/// 因此程序位只影响清单与 `function`，不需要新池。
 ///
 /// 用「请求扩展」而非给每个 handler 加参数：鉴权中间件解析出归属后写入，
 /// `chat_completions` 读出，避免中间件 → handler 的签名穿透一堆函数。
@@ -327,7 +346,11 @@ pub async fn messages(
     let model = payload::model_of(&upstream, &config.default_model);
     let stream = anthropic_wants_stream(&parsed);
     let max_rotate = config.max_rotate.max(1);
-    let message_id = format!("msg_{}", uuid_like());
+    // 上游响应 id 用 `chatcmpl-` 前缀（与 `/v1/chat/completions` 一致）。
+    //
+    // ★ 不要用 `msg_`：`protocol::anthropic::message_from_accumulator` 会在上游 id 上
+    // **再包一层** `msg_`，用 `msg_` 当上游前缀会得到 `msg_msg_xxx`（真实请求实测到）。
+    let chat_id = format!("chatcmpl-{}", uuid_like());
 
     // 会话 id 取**原始** Anthropic 请求体：`to_upstream_request` 不保证把
     // `metadata` 原样带过去，而客户端塞会话 id 的习惯位置就是那里
@@ -340,7 +363,7 @@ pub async fn messages(
             &upstream_body,
             &config.default_model,
             &model,
-            &message_id,
+            &chat_id,
             max_rotate,
             &config.preferred_uid,
             sticky_key.as_deref(),
@@ -355,7 +378,7 @@ pub async fn messages(
             &upstream_body,
             &config.default_model,
             &model,
-            &message_id,
+            &chat_id,
             max_rotate,
             &config.preferred_uid,
             sticky_key.as_deref(),
@@ -664,6 +687,7 @@ async fn attempt_once(
 
     let converted = payload::prepare_llm_chat_body(
         body,
+        variant,
         default_model,
         &picked.uid,
         &picked.device_id,
@@ -1299,5 +1323,229 @@ mod tests {
         assert_eq!(parse_variant_query(Some("")), TraeVariant::default());
         assert_eq!(parse_variant_query(Some("variant=unknown")), TraeVariant::default());
         assert_eq!(parse_variant_query(Some("days=7")), TraeVariant::default());
+    }
+
+    /// **实测探针**：上游认不认 TraeCode 的 `function` 与模型名（issue #4「看得见、调不动」）。
+    ///
+    /// # 为什么必须真发请求
+    ///
+    /// 网关发上游的 `config_name` / `model_name` **无法从客户端本地推导**：
+    /// TraeWork 的清单每条都带 `config_name`，而 **TraeCode 的清单里根本没有这个字段**
+    /// （本机 2026-09-30 逐条核对）。所以「`glm-5.3-flash` 该配哪个 `function`、
+    /// 哪个上游模型名」只能问上游。本仓的既有裁定也是这一条：映射对不对**只能实测**。
+    ///
+    /// # 会真实调用上游（消耗少量积分）
+    ///
+    /// 6 次极短请求（prompt = `ping`）。**不写任何状态**：直接调 [`send_llm_chat`]，
+    /// 不经过 [`attempt`] ⇒ 不写冷却、不落错误、不动粘性表。账号库只读。
+    ///
+    /// 运行：`cargo test -p buddy-switch-gateway --lib -- --ignored --nocapture probe_traecode`
+    ///
+    /// # 判读方式（★ 有对照，不是裸测）
+    ///
+    /// - `C1` 是**转录对照**：`solo_work_lite` + `glm-5.3` 是网关**当前已在用**的组合，
+    ///   它必须成功 —— 若它也失败，说明探针本身（请求体 / 头 / 凭据）有问题，
+    ///   后面几行**一律不可采信**（假阴性）。
+    /// - `C2` 是**function 对照**：`glm-5.3` 也在 TraeCode 的 `chat_v3` 清单里。
+    ///   若 C2 成功而 `V2` 失败 ⇒ 差别只在模型名；若 C2 也失败 ⇒ `chat_v3` 这个
+    ///   function 名不对（或该账号没有 TraeCode 权益）。
+    #[tokio::test]
+    #[ignore = "实测：会真实调用上游并消耗少量积分；需本机有可用 Trae 账号"]
+    async fn probe_traecode_model_names() {
+        let state = TraeGatewayState::new(TraeGatewayConfig::default());
+
+        // 真实 home 的 CN 池：只读选号（`sync_for` 只读账号库 / 冷却 / 积分）。
+        let picked = {
+            let mut pool = TraePool::for_variant(TraeVariant::TraeWork);
+            pool.sync_for(TraeVariant::TraeWork);
+            pool.pick(now_secs(), &HashSet::new(), None)
+        };
+        let Some(picked) = picked else {
+            panic!("本机 CN 账号池没有可用账号，探针无法进行");
+        };
+        println!("[probe] 账号 {}（uid {}）", picked.name, picked.uid);
+
+        // (标签, function, config_name, model_name)
+        let cases: [(&str, &str, &str, &str); 13] = [
+            ("C1 对照·已知可用", "solo_work_lite", "glm-5.3", "glm-5.3__dev"),
+            ("C2 function 对照", "chat_v3", "glm-5.3", "glm-5.3__dev"),
+            ("V1 错配 function", "solo_work_lite", "glm-5.3-flash", "glm-5.3-flash__dev"),
+            ("V2 正配·猜 __dev", "chat_v3", "glm-5.3-flash", "glm-5.3-flash__dev"),
+            ("V3 无 __dev 后缀", "chat_v3", "glm-5.3-flash", "glm-5.3-flash"),
+            ("V4 换 solo_agent", "solo_agent", "glm-5.3-flash", "glm-5.3-flash__dev"),
+            // ★ 决定「`/v1/models` 是否过度宣传」：`Doubao-Seed-Code` 只出现在 TraeWork 的
+            //   `solo_coder` 分组里，**不在** `solo_work_lite`。若它也 4001 ⇒ 当前对外清单
+            //   里那些「不属于本 function 的模型」同样调不动（与 glm-5.3-flash 同一类缺陷）。
+            ("V5 分组外的模型", "solo_work_lite", "Doubao-Seed-Code", "Doubao-Seed-Code__dev"),
+            // ★ 确认 `config_name = name` / `model_name = name + "__dev"` 这条规则能推广。
+            ("V6 规则推广", "chat_v3", "qwen3.8-flash", "qwen3.8-flash__dev"),
+            // ★★ 第三轮：旧对外清单里那三个「既不在客户端 `solo_work_lite` 分组里、
+            //   也没被实测过」的名字 —— 决定它们是**保留**还是**从清单里删掉**。
+            ("X1 旧名 deepseek-v4-pro", "solo_work_lite", "DeepSeek-V4-Pro", "deepseek_v4_pro__dev"),
+            ("X2 旧名 glm-5-turbo", "solo_work_lite", "glm-5-turbo", "glm-5-turbo__dev"),
+            ("X3 旧名 glm-5", "solo_work_lite", "glm-5", "glm-5__dev"),
+            // ★★ 第四轮：候选**新默认模型**（旧默认 `deepseek-v4-flash` 是客户端已不再
+            //   提供的旧名，虽仍可用；换默认前必须先量新名字能不能过）。
+            ("Y1 新默认候选", "solo_work_lite", "deepseek-v4.1-flash", "deepseek-v4.1-flash__dev"),
+            ("Y2 正式版候选", "solo_work_lite", "DeepSeek-V4-Flash-Official", "DeepSeek-V4-Flash-Official__dev"),
+        ];
+
+        for (label, function, config_name, model_name) in cases {
+            let src = format!(
+                r#"{{"model":"{config_name}","messages":[{{"role":"user","content":"ping"}}]}}"#
+            );
+            let converted = payload::prepare_llm_chat_body(
+                src.as_bytes(),
+                TraeVariant::TraeWork,
+                config_name,
+                &picked.uid,
+                &picked.device_id,
+                &picked.machine_id,
+            );
+            // 只改这三个字段 —— 其余字段与真实流量逐字相同（复用同一个构造器）。
+            let mut body: Value =
+                serde_json::from_slice(&converted).expect("构造器产出必然是合法 JSON");
+            body["function"] = serde_json::json!(function);
+            body["config_name"] = serde_json::json!(config_name);
+            body["model_name"] = serde_json::json!(model_name);
+            let encoded = serde_json::to_vec(&body).expect("序列化");
+
+            match send_llm_chat(&state, &picked, &encoded).await {
+                Ok(mut response) => {
+                    // 累积若干块，直到看见 `event:metadata`（上游认了）或 `event:error`（上游拒了）。
+                    // ⚠️ 只看**首块**会把 `event:progress_notice`（排队中）误判成结论 —— 踩过。
+                    let mut buffer = String::new();
+                    let mut verdict = "<45s 内没等到 metadata/error>".to_string();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+                    while std::time::Instant::now() < deadline {
+                        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                        match tokio::time::timeout(remaining, response.chunk()).await {
+                            Ok(Ok(Some(bytes))) => {
+                                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                                if let Some(index) = buffer.find("event:error") {
+                                    verdict = buffer[index..]
+                                        .chars()
+                                        .take(160)
+                                        .collect::<String>()
+                                        .replace('\n', "\\n");
+                                    break;
+                                }
+                                if buffer.contains("event:metadata") {
+                                    verdict = "event:metadata（上游接受）".to_string();
+                                    break;
+                                }
+                            }
+                            Ok(Ok(None)) => {
+                                verdict = "<响应体结束，未出现 metadata/error>".to_string();
+                                break;
+                            }
+                            Ok(Err(error)) => {
+                                verdict = format!("<读 body 失败：{error}>");
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    println!(
+                        "[{tag}] {label}  function={function} config_name={config_name} model_name={model_name}\n        HTTP {} | {verdict}",
+                        response.status(),
+                        tag = if verdict.starts_with("event:metadata") { "OK  " } else { "FAIL" },
+                    );
+                }
+                Err((status, detail)) => println!(
+                    "[FAIL] {label}  function={function} config_name={config_name} model_name={model_name}\n        HTTP {status} | {detail}"
+                ),
+            }
+        }
+    }
+
+    /// **第二轮实测**：枚举本机 TraeWork `solo_work_lite` 分组里的**每一个**模型，
+    /// 逐个问上游「认不认」—— 结论直接决定静态兜底清单 `MODEL_NAMES` 该收哪些名字。
+    ///
+    /// 与上一条的分工：那条钉**规则**（function 白名单 / 名字派生），这条钉**清单内容**。
+    /// 两者都 `#[ignore]`、都真实调用上游、都不写任何状态。
+    ///
+    /// 运行：`cargo test -p buddy-switch-gateway --lib -- --ignored --nocapture probe_work_list`
+    #[tokio::test]
+    #[ignore = "实测：会真实调用上游并消耗少量积分；需本机有可用 Trae 账号"]
+    async fn probe_work_list_names() {
+        use buddy_switch_core::modules::trae::model_list::read_client_model_list;
+
+        let state = TraeGatewayState::new(TraeGatewayConfig::default());
+        let picked = {
+            let mut pool = TraePool::for_variant(TraeVariant::TraeWork);
+            pool.sync_for(TraeVariant::TraeWork);
+            pool.pick(now_secs(), &HashSet::new(), None)
+        };
+        let Some(picked) = picked else {
+            panic!("本机 CN 账号池没有可用账号");
+        };
+
+        let function = crate::trae::function_for(TraeVariant::TraeWork);
+        let list = read_client_model_list(TraeVariant::TraeWork);
+        let group = list.groups.iter().find(|group| group.function == function);
+        let Some(group) = group else {
+            panic!("本机客户端清单里没有 `{function}` 分组，无法枚举");
+        };
+        println!(
+            "[probe] 账号 {} | 分组 `{function}` 共 {} 条 | 客户端数据目录 {:?}",
+            picked.name,
+            group.models.len(),
+            list.data_dir
+        );
+
+        // 负对照：客户端清单里**不存在**的名字，必须被拒（否则说明探针没有鉴别力）。
+        let mut names: Vec<String> = vec!["sagitta".to_string(), "aquila".to_string()];
+        names.extend(group.models.iter().map(|model| model.name.clone()));
+
+        for name in names {
+            let (config_name, model_name) = payload::model_config(&name);
+            let src = format!(r#"{{"model":"{name}","messages":[{{"role":"user","content":"ping"}}]}}"#);
+            let converted = payload::prepare_llm_chat_body(
+                src.as_bytes(),
+                TraeVariant::TraeWork,
+                &name,
+                &picked.uid,
+                &picked.device_id,
+                &picked.machine_id,
+            );
+            let mut body: Value = serde_json::from_slice(&converted).expect("构造器产出合法 JSON");
+            body["function"] = serde_json::json!(function);
+            body["config_name"] = serde_json::json!(config_name);
+            body["model_name"] = serde_json::json!(model_name);
+            let encoded = serde_json::to_vec(&body).expect("序列化");
+
+            match send_llm_chat(&state, &picked, &encoded).await {
+                Ok(mut response) => {
+                    let mut buffer = String::new();
+                    let mut verdict = "超时".to_string();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+                    while std::time::Instant::now() < deadline {
+                        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                        match tokio::time::timeout(remaining, response.chunk()).await {
+                            Ok(Ok(Some(bytes))) => {
+                                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                                if let Some(index) = buffer.find("event:error") {
+                                    verdict = buffer[index..].chars().take(90).collect();
+                                    break;
+                                }
+                                if buffer.contains("event:metadata") {
+                                    verdict = "OK".to_string();
+                                    break;
+                                }
+                            }
+                            Ok(Ok(None)) => break,
+                            Ok(Err(error)) => {
+                                verdict = format!("读 body 失败：{error}");
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    println!("[{:4}] {name:34} config_name={config_name:34} {verdict}", if verdict == "OK" { "OK" } else { "FAIL" });
+                }
+                Err((status, detail)) => println!("[FAIL] {name:34} HTTP {status} | {detail}"),
+            }
+        }
     }
 }

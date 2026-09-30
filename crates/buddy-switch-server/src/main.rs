@@ -254,10 +254,38 @@ fn print_status() {
     println!("账号数: {}", account::load_accounts().len());
 }
 
+/// 启动前护栏：`BUDDY_SWITCH_HOME` **被设置但不合法**时**拒绝启动**（fail-closed）。
+///
+/// 为什么不是「警告后回落真实 home」：那正是 2026-09-30 那次事故的形态 ——
+/// 调用方以为自己指向隔离目录，实际把账号 / 网关 Key / 签到与积分记录写到了**真实数据**上，
+/// 而唯一的提示是一行可能被 `| head` 吞掉的 stderr 警告。
+/// 未设置该变量时行为完全不变（正常使用真实 home）。判定与文案都在
+/// [`buddy_switch_core::modules::config::env_home_override_refusal`]（纯函数，可单测）。
+fn refuse_when_home_override_is_invalid(cmd: &str) {
+    let value = std::env::var(buddy_switch_core::modules::config::BUDDY_SWITCH_HOME_ENV).ok();
+    if let Some(problem) = home_override_problem(cmd, value.as_deref()) {
+        eprintln!("[buddy-switch] 拒绝启动：{problem}");
+        std::process::exit(2);
+    }
+}
+
+/// [`refuse_when_home_override_is_invalid`] 的**纯决策**部分（入参即取值，可并行单测）。
+///
+/// `None` = 放行。两种放行情形：
+/// 1. 纯查询命令（版本号）不碰任何数据，不该被环境变量拦住；
+/// 2. 环境变量未设置 / 空白 / 合法。
+fn home_override_problem(cmd: &str, value: Option<&str>) -> Option<String> {
+    if matches!(cmd, "version" | "--version" | "-V") {
+        return None;
+    }
+    buddy_switch_core::modules::config::home_override_refusal(value)
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("serve");
+    refuse_when_home_override_is_invalid(cmd);
     match cmd {
         "status" => print_status(),
         "version" | "--version" | "-V" => {
@@ -338,6 +366,34 @@ fn open_browser(addr: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★★ 护栏：`BUDDY_SWITCH_HOME` **被设置但不合法**时必须**拒绝启动**。
+    ///
+    /// 反例（改坏会红）：退回「警告后回落真实 home」⇒ 调用方以为在隔离环境里跑，
+    /// 实际把账号 / 网关 Key / 签到与积分记录写到用户真实数据上（2026-09-30 真实事故）。
+    #[test]
+    fn invalid_home_override_refuses_to_start() {
+        // 不存在 / 相对路径 → 拒绝，且理由要点名那个环境变量与修法。
+        for bad in ["D:/no/such/dir/buddy-switch-home", "relative-home", "."] {
+            let problem = home_override_problem("serve", Some(bad))
+                .unwrap_or_else(|| panic!("{bad} 必须被拒绝"));
+            assert!(problem.contains("BUDDY_SWITCH_HOME"), "{problem}");
+            assert!(problem.contains("真实"), "理由要说清后果：{problem}");
+        }
+
+        // 未设置 / 空白 / 合法目录 → 放行（行为与改造前一致）。
+        assert!(home_override_problem("serve", None).is_none());
+        assert!(home_override_problem("serve", Some("   ")).is_none());
+        let dir = std::env::temp_dir();
+        assert!(
+            home_override_problem("serve", Some(dir.to_str().expect("utf8 temp dir"))).is_none(),
+            "已存在的绝对目录必须放行"
+        );
+
+        // 纯查询命令不受影响（它不碰任何数据）。
+        assert!(home_override_problem("version", Some("D:/no/such/dir")).is_none());
+        assert!(home_override_problem("--version", Some("relative")).is_none());
+    }
 
     /// 护栏：余额刷新任务**必须**登记在后台任务注册表里。
     ///

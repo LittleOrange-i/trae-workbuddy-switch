@@ -97,8 +97,9 @@ export const en = {
   "shared.demo.trae.program.codeAi": "Trae AI",
   "shared.demo.trae.program.codePending": "TraeCode (untested)",
   // ---- Trae: API key names / gateway diagnostics / logs ----
-  "shared.demo.trae.key.cursorCn": "Cursor (CN)",
-  "shared.demo.trae.key.cherryGlobal": "Cherry (Global)",
+  "shared.demo.trae.key.cursorCn": "Cursor (TraeWork)",
+  "shared.demo.trae.key.cherryGlobal": "Cherry (TraeWork AI)",
+  "shared.demo.trae.key.continueCode": "Continue (TraeCode)",
   "shared.demo.trae.key.legacy": "Legacy key (migrated on upgrade)",
   "shared.demo.trae.diagnose.main": "Primary(7481920:available,credits=120)",
   "shared.demo.trae.diagnose.altA": "Alt A(7481999:cooling,credits=65)",

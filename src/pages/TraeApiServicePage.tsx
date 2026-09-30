@@ -34,7 +34,8 @@ import {
   normalizeTraeGatewayStatus,
   toTraeGatewayConfigRaw,
 } from "@/lib/trae-gateway";
-import type { TraeClientModelList, TraeGatewayConfig, TraeGatewayLogEntry, TraeGatewayStatus } from "@/lib/trae-types";
+import { regionPrograms } from "@/lib/trae-variant-status";
+import type { TraeGatewayConfig, TraeGatewayLogEntry, TraeGatewayStatus, TraeModelSource } from "@/lib/trae-types";
 import { cn } from "@/lib/utils";
 import { useCachedResource } from "@/lib/use-cached-resource";
 import { useTraeVariant } from "@/lib/use-trae-variant";
@@ -43,9 +44,9 @@ const LOOPBACK = "127.0.0.1";
 const LAN = "0.0.0.0";
 
 /**
- * 本页快照：网关配置 / 监听状态 / 模型清单 / 请求日志。
+ * 本页快照：网关配置 / 监听状态 / 模型清单（按程序位）/ 请求日志。
  *
- * 四者一起缓存：它们在同一次 `Promise.all` 里取、也一起被保存与清空操作改写，
+ * 它们一起缓存：都在同一次 `Promise.all` 里取、也一起被保存与清空操作改写，
  * 拆开缓存只会让「配置已保存、状态还是旧的」这种中间态有缝可钻。
  *
  * `status` 允许为 `null`（尚未取到），`config` 用默认值兜底 —— 快照还没回来时
@@ -55,21 +56,16 @@ interface ApiServiceSnapshot {
   config: TraeGatewayConfig;
   status: TraeGatewayStatus | null;
   /**
-   * **客户端（上游下发）**的模型清单（issue #4）。
+   * **客户端（上游下发）**的模型清单（issue #4），**按本区域的程序位各一份**。
    *
-   * 与「网关对外暴露的静态清单」（`get_trae_gateway_models`）**不是一回事**：
-   * 这份读自 Trae 客户端 `state.vscdb` 的上游清单缓存，因此随客户端刷新而变。
+   * 清单是客户端级的：Trae Work 与 TraeCode 是两个客户端、两份缓存，上游下发的
+   * function 分组与模型集合完全不同（TraeCode 专有的 `glm-5.3-flash` 只在它那份里）。
+   * 因此这里一次取全（顺序 = 主程序在前），由卡片内的选择器决定展示哪一份 ——
+   * 切换是纯前端行为，不需要新命令，也不会出现两份互不一致的快照。
+   *
    * 读不到时为 `source = "missing"` 的结构（**不是** `null`）—— 界面据此呈现空态与原因。
    */
-  clientModels: TraeClientModelList | null;
-  /**
-   * **网关对外清单**的模型数（`get_trae_gateway_models`）。
-   *
-   * 与 `clientModels` **同源**（同一份客户端缓存），但那边是分组视图、这边是
-   * 扁平去重后的条数 —— 也就是外部客户端连本网关时**实际看到**的模型数。
-   * 两者口径不同（分组里同一模型会重复出现），故分开呈现而不是互相推算。
-   */
-  gatewayModelCount: number | null;
+  modelSources: TraeModelSource[];
   logs: TraeGatewayLogEntry[];
 }
 
@@ -94,12 +90,17 @@ interface ApiServiceSnapshot {
  * `AccountStrategyCard`（Trae 无 `accountStrategy`）——分别以单条 Base URL、
  * 账号池卡替代。
  *
- * ## 模型清单：数据源已换成**客户端缓存**（issue #4）
+ * ## 模型清单：数据源已换成**客户端缓存**（issue #4），且**按程序位**取（后续报障）
  *
  * 上一版这里的清单来自 `get_trae_gateway_models`（网关对外暴露的**静态**常量），
  * 因此当时刻意不加刷新按钮 —— 刷新永不改变结果。issue #4 之后改用
  * `get_trae_client_models`（读客户端 `state.vscdb` 里上游下发的清单缓存），
  * 清单**随客户端刷新而变**，刷新按钮因此恢复。
+ *
+ * ⚠️ 但一个区域下有**两条程序位**（TraeWork / TraeCode），清单是客户端级的、
+ * 两份缓存内容完全不同 —— 只读主程序那一份时，TraeCode 专有的模型
+ * （实测 `glm-5.3-flash`）在界面上永远看不到。故本页按 `regionPrograms()` 把
+ * 本区域各程序位**一次取全**交给卡片，由卡片内的选择器切换展示。
  */
 export default function TraeApiServicePage() {
   const t = useT();
@@ -113,18 +114,28 @@ export default function TraeApiServicePage() {
   const [refreshingModels, setRefreshingModels] = useState(false);
 
   const loadSnapshot = useCallback(async (): Promise<ApiServiceSnapshot> => {
-    const [configRaw, statusRaw, clientModels, gatewayModelsRaw, logsRaw] = await Promise.all([
+    // 本区域的两条程序位（TraeWork / TraeCode）：清单按程序位分家，一次取全。
+    const programs = regionPrograms(variant);
+    // 每个程序位取**两**份：客户端清单（分组视图）+ 网关对外清单的条数。
+    // 后者必须按程序位各取一次 —— `/v1/models` 只列该程序位 `function` 能调的模型，
+    // 两条程序位的条数不一样（TraeWork 与 TraeCode 是两个 function）。
+    const [configRaw, statusRaw, logsRaw, ...perProgram] = await Promise.all([
       api.getTraeGatewayConfig(),
       api.getTraeGatewayStatus(variant),
-      api.getTraeClientModels(variant),
-      api.getTraeGatewayModels(variant),
       api.getTraeGatewayLogs(),
+      ...programs.map(async (program) => ({
+        data: await api.getTraeClientModels(program.variant),
+        gatewayNames: readModelNames(await api.getTraeGatewayModels(program.variant)),
+      })),
     ]);
     return {
       config: normalizeTraeGatewayConfig(configRaw),
       status: normalizeTraeGatewayStatus(statusRaw),
-      clientModels,
-      gatewayModelCount: readModelCount(gatewayModelsRaw),
+      modelSources: programs.map((program, index) => ({
+        ...program,
+        data: perProgram[index]?.data ?? null,
+        gatewayNames: perProgram[index]?.gatewayNames ?? null,
+      })),
       logs: normalizeTraeGatewayLogs(logsRaw),
     };
   }, [variant]);
@@ -143,8 +154,7 @@ export default function TraeApiServicePage() {
 
   const config = snapshot?.config ?? DEFAULT_TRAE_GATEWAY_CONFIG;
   const status = snapshot?.status ?? null;
-  const clientModels = snapshot?.clientModels ?? null;
-  const gatewayModelCount = snapshot?.gatewayModelCount ?? null;
+  const modelSources = snapshot?.modelSources ?? [];
   const logs = snapshot?.logs ?? [];
 
   /**
@@ -472,11 +482,10 @@ export default function TraeApiServicePage() {
         className="mb-6"
       />
 
-      {/* ---- 模型清单（读客户端缓存，可重新读取：见 TraeModelList 的模块头） ---- */}
+      {/* ---- 模型清单（按程序位读客户端缓存，可重新读取：见 TraeModelList 的模块头） ---- */}
       <TraeModelList
-        data={clientModels}
+        sources={modelSources}
         defaultModel={config.defaultModel}
-        gatewayModelCount={gatewayModelCount}
         refreshing={refreshingModels}
         onRefresh={() => void onRefreshModels()}
         className="mb-6"
@@ -519,12 +528,16 @@ export default function TraeApiServicePage() {
 }
 
 /**
- * `get_trae_gateway_models` 返回 OpenAI `/v1/models` 形状，这里只取**条数**。
+ * `get_trae_gateway_models` 返回 OpenAI `/v1/models` 形状，这里取**模型 id 列表**。
  *
- * 形状解析只做这一件事（取 `data.length`）：卡片展示的是客户端分组清单，
- * 这里只需要「网关对外会列出几个」这一个数，不必再建一份模型类型。
+ * 取 id 而不只取条数：卡片既要显示「网关对外 N 个」，也要**逐个标记**哪些模型
+ * 不在对外清单里（那就是「看得见、调不动」的那批）。只解析 `id` 一个字段，
+ * 不必再建一份模型类型。
  */
-function readModelCount(raw: unknown): number | null {
+function readModelNames(raw: unknown): string[] | null {
   const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  return Array.isArray(record.data) ? record.data.length : null;
+  if (!Array.isArray(record.data)) return null;
+  return record.data
+    .map((item) => (item && typeof item === "object" ? (item as Record<string, unknown>).id : null))
+    .filter((id): id is string => typeof id === "string");
 }

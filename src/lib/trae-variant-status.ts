@@ -203,3 +203,51 @@ export function findRegionStatus(
 ): TraeVariantStatus | undefined {
   return statuses.find((item) => item.variant === region);
 }
+
+/**
+ * 本区域下的**程序位**（顺序稳定：TraeWork 在前），供「按程序位取数据」的卡片使用。
+ *
+ * ## 为什么取的是 {@link TRAE_VARIANT_FALLBACK} 而不是再探测一次
+ *
+ * 本函数要回答的是「这个区域**有哪些**程序位」，而这是一个**结构性事实**
+ * （每个区域两条：TraeWork 与 TraeCode），与「装了没 / 在不在跑」无关。
+ * `TRAE_VARIANT_FALLBACK` 正是这份结构表（区域切换器在后端不可用时也用它），
+ * 复用它就**不会**多出第二份会漂移的程序位清单。
+ *
+ * ## ⚠️ 别拿它的 `installed` 当判断依据
+ *
+ * 兜底表里每个程序位都是 `installed: false`（它是「状态未知」的占位）。
+ * 调用方需要真实安装状态时应改传探测结果（`get_trae_variants`），
+ * **不要**用本函数的结果去禁用控件 —— 那会把所有程序位都禁掉。
+ * 本函数只提供 `variant`（回传标识）与 `label`（展示名）。
+ *
+ * 清单读不到（客户端没启动过 / 没登录）时不需要预先禁用：后端会回
+ * `source = "missing"` 与可读原因，界面按空态呈现即可。
+ */
+export function regionPrograms(region: TraeRegionId): { variant: TraeVariantId; label: string }[] {
+  const entry = findRegionStatus(TRAE_VARIANT_FALLBACK, region);
+  return (entry?.programs ?? []).map((program) => ({
+    variant: program.variant,
+    label: program.label,
+  }));
+}
+
+/**
+ * **全部**程序位（4 个：区域 × 程序），顺序与 {@link TRAE_VARIANT_FALLBACK} 一致。
+ *
+ * 与 {@link regionPrograms} 的分工：后者只回答「这个区域有哪两条」，
+ * 本函数回答「一共有哪几条」—— 用于**不按区域分区**、而按程序位归属的控件
+ * （目前是 API Key 的「归属程序位」下拉：一把 Key 绑定一个程序位，由它决定
+ * `/v1/models` 列哪份清单、请求体带哪个 `function`）。
+ *
+ * ⚠️ 与 {@link regionPrograms} 同样：`installed` 在兜底表里恒为 `false`，
+ * 不能拿它禁用控件；本函数只提供 `variant`（回传标识）与 `label`（展示名）。
+ */
+export function allPrograms(): { variant: TraeVariantId; label: string }[] {
+  return TRAE_VARIANT_FALLBACK.flatMap((region) =>
+    region.programs.map((program) => ({
+      variant: program.variant,
+      label: program.label,
+    })),
+  );
+}
