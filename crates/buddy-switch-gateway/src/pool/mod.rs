@@ -38,6 +38,37 @@ pub enum RealmTag {
     Global,
 }
 
+/// 域标记 → 池视图里的字符串键（`None` 为 `unknown`）。
+pub fn realm_key(realm: Option<RealmTag>) -> &'static str {
+    match realm {
+        Some(RealmTag::Cn) => "cn",
+        Some(RealmTag::Global) => "global",
+        None => "unknown",
+    }
+}
+
+/// 池状态摘要（**两侧共用的五态计数**）。
+///
+/// WorkBuddy 与 Trae 的管理面「账号池」卡读同一形状，因此**字段名即契约** ——
+/// 改动必须同步两侧（前端卡片与后端两侧各一份测试都盯着它）。
+///
+/// 五态互斥且穷尽，判定顺序见 [`PoolEntry::status_of`]。
+///
+/// ⚠️ `expired` 在 WorkBuddy 侧**恒为 0**：池条目不存积分有效期（只有「快过期的
+/// 积分**数量**」），没有判据 ⇒ 不臆造数字。前端据此**不渲染**该格（见共用卡的 `tiles`），
+/// 避免出现一个永远为 0 的假格子。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PoolSummary {
+    pub total: usize,
+    pub available: usize,
+    pub cooling: usize,
+    pub disabled: usize,
+    pub expired: usize,
+    pub zero_credits: usize,
+    pub total_credits: f64,
+}
+
 /// 池治理配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -783,21 +814,93 @@ impl Pool {
         }
     }
 
+    /// 五态计数摘要（`realm = None` 为全池）。
+    ///
+    /// 五态互斥且穷尽，判定见 [`PoolEntry::status_of`]。
+    pub fn summary(&self, now_ms: i64, realm: Option<RealmTag>) -> PoolSummary {
+        let mut summary = PoolSummary {
+            total: 0,
+            ..PoolSummary::default()
+        };
+        for entry in self.entries.values() {
+            if realm.is_some() && entry.realm != realm {
+                continue;
+            }
+            summary.total += 1;
+            match entry.status_of(now_ms) {
+                "disabled" => summary.disabled += 1,
+                "cooling" => summary.cooling += 1,
+                // `expired` 本侧无判据（见 `PoolEntry::status_of`），恒为 0。
+                "no_credits" => summary.zero_credits += 1,
+                _ => summary.available += 1,
+            }
+            // 余额未知（从未刷新）不计入总额：把未知当 0 会让「总积分」看起来凭空变少。
+            if entry.credits_refreshed_ms > 0 {
+                summary.total_credits += entry.credits as f64;
+            }
+        }
+        summary.total_credits = (summary.total_credits * 100.0).round() / 100.0;
+        summary
+    }
+
+    /// 逐账号状态（**camelCase，与 Trae 侧 `status_list` 同形**）。
+    ///
+    /// 管理面「账号池」卡两侧共用，故键名即契约：`uid` / `name` / `realm` /
+    /// `status` / `credits` / `cooling` / `cooldownUntil` / `cooldownReason` / `disabled`。
+    pub fn status_list(&self, now_ms: i64) -> Vec<Value> {
+        self.entries
+            .values()
+            .map(|entry| {
+                let status = entry.status_of(now_ms);
+                let cooldown_until = entry.expiry_ms();
+                json!({
+                    "uid": entry.uid,
+                    "name": entry.nickname,
+                    "realm": realm_key(entry.realm),
+                    "status": status,
+                    // 余额未知 ⇒ `null`（Trae 侧同义），前端显示为「—」。
+                    "credits": (entry.credits_refreshed_ms > 0).then_some(entry.credits as f64),
+                    "cooling": status == "cooling",
+                    "cooldownUntil": (cooldown_until > 0).then_some(cooldown_until),
+                    "cooldownReason": (!entry.reason.is_empty()).then(|| entry.reason.clone()),
+                    "disabled": entry.disabled,
+                })
+            })
+            .collect()
+    }
+
+    /// 诊断：逐账号「此刻为什么（不）能路由」，供管理面排查「没有可用账号」。
+    pub fn diagnose(&self, now_ms: i64) -> Vec<String> {
+        self.entries
+            .values()
+            .map(|entry| {
+                let tail = entry
+                    .uid
+                    .get(entry.uid.len().saturating_sub(8)..)
+                    .unwrap_or("");
+                let credits = if entry.credits_refreshed_ms > 0 {
+                    entry.credits.to_string()
+                } else {
+                    "未知".to_string()
+                };
+                format!(
+                    "{}({tail}:{},积分={credits})",
+                    entry.nickname,
+                    entry.rejection(now_ms)
+                )
+            })
+            .collect()
+    }
+
     /// 池状态快照（`/status` 响应体的 `accounts` 部分）。
     pub fn snapshot(&self, now_ms: i64) -> Value {
-        let realm_of = |entry: &PoolEntry| match entry.realm {
-            Some(RealmTag::Cn) => "cn",
-            Some(RealmTag::Global) => "global",
-            None => "unknown",
-        };
-
         let accounts: Vec<Value> = self
             .entries
             .values()
             .map(|entry| {
                 let mut item = json!({
                     "uid": entry.uid,
-                    "realm": realm_of(entry),
+                    "realm": realm_key(entry.realm),
                     "nickname": entry.nickname,
                     "credits": entry.credits,
                     "cooling": now_ms < entry.until_ms,
@@ -882,7 +985,9 @@ impl Pool {
             if full {
                 in_flight_full += 1;
             }
-            let bucket = realm_totals.entry(realm_of(entry)).or_insert([0; 4]);
+            let bucket = realm_totals
+                .entry(realm_key(entry.realm))
+                .or_insert([0; 4]);
             bucket[0] += 1;
             if is_healthy {
                 bucket[1] += 1;
@@ -1505,6 +1610,152 @@ mod tests {
             .find(|item| item["uid"] == json!("g-dead"))
             .expect("存在");
         assert_eq!(dead["disabled_reason"], json!("12153 session dead"));
+    }
+
+    /// 五态计数：**与 Trae 侧 `summary` 同形状**（管理面共用一张「账号池」卡）。
+    #[test]
+    fn summary_counts_every_state_once_and_filters_by_realm() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("cn-ok", Some(RealmTag::Cn), "正常");
+        pool.upsert("cn-cool", Some(RealmTag::Cn), "冷却");
+        pool.upsert("g-dead", Some(RealmTag::Global), "会话失效");
+        pool.upsert("g-zero", Some(RealmTag::Global), "零积分");
+
+        pool.set_credits("cn-ok", 30, 0);
+        pool.mark_credits_refreshed("cn-ok", NOW);
+        pool.set_credits("cn-cool", 5, 0);
+        pool.mark_credits_refreshed("cn-cool", NOW);
+        pool.apply_upstream_error(
+            "cn-cool",
+            "",
+            &UpstreamEvent::SoftRate {
+                reset_at_ms: None,
+                model_scoped: false,
+            },
+            NOW,
+        );
+        for _ in 0..3 {
+            pool.apply_upstream_error("g-dead", "", &UpstreamEvent::SessionDead, NOW);
+        }
+        pool.set_credits("g-zero", 0, 0);
+        pool.mark_credits_refreshed("g-zero", NOW);
+
+        let cn = pool.summary(NOW, Some(RealmTag::Cn));
+        assert_eq!(cn.total, 2);
+        assert_eq!(cn.available, 1, "未冷却且有余额的账号可路由");
+        assert_eq!(cn.cooling, 1);
+        assert_eq!(cn.disabled, 0);
+        assert_eq!(cn.zero_credits, 0);
+        // ★ 本侧**没有**积分有效期判据 ⇒ 恒 0，绝不臆造（见 `PoolEntry::status_of`）。
+        assert_eq!(cn.expired, 0);
+        assert_eq!(cn.total_credits, 35.0);
+
+        let global = pool.summary(NOW, Some(RealmTag::Global));
+        assert_eq!(global.total, 2);
+        assert_eq!(global.disabled, 1);
+        assert_eq!(global.zero_credits, 1);
+        assert_eq!(global.available, 0);
+
+        // `None` = 全池：两个域之和。
+        let all = pool.summary(NOW, None);
+        assert_eq!(all.total, 4);
+        assert_eq!(all.available, 1);
+        assert_eq!(all.cooling, 1);
+        assert_eq!(all.disabled, 1);
+        assert_eq!(all.zero_credits, 1);
+    }
+
+    /// 余额**未知**（从未刷新）不得被算成零积分，也不得计入总积分。
+    #[test]
+    fn summary_treats_unknown_credits_as_available_not_zero() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "从未刷新");
+
+        let summary = pool.summary(NOW, Some(RealmTag::Cn));
+        assert_eq!(summary.available, 1, "余额未知 ⇒ 可路由，不算零积分");
+        assert_eq!(summary.zero_credits, 0);
+        assert_eq!(summary.total_credits, 0.0, "未知余额不计入总额");
+    }
+
+    #[test]
+    fn status_list_uses_the_shape_shared_with_trae() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "一号");
+        pool.set_credits("u1", 12, 0);
+        pool.mark_credits_refreshed("u1", NOW);
+
+        let list = pool.status_list(NOW);
+        let object = list[0].as_object().expect("对象");
+        assert_eq!(object["uid"], json!("u1"));
+        assert_eq!(object["name"], json!("一号"));
+        assert_eq!(object["realm"], json!("cn"));
+        assert_eq!(object["status"], json!("available"));
+        assert_eq!(object["credits"], json!(12.0));
+        assert_eq!(object["disabled"], json!(false));
+        // 与 Trae 侧同形 ⇒ 前端共用一张卡：键名必须是 camelCase 那套。
+        assert!(object.contains_key("cooldownUntil"));
+        assert!(object.contains_key("cooldownReason"));
+        assert!(!object.contains_key("cooldown_until"), "不得出现 snake_case");
+        assert!(!object.contains_key("nickname"), "展示名统一叫 name");
+        // 无冷却 / 无原因 ⇒ `null`，前端据此不显示。
+        assert_eq!(object["cooldownUntil"], Value::Null);
+        assert_eq!(object["cooldownReason"], Value::Null);
+    }
+
+    /// 冷却中的账号要带上**解冻时刻与原因**，否则用户不知道要等多久。
+    #[test]
+    fn status_list_reports_cooldown_until_and_reason() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "一号");
+        pool.apply_upstream_error(
+            "u1",
+            "",
+            &UpstreamEvent::SoftRate {
+                reset_at_ms: None,
+                model_scoped: false,
+            },
+            NOW,
+        );
+
+        let object = pool.status_list(NOW)[0].as_object().expect("对象").clone();
+        assert_eq!(object["status"], json!("cooling"));
+        assert!(object["cooldownUntil"].as_i64().unwrap_or(0) > NOW, "有解冻时刻");
+        assert!(
+            object["cooldownReason"].as_str().unwrap_or("").len() > 0,
+            "有冷却原因"
+        );
+    }
+
+    /// 余额未知 ⇒ `credits: null`（与 Trae 侧同义），前端显示为「—」。
+    #[test]
+    fn status_list_marks_unknown_credits_as_null() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "一号");
+        let object = pool.status_list(NOW)[0].as_object().expect("对象").clone();
+        assert_eq!(object["credits"], Value::Null);
+    }
+
+    #[test]
+    fn diagnose_reports_reason_for_every_entry() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u-ok", Some(RealmTag::Cn), "正常");
+        pool.set_credits("u-ok", 9, 0);
+        pool.mark_credits_refreshed("u-ok", NOW);
+        pool.upsert("u-dead", Some(RealmTag::Cn), "会话失效");
+        for _ in 0..3 {
+            pool.apply_upstream_error("u-dead", "", &UpstreamEvent::SessionDead, NOW);
+        }
+
+        let lines = pool.diagnose(NOW);
+        assert_eq!(lines.len(), 2, "每个账号一行，一个都不能漏");
+        let ok = lines.iter().find(|line| line.contains("正常")).expect("存在");
+        assert!(ok.contains("可用"), "{ok}");
+        assert!(ok.contains("积分=9"), "{ok}");
+        let dead = lines.iter().find(|line| line.contains("会话失效")).expect("存在");
+        assert!(
+            dead.contains("12153 session dead"),
+            "复述后端写入的具体原因（状态名不够排查）: {dead}"
+        );
     }
 
     #[test]

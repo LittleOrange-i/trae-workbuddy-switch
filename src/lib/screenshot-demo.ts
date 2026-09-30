@@ -1,8 +1,9 @@
 import type {
   AccountMeta, AccountStrategyMap, ApiKeyRecord, AppStatus, AutoRotateConfig, CatalogSnapshot,
   CheckinConfig, CheckinLog, CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CodeBuddyCnIdeStatus, CreditExpiry,
-  CreditOfficialUsageModel, CreditStatistics, GatewayConfig, GatewayLogEntry, GatewayStatus,
-  GithubConfig, Region, RotateLog, RotateStatus, ScheduleConfig, TokenStatistics, TokenStatsGroup, TokenStatsSource,
+  CreditOfficialUsageModel, CreditStatistics, GatewayConfig, GatewayLogEntry, GatewayPoolAccount,
+  GatewayStatus, GithubConfig, Region, RotateLog, RotateStatus, ScheduleConfig, TokenStatistics,
+  TokenStatsGroup, TokenStatsSource,
   TokenStatsTotals, TravelConfig, TravelStatus,
 } from "./types";
 import type {
@@ -551,7 +552,61 @@ function demoGatewayConfig(): GatewayConfig {
   };
 }
 
+/**
+ * 网关状态（演示）。
+ *
+ * ⚠️ 池数据必须与真实后端**同形**（`pools` 两个版本键恒定存在、`accounts` 带 `realm`、
+ * `diagnose` 逐账号一行）——演示图/截图走的就是这条数据，形状错了会掩盖真实缺陷。
+ * WorkBuddy 侧**不产出 `expired`**（池不存积分有效期），演示数据也不该造。
+ */
 function demoGatewayStatus(): GatewayStatus {
+  const cnA = { uid: "demo-cn-a", name: t("shared.demo.account.a") };
+  const cnB = { uid: "demo-cn-b", name: t("shared.demo.account.b") };
+  const globalC = { uid: "demo-global-c", name: t("shared.demo.account.c") };
+  const coolingUntil = Math.floor(Date.now() / 1000) + 5400;
+  const accounts: GatewayPoolAccount[] = [
+    {
+      uid: cnA.uid,
+      name: cnA.name,
+      realm: "cn",
+      status: "available",
+      credits: 120,
+      cooling: false,
+      cooldownUntil: null,
+      cooldownReason: null,
+      disabled: false,
+    },
+    {
+      uid: cnB.uid,
+      name: cnB.name,
+      realm: "cn",
+      status: "cooling",
+      credits: 64.5,
+      cooling: true,
+      cooldownUntil: coolingUntil,
+      cooldownReason: t("shared.demo.pool.reasonRateLimited"),
+      disabled: false,
+    },
+    {
+      uid: globalC.uid,
+      name: globalC.name,
+      realm: "global",
+      status: "disabled",
+      credits: 8,
+      cooling: false,
+      cooldownUntil: null,
+      cooldownReason: t("shared.demo.pool.reasonSessionDead"),
+      disabled: true,
+    },
+  ];
+  const diagnose = accounts.map((account) =>
+    t("shared.demo.pool.diagnose", {
+      name: account.name,
+      tail: account.uid.slice(-8),
+      reason: account.cooldownReason ?? t("shared.poolStatus.available"),
+      credits: account.credits ?? t("shared.demo.pool.creditsUnknown"),
+    }),
+  );
   return {
     enabled: true,
     running: true,
@@ -559,7 +614,13 @@ function demoGatewayStatus(): GatewayStatus {
     port: 57891,
     allowNonLoopback: false,
     baseUrl: "http://127.0.0.1:57891/v1",
-    error: null,
+    lastError: null,
+    pools: {
+      cn: { total: 2, available: 1, cooling: 1, disabled: 0, expired: 0, zeroCredits: 0, totalCredits: 184.5 },
+      global: { total: 1, available: 0, cooling: 0, disabled: 1, expired: 0, zeroCredits: 0, totalCredits: 8 },
+    },
+    accounts,
+    diagnose,
   };
 }
 

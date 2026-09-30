@@ -1,4 +1,5 @@
 import { t } from "@/lib/i18n";
+import type { GatewayPoolAccount, GatewayPoolSummary } from "@/lib/types";
 
 /**
  * Trae 模块前端类型。
@@ -609,27 +610,16 @@ export interface TraeGatewayConfig {
 }
 
 /** 账号池摘要（`pool` 字段）。 */
-export interface TraeGatewayPoolSummary {
-  total: number;
-  available: number;
-  cooling: number;
-  disabled: number;
-  expired: number;
-  zeroCredits: number;
-  totalCredits: number;
-}
+/**
+ * 池五态计数 —— **与 WorkBuddy 侧逐字同形**（管理面共用 `AccountPoolCard`）。
+ *
+ * 因此这里不重新声明字段：改形状必须改 `types.ts` 里那一份，两侧一起变。
+ */
+export type TraeGatewayPoolSummary = GatewayPoolSummary;
 
-/** 池内单个账号的可路由状态。 */
-export interface TraeGatewayAccountStatus {
-  uid: string;
-  name: string;
-  status: "available" | "cooling" | "disabled" | "expired" | "no_credits";
-  credits: number | null;
+/** 池内单个账号的可路由状态（在共用字段之外补 Trae 专有两项）。 */
+export interface TraeGatewayAccountStatus extends GatewayPoolAccount {
   creditsExpireAt: number | null;
-  cooling: boolean;
-  cooldownUntil: number | null;
-  cooldownReason: string | null;
-  disabled: boolean;
   deviceIdMasked: string | null;
 }
 

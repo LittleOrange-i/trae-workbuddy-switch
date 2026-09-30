@@ -6,7 +6,14 @@
 //   · GatewayStatus / gateway_status 响应（给前端读）为 camelCase。
 // 因此本文件对 Config 以 snake_case 为准、对 Status 以 camelCase 为准，并各自保留别名兜底。
 
-import type { GatewayConfig, GatewayStatus } from "@/lib/types";
+import { t } from "@/lib/i18n";
+import type {
+  GatewayConfig,
+  GatewayPoolAccount,
+  GatewayPoolSummary,
+  GatewayStatus,
+  Region,
+} from "@/lib/types";
 
 /** 网关配置缺省值（与后端 GatewayConfig::default 对齐；字段名为 snake_case）。 */
 export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
@@ -29,6 +36,119 @@ function asNumber(value: unknown): number | undefined {
 
 function asBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+/** 账号池五态的缺省值（后端缺字段时兜底，界面显示全 0 而不是空白）。 */
+export const EMPTY_POOL_SUMMARY: GatewayPoolSummary = {
+  total: 0,
+  available: 0,
+  cooling: 0,
+  disabled: 0,
+  expired: 0,
+  zeroCredits: 0,
+  totalCredits: 0,
+};
+
+/** 账号状态 → 展示标签与语气（**两侧共用**，故放在本文件而不是 Trae 专用文件）。 */
+export const POOL_STATUS_LABELS: Record<
+  GatewayPoolAccount["status"],
+  { label: string; tone: "ok" | "warn" | "danger" | "muted" }
+> = {
+  // 表在模块加载时就定型 ⇒ 只存文案键，标签在**读取时**现取（调用方照旧读 `meta.label`）。
+  available: {
+    get label() {
+      return t("shared.poolStatus.available");
+    },
+    tone: "ok",
+  },
+  cooling: {
+    get label() {
+      return t("shared.poolStatus.cooling");
+    },
+    tone: "warn",
+  },
+  disabled: {
+    get label() {
+      return t("shared.poolStatus.disabled");
+    },
+    tone: "danger",
+  },
+  expired: {
+    get label() {
+      return t("shared.poolStatus.expired");
+    },
+    tone: "warn",
+  },
+  no_credits: {
+    get label() {
+      return t("shared.poolStatus.noCredits");
+    },
+    tone: "muted",
+  },
+};
+
+/**
+ * 归一化池五态计数。
+ *
+ * 后端一定给全两个版本（`cn` / `global`），但**老后端 / 探测应答**可能没有 ——
+ * 这里一律兜底成全 0，绝不让界面出现 `undefined`。
+ */
+export function normalizeGatewayPoolSummary(raw: unknown): GatewayPoolSummary {
+  const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    total: asNumber(record.total) ?? 0,
+    available: asNumber(record.available) ?? 0,
+    cooling: asNumber(record.cooling) ?? 0,
+    disabled: asNumber(record.disabled) ?? 0,
+    expired: asNumber(record.expired) ?? 0,
+    zeroCredits: asNumber(record.zeroCredits) ?? asNumber(record.zero_credits) ?? 0,
+    totalCredits: asNumber(record.totalCredits) ?? asNumber(record.total_credits) ?? 0,
+  };
+}
+
+/** 归一化逐账号状态；脏值（非对象 / 缺 uid）直接丢弃，避免脏值渲染崩整棵树。 */
+export function normalizeGatewayPoolAccounts(raw: unknown): GatewayPoolAccount[] {
+  if (!Array.isArray(raw)) return [];
+  const statuses: GatewayPoolAccount["status"][] = [
+    "available",
+    "cooling",
+    "disabled",
+    "expired",
+    "no_credits",
+  ];
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    const uid = typeof record.uid === "string" ? record.uid : "";
+    if (!uid) return [];
+    const rawStatus = typeof record.status === "string" ? record.status : "";
+    const status = (statuses as string[]).includes(rawStatus)
+      ? (rawStatus as GatewayPoolAccount["status"])
+      : "available";
+    return [
+      {
+        uid,
+        name: typeof record.name === "string" ? record.name : uid,
+        status,
+        credits: asNumber(record.credits) ?? null,
+        cooldownReason: typeof record.cooldownReason === "string" ? record.cooldownReason : null,
+        cooldownUntil: asNumber(record.cooldownUntil) ?? null,
+        cooling: record.cooling === true,
+        disabled: record.disabled === true,
+        realm:
+          record.realm === "cn" || record.realm === "global" ? record.realm : "unknown",
+        creditsExpireAt: asNumber(record.creditsExpireAt) ?? null,
+        deviceIdMasked:
+          typeof record.deviceIdMasked === "string" ? record.deviceIdMasked : null,
+      },
+    ];
+  });
+}
+
+/** 归一化诊断行（只保留非空字符串）。 */
+export function normalizeGatewayDiagnose(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((line): line is string => typeof line === "string" && line.length > 0);
 }
 
 /**
@@ -71,6 +191,15 @@ export function normalizeGatewayStatus(raw: unknown): GatewayStatus | null {
   const port = asNumber(record.port) ?? 57891;
   const allowNonLoopback =
     asBoolean(record.allowNonLoopback) ?? asBoolean(record.allow_non_loopback) ?? false;
+  // 池视图：`pools` 两个版本的键恒定存在（后端保证），这里再兜一次底。
+  const poolsRaw = (record.pools && typeof record.pools === "object" ? record.pools : {}) as Record<
+    string,
+    unknown
+  >;
+  const pools: Record<Region, GatewayPoolSummary> = {
+    cn: normalizeGatewayPoolSummary(poolsRaw.cn),
+    global: normalizeGatewayPoolSummary(poolsRaw.global),
+  };
   return {
     enabled: asBoolean(record.enabled) ?? false,
     running: asBoolean(record.running) ?? false,
@@ -78,7 +207,25 @@ export function normalizeGatewayStatus(raw: unknown): GatewayStatus | null {
     port,
     allowNonLoopback,
     baseUrl: asString(record.baseUrl) ?? asString(record.base_url),
-    error: typeof record.error === "string" ? record.error : null,
+    lastError: asString(record.last_error) ?? asString(record.lastError) ?? null,
+    pools,
+    accounts: normalizeGatewayPoolAccounts(record.accounts),
+    diagnose: normalizeGatewayDiagnose(record.diagnose),
+  };
+}
+
+/** 取某版本的池明细（计数 + 该版本的账号 + 诊断行）。 */
+export function poolOf(status: GatewayStatus | null, region: Region): {
+  pool: GatewayPoolSummary;
+  accounts: GatewayPoolAccount[];
+  diagnose: string[];
+} {
+  const accounts = (status?.accounts ?? []).filter((account) => account.realm === region);
+  return {
+    pool: status?.pools?.[region] ?? EMPTY_POOL_SUMMARY,
+    accounts,
+    // 诊断行不按版本标记 ⇒ 全量给出（行内自带账号名与 uid 尾号，用户能对上号）。
+    diagnose: status?.diagnose ?? [],
   };
 }
 

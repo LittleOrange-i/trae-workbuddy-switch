@@ -4,7 +4,7 @@ import { toast } from "sonner";
 
 import { DemoAction } from "@/components/demo-action";
 import { TraeVariantSwitch } from "@/components/trae-variant-switch";
-import { TraeAccountPoolCard } from "@/components/gateway/trae-account-pool-card";
+import { AccountPoolCard } from "@/components/gateway/account-pool-card";
 import { TraeApiKeyTable } from "@/components/gateway/trae-api-key-table";
 import { TraeIntegrationGuide } from "@/components/gateway/trae-integration-guide";
 import { TraeModelList } from "@/components/gateway/trae-model-list";
@@ -82,7 +82,8 @@ interface ApiServiceSnapshot {
  * Key 管理已由后端升级为**多 Key 库（含归属产品线）**（`list/create/revoke/delete_trae_api_key`），
  * 因此单 Key 卡与其「重新生成」入口（R6）一并删除，改由 `TraeApiKeyTable` 承担
  * （「归属产品线」列取代 WorkBuddy 的「归属版本」列）。接入指引 / 账号池 / 模型清单 /
- * 请求日志分别下沉为 `TraeIntegrationGuide` / `TraeAccountPoolCard` / `TraeModelList` /
+ * 请求日志分别下沉为 `TraeIntegrationGuide` / `AccountPoolCard`（与 WorkBuddy 共用）/
+ * `TraeModelList` /
  * `TraeRequestLog`——**页面不再保留任何内联副本**。
  *
  * **骨架与 WorkBuddy 刻意同构**（容器宽度、页头字号、卡片节奏、工具条排布），
@@ -473,12 +474,15 @@ export default function TraeApiServicePage() {
         onChanged={() => void loadAll()}
       />
 
-      {/* ---- 账号池 ---- */}
-      <TraeAccountPoolCard
-        status={status}
+      {/* ---- 账号池（与 WorkBuddy 侧共用同一张卡） ---- */}
+      <AccountPoolCard
+        pool={status?.pool ?? null}
+        accounts={status?.accounts ?? []}
+        diagnose={status?.diagnose ?? []}
         preferredUid={config.preferredUid}
         onPreferredUidChange={(uid) => void persist({ preferredUid: uid })}
         saving={saving}
+        totalRequests={status?.totalRequests ?? null}
         className="mb-6"
       />
 

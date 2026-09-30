@@ -143,6 +143,8 @@ fn api_routes() -> Router {
             get(api_gateway_config).post(api_save_gateway_config),
         )
         .route("/api/gateway/status", get(api_gateway_status))
+        // 打开 WorkBuddy 客户端数据目录（非 Windows 返回结构化 Unsupported）。
+        .route("/api/gateway/open-data-dir", post(api_gateway_open_data_dir))
         .route(
             "/api/gateway/keys",
             get(api_gateway_list_keys).post(api_gateway_create_key),
@@ -1121,9 +1123,48 @@ async fn api_gateway_status() -> Response {
     view.running = running;
     view.addr = addr;
     view.version = update::APP_VERSION.to_string();
+    // 账号池视图（五态 / 逐账号 / 诊断）：形状与 Trae 侧同源，管理面共用一张「账号池」卡。
+    let state = crate::gateway_host::shared_state();
+    {
+        let mut pool = state.pool.write().await;
+        // 先与账号库对齐：否则「刚导入、还没发过请求」的账号在池里不存在，页面显示空池。
+        buddy_switch_gateway::sync_pool_with_accounts(&mut pool);
+        view.fill_pool(&pool, buddy_switch_gateway::timeutil::now_ms());
+    }
+    // 最近一次请求失败的原因（与 Trae 侧同名同义）。
+    view.last_error = state.last_error.read().await.clone();
+
+    // ★ 顺手触发一次余额刷新 —— **不阻塞本响应**（在另一个任务里跑）。
+    //
+    // 账号是在本函数里刚被同步进池的（见上面的 `sync_pool_with_accounts`），此刻它们
+    // 多半「从未取过余额」；而周期循环下一轮要等满一个刷新间隔（默认 30 分钟）——
+    // 用户看到的就是「刚导入账号，页面上积分一直是『—』」（2026-09-30 实测：
+    // 19:54 起服务、20:24 才出现第一条读数）。
+    //
+    // 刷新器自带 `needs_refresh` 节流（阈值内不发请求），所以反复读状态**不会**打上游。
+    // 与「绝不在**推理请求**路径上拉余额」那条硬约束不冲突：这是管理面查询，
+    // 且取数在别的任务里跑，本响应不等它。
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let _ = buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
+        });
+    }
     match serde_json::to_value(view) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// POST /api/gateway/open-data-dir —— 打开 **WorkBuddy 客户端**的数据目录（`{region?}`）。
+///
+/// 形状（`{ok,path}` 或结构化 `Unsupported`）由 `capability::open_workbuddy_data_dir` 唯一产出，
+/// 与 Trae 侧的 `open_trae_data_dir` 同形。
+async fn api_gateway_open_data_dir(Json(body): Json<Value>) -> Response {
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    match buddy_switch_core::modules::capability::open_workbuddy_data_dir(region) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
 }
 
@@ -2775,12 +2816,25 @@ mod tests {
                 "port",
                 "allow_non_loopback",
                 "version",
+                // 账号池视图 + 最近失败原因（与 Trae 侧 `trae_gateway_status` 对位）。
+                "pools",
+                "accounts",
+                "diagnose",
+                "last_error",
             ]),
             "gateway_status key set must be pinned (snake_case)"
         );
         // 前端归一化读取 base_url；不得再出现 camelCase 键。
         assert!(body["base_url"].is_string(), "base_url must be present for the frontend");
         assert!(!body.as_object().unwrap().contains_key("baseUrl"));
+        // `pools` 的两个版本键**恒定存在**：空池不是「未知」，前端据此直接渲染两张卡。
+        assert_eq!(
+            exact_keys(&body["pools"]),
+            set_of(&["cn", "global"]),
+            "pools 必须恒含 cn / global 两个键"
+        );
+        assert!(body["accounts"].is_array(), "accounts 必须是数组（可为空）");
+        assert!(body["diagnose"].is_array(), "diagnose 必须是数组（可为空）");
 
         // config：snake_case 键集合。
         let (status, body) = call_api(Method::GET, "/api/gateway/config", None).await;

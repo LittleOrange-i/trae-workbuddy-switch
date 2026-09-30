@@ -22,7 +22,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use buddy_switch_core::modules::trae::variant::TraeVariant;
@@ -31,6 +30,7 @@ use buddy_switch_core::modules::trae::{account, credits, device};
 use crate::pool::entry::CoolKind;
 use crate::pool::entry_like::PoolEntryLike;
 use crate::pool::pick::{pick_with_preference, PickPolicy};
+use crate::pool::PoolSummary;
 
 /// 上游错误的治理类别。
 ///
@@ -199,19 +199,6 @@ pub struct PickedTraeAccount {
     pub jwt: String,
     pub device_id: String,
     pub machine_id: String,
-}
-
-/// 池状态摘要（对外响应的一部分）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TraePoolSummary {
-    pub total: usize,
-    pub available: usize,
-    pub cooling: usize,
-    pub disabled: usize,
-    pub expired: usize,
-    pub zero_credits: usize,
-    pub total_credits: f64,
 }
 
 /// 账号池。
@@ -430,10 +417,12 @@ impl TraePool {
     }
 
     /// 池状态摘要。
-    pub fn summary(&self, now: i64) -> TraePoolSummary {
-        let mut summary = TraePoolSummary {
+    /// 五态计数（形状与 WorkBuddy 侧 [`crate::pool::Pool::summary`] 同源，
+    /// 两侧管理面共用同一张「账号池」卡）。
+    pub fn summary(&self, now: i64) -> PoolSummary {
+        let mut summary = PoolSummary {
             total: self.entries.len(),
-            ..TraePoolSummary::default()
+            ..PoolSummary::default()
         };
         for entry in &self.entries {
             if entry.disabled {

@@ -622,8 +622,54 @@ export interface GatewayStatus {
   allowNonLoopback: boolean;
   /** 后端返回的 Base URL（源自 snake_case `base_url`，如 http://127.0.0.1:57891/v1），优先使用。 */
   baseUrl?: string;
-  /** 最近一次错误信息。 */
-  error?: string | null;
+  /**
+   * **最近一次请求失败**的可读原因（源自 snake_case `last_error`；`null` = 还没失败过）。
+   *
+   * 与 Trae 的 `TraeGatewayStatus.lastError` 同名同义 —— 两侧网关卡展示同一块信息。
+   * （原先这里有个 `error` 字段，后端**从不产出**、前端**从不读取**，已删。）
+   */
+  lastError?: string | null;
+  /** 账号池五态计数，**按版本分家**（键恒为 `cn` / `global`）。 */
+  pools?: Record<Region, GatewayPoolSummary>;
+  /** 逐账号状态（含 `realm`，前端按版本过滤）。 */
+  accounts?: GatewayPoolAccount[];
+  /** 逐账号「为什么不能路由」，供排查「没有可用账号」。 */
+  diagnose?: string[];
+}
+
+/**
+ * 账号池五态计数（**WorkBuddy 与 Trae 共用**：同一张 `AccountPoolCard` 读它）。
+ *
+ * 五态互斥且穷尽。`expired` 只有 Trae 侧会产出 —— WorkBuddy 池不存积分有效期，
+ * 没有判据就不造数，卡片也因此不渲染该格（见 `AccountPoolCard` 的 `tiles`）。
+ */
+export interface GatewayPoolSummary {
+  total: number;
+  available: number;
+  cooling: number;
+  disabled: number;
+  expired: number;
+  zeroCredits: number;
+  totalCredits: number;
+}
+
+/** 池内单个账号的可路由状态（两侧同形）。 */
+export interface GatewayPoolAccount {
+  uid: string;
+  name: string;
+  status: "available" | "cooling" | "disabled" | "expired" | "no_credits";
+  /** 剩余积分；`null` = 尚未刷新过（未知），显示为「—」。 */
+  credits: number | null;
+  cooldownReason?: string | null;
+  cooldownUntil?: number | null;
+  cooling?: boolean;
+  disabled?: boolean;
+  /** 仅 WorkBuddy：所属版本，前端据此把一个池拆成两张卡。 */
+  realm?: Region | "unknown";
+  /** 仅 Trae：积分到期时刻。 */
+  creditsExpireAt?: number | null;
+  /** 仅 Trae：设备标识掩码。 */
+  deviceIdMasked?: string | null;
 }
 
 /** API Key 记录（列表脱敏返回，绝不含明文）。字段名与后端 masked() 输出一致。 */

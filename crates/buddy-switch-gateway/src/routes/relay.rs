@@ -233,13 +233,23 @@ pub async fn relay(
         }
     }
 
-    Err(last.unwrap_or(RelayFailure {
+    let failure = last.unwrap_or(RelayFailure {
         error: GatewayError::NoCredential {
             region: request.region,
         },
         account: String::new(),
         upstream_message: String::new(),
-    }))
+    });
+    // 唯一失败出口 ⇒ 在这里记一次即可覆盖全部失败路径（含「没有可用账号」）。
+    // 上游原文优先于错误码文案：用户排查时「402 余额不足」比「no_credential」有用。
+    state
+        .note_last_error(if failure.upstream_message.is_empty() {
+            failure.error.message()
+        } else {
+            failure.upstream_message.clone()
+        })
+        .await;
+    Err(failure)
 }
 
 /// 选号：优先账号池（有治理状态），池给不出时回落既有策略。

@@ -27,12 +27,33 @@ export const zh = {
   // ---- 统计范围切换条（region-bar.tsx） ----
   "shared.region.scope.aria": "统计范围",
 
-  // ---- Trae 网关账号池状态（trae-gateway.ts） ----
-  "shared.trae.poolStatus.available": "可用",
-  "shared.trae.poolStatus.cooling": "冷却中",
-  "shared.trae.poolStatus.disabled": "会话失效",
-  "shared.trae.poolStatus.expired": "积分过期",
-  "shared.trae.poolStatus.noCredits": "零积分",
+  // ---- 网关账号池状态（gateway.ts —— WorkBuddy 与 Trae **共用**同一张卡）----
+  // ⚠️ `expired` 只有 Trae 侧会产出：WorkBuddy 池不存积分有效期，没有判据就不展示。
+  "shared.poolStatus.available": "可用",
+  "shared.poolStatus.cooling": "冷却中",
+  "shared.poolStatus.disabled": "会话失效",
+  "shared.poolStatus.expired": "积分过期",
+  "shared.poolStatus.noCredits": "零积分",
+
+  // ---- 网关账号池卡（components/gateway/account-pool-card.tsx，两侧共用）----
+  "shared.gateway.pool.title": "账号池",
+  "shared.gateway.pool.totalRequests": "累计请求 {count}",
+  "shared.gateway.pool.tile.available": "可路由",
+  "shared.gateway.pool.tile.cooling": "冷却中",
+  "shared.gateway.pool.tile.disabled": "会话失效",
+  "shared.gateway.pool.tile.expired": "积分过期",
+  "shared.gateway.pool.tile.zeroCredits": "零积分",
+  "shared.gateway.pool.empty": "账号池为空。请先在「账号管理」中添加账号。",
+  "shared.gateway.pool.credits": "{credits} 积分",
+  "shared.gateway.pool.diagnoseNote": "请求报「没有可用账号」时，按下面的原因逐条排查：",
+  "shared.gateway.pool.preferredLabel": "指定账号",
+  "shared.gateway.pool.preferredAria": "指定优先消耗的账号",
+  "shared.gateway.pool.preferredAuto": "不指定（自动择优）",
+  // 仅 WorkBuddy：三档策略里「非指定账号」的第二档（写回 `AccountStrategy::MaxCredits`）。
+  "shared.gateway.pool.strategyMaxCredits": "按实时积分择优（每次请求查询）",
+  "shared.gateway.pool.preferredMissing": "已指定的账号（当前不在池中）",
+  // 偏好语义：指定账号不可用时**回落**自动择优，而不是拒绝服务。
+  "shared.gateway.pool.preferredHint": "偏好而非强制：指定账号冷却 / 失效 / 零积分时自动改用其他账号，不会拒绝服务。",
 
   // ---- 剪贴板（clipboard.ts） ----
   "shared.clipboard.copied": "已复制",
@@ -85,6 +106,12 @@ export const zh = {
   // ---- 账号策略 ----
   "shared.demo.strategy.realtime": "请求时实时择优",
   // ---- Trae：假账号名 / 分组 / 套餐 / 冷却 ----
+  // WorkBuddy 网关账号池的演示数据（`screenshot-demo.ts` 的 `demoGatewayStatus`）。
+  "shared.demo.pool.reasonRateLimited": "请求过于频繁",
+  "shared.demo.pool.reasonSessionDead": "会话已失效",
+  "shared.demo.pool.diagnose": "{name}（{tail}：{reason}，积分={credits}）",
+  "shared.demo.pool.creditsUnknown": "未知",
+
   "shared.demo.trae.name.main": "主号",
   "shared.demo.trae.name.altA": "小号 A",
   "shared.demo.trae.name.altB": "小号 B",

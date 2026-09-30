@@ -37,48 +37,11 @@ use serde_json::{json, Value};
 use crate::modules::trae::paths;
 use crate::modules::trae::store;
 
-/// 平台受限能力：说明「哪个能力、在哪些平台可用、当前平台为什么不行」。
-///
-/// 字段刻意带上 `supported_on` 与 `reason`：前端可直接渲染成一条可操作的提示，
-/// 而不是让用户面对「不支持」三个字去猜。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Unsupported {
-    /// 能力标识，例 `machine_guid_reset`。
-    pub capability: &'static str,
-    /// 能力的人类可读名称。
-    pub label: &'static str,
-    /// 该能力可用的平台。
-    pub supported_on: &'static str,
-    /// 当前平台不可用的具体原因。
-    pub reason: String,
-}
-
-impl Unsupported {
-    /// 构造一条受限能力说明。
-    pub fn new(
-        capability: &'static str,
-        label: &'static str,
-        supported_on: &'static str,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self {
-            capability,
-            label,
-            supported_on,
-            reason: reason.into(),
-        }
-    }
-
-    /// 线上形态（camelCase）。
-    pub fn to_json(&self) -> Value {
-        json!({
-            "capability": self.capability,
-            "label": self.label,
-            "supportedOn": self.supported_on,
-            "reason": self.reason,
-        })
-    }
-}
+// 平台受限能力的说明形状**已上提到** [`crate::modules::capability`]：WorkBuddy 侧的
+// 「打开数据目录」要用同一个形状（前端据此用同一段分支渲染），两处各拼一遍 JSON
+// 迟早让字段名漂移（`supportedOn` vs `supported_on`）。这里只做转发，
+// **本模块及 Trae 侧所有调用点保持原路径不变**。
+pub use crate::modules::capability::Unsupported;
 
 /// 当前平台标识。
 pub fn platform_tag() -> &'static str {

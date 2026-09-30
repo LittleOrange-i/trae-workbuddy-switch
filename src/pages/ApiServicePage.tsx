@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Copy, Loader2, Power } from "lucide-react";
+import { AlertTriangle, Copy, FolderOpen, Loader2, Power, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { ApiKeyTable } from "@/components/gateway/api-key-table";
-import { AccountStrategyCard } from "@/components/gateway/account-strategy-card";
+import { AccountPoolCard, AUTO_OPTION, WB_POOL_TILES } from "@/components/gateway/account-pool-card";
 import { IntegrationGuide } from "@/components/gateway/integration-guide";
 import { ModelList } from "@/components/gateway/model-list";
 import { RequestLog } from "@/components/gateway/request-log";
@@ -25,14 +25,23 @@ import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
-import { resolveGatewayBaseUrl, resolveGatewayRunning } from "@/lib/gateway";
+import { poolOf, resolveGatewayBaseUrl, resolveGatewayRunning } from "@/lib/gateway";
 import { REGIONS, regionDescriptor } from "@/lib/region";
 import { cn } from "@/lib/utils";
-import type { ApiKeyRecord, GatewayConfig, Region } from "@/lib/types";
+import type { AccountStrategy, ApiKeyRecord, GatewayConfig, Region } from "@/lib/types";
 import { useGatewayStore } from "@/stores/gateway";
 
 const LOOPBACK = "127.0.0.1";
 const LAN = "0.0.0.0";
+
+/**
+ * 「按实时积分择优」的哨兵值。
+ *
+ * 它与 [`AUTO_OPTION`] 一样不是 uid：WorkBuddy 的选号策略有三档
+ * （跟随登录态 / 指定账号 / 实时积分择优），而池卡只有一个「指定账号」下拉，
+ * 故把非账号的两档也放进同一个下拉里，在边界处换成策略。
+ */
+const MAX_CREDITS_OPTION = "__max_credits__";
 
 /** 无启用中的 Key 时返回 null，由渲染处给出占位提示文案。 */
 function representativeKey(keys: ApiKeyRecord[], region: Region): string | null {
@@ -54,6 +63,8 @@ export default function ApiServicePage() {
   const [portDraft, setPortDraft] = useState(String(config.port));
   const [saving, setSaving] = useState(false);
   const [riskOpen, setRiskOpen] = useState(false);
+  /** 正在打开哪个版本的数据目录（只驱动按钮转圈）。 */
+  const [openingDir, setOpeningDir] = useState<Region | null>(null);
 
   useEffect(() => {
     void loadAll();
@@ -100,6 +111,30 @@ export default function ApiServicePage() {
     void persist({ port: parsed });
   }
 
+  /**
+   * 在文件管理器中打开该版本的 WorkBuddy 数据目录。
+   *
+   * 非 Windows 时后端返回**结构化 `Unsupported`**（不是假成功）：此时如实把
+   * 「当前平台不支持」提示给用户，而不是弹一句「已打开」却什么都没发生。
+   */
+  async function onOpenDataDir(region: Region) {
+    setOpeningDir(region);
+    try {
+      const result = await api.openWorkbuddyDataDir(region);
+      if (result?.capability) {
+        toast.message(t("wbStats.gateway.toast.unsupported"), {
+          description: result.reason ?? t("wbStats.gateway.toast.unsupportedDesc"),
+        });
+        return;
+      }
+      toast.success(t("wbStats.gateway.toast.dirOpened"), { description: result?.path });
+    } catch (e) {
+      toast.error(t("wbStats.gateway.toast.dirOpenFailed"), { description: api.asError(e) });
+    } finally {
+      setOpeningDir(null);
+    }
+  }
+
   const baseUrl = resolveGatewayBaseUrl(status, config.bind_addr, config.port);
   const running = resolveGatewayRunning(status);
 
@@ -113,10 +148,19 @@ export default function ApiServicePage() {
       </header>
 
       {error && (
-        <Alert variant="destructive" className="mb-4">
+        <Alert variant="destructive" className="mb-5">
           <AlertTriangle />
           <AlertTitle>{t("wbStats.gateway.opFail")}</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription className="flex flex-col gap-3">
+            <span>{error}</span>
+            {/* 与 Trae 页同构：错误条自带重试，用户不必去猜「怎么再试一次」。 */}
+            <div>
+              <Button variant="outline" size="sm" onClick={() => void loadAll()}>
+                <RefreshCw />
+                {t("wbStats.gateway.retry")}
+              </Button>
+            </div>
+          </AlertDescription>
         </Alert>
       )}
 
@@ -139,6 +183,13 @@ export default function ApiServicePage() {
                 onCheckedChange={(enabled) => void persist({ enabled })}
                 aria-label={t("wbStats.gateway.enableAria")}
               />
+            </DemoAction>
+            {/* 与 Trae 页同构：手动重读配置 / 状态 / 池（池是实时状态，不刷新就看不到变化）。 */}
+            <DemoAction>
+              <Button variant="outline" size="sm" onClick={() => void loadAll()}>
+                <RefreshCw />
+                {t("wbStats.gateway.refresh")}
+              </Button>
             </DemoAction>
           </div>
         </div>
@@ -174,12 +225,20 @@ export default function ApiServicePage() {
           </div>
           <span className="flex items-center gap-1.5 text-xs">
             {t("wbStats.gateway.status")}
-            <span className={cn("inline-flex items-center gap-1.5 font-medium", running ? "text-emerald-600" : "text-muted-foreground")}>
+            <span className={cn("inline-flex items-center gap-1.5 font-medium", running ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
               <span className={cn("size-2 rounded-full", running ? "bg-emerald-500" : "bg-muted-foreground/50")} />
               {running ? t("wbStats.gateway.running") : t("wbStats.gateway.stopped")}
             </span>
           </span>
         </div>
+
+        {/* 最近一次失败的原因（与 Trae 页同构）：否则用户只能去翻请求日志才知道为什么 502。 */}
+        {status?.lastError && (
+          <div className="border-t border-border/60 px-5 py-3">
+            <p className="text-xs text-muted-foreground">{t("wbStats.gateway.lastError")}</p>
+            <p className="mt-1 break-words text-xs text-destructive">{status.lastError}</p>
+          </div>
+        )}
       </Card>
 
       {/* 接入地址（按版本） */}
@@ -198,6 +257,22 @@ export default function ApiServicePage() {
                   <Copy />
                   {t("wbStats.gateway.copy")}
                 </Button>
+                {/* 「打开数据目录」按**版本**给：WorkBuddy 的 CN / 国际数据目录是两个，
+                    放在这里用户一眼知道打开的是哪个（Trae 只有一条产品线，故它在网关卡）。 */}
+                <DemoAction>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={openingDir !== null}
+                    aria-label={t("wbStats.gateway.openDataDirAria", {
+                      version: regionDescriptor(region).versionLabel,
+                    })}
+                    onClick={() => void onOpenDataDir(region)}
+                  >
+                    {openingDir === region ? <Loader2 className="animate-spin" /> : <FolderOpen />}
+                    {t("wbStats.gateway.openDataDir")}
+                  </Button>
+                </DemoAction>
               </div>
               <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                 <span>API Key</span>
@@ -211,7 +286,9 @@ export default function ApiServicePage() {
       </Card>
 
       <ApiKeyTable className="mb-6" />
-      <AccountStrategyCard className="mb-6" />
+      {REGIONS.map((region) => (
+        <RegionPoolCard key={region} region={region} />
+      ))}
       <ModelList className="mb-6" />
       <IntegrationGuide baseUrl={baseUrl} className="mb-6" />
       <RequestLog />
@@ -243,5 +320,78 @@ export default function ApiServicePage() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * 某版本的账号池卡（与 Trae 侧**同一张** `AccountPoolCard`）。
+ *
+ * 两个版本各自一个池（`pools.cn` / `pools.global`），故按 region 渲染两张 ——
+ * 这是 WorkBuddy 比 Trae 多出来的**版本轴**，卡片本身无差别。
+ *
+ * ## 「指定账号」怎么落回策略
+ *
+ * 池卡的 uid 就是**池条目的键**，后端 `pick_with_preference` 正是按它匹配偏好，
+ * 因此这里把 uid 直接写进 `pinned`：此前策略卡写的是账号库的 `id`，池里查无此人，
+ * 「固定账号」在池非空时**一直是失效的**（静默回落自动择优）。
+ */
+function RegionPoolCard({ region }: { region: Region }) {
+  const t = useT();
+  const status = useGatewayStore((s) => s.status);
+  const view = useGatewayStore((s) => s.strategies[region]);
+  const saveStrategy = useGatewayStore((s) => s.saveStrategy);
+  const [saving, setSaving] = useState(false);
+
+  const { pool, accounts, diagnose } = poolOf(status, region);
+  const strategy = view.strategy;
+  const preferredUid =
+    strategy.kind === "pinned"
+      ? strategy.account_id
+      : strategy.kind === "max_credits"
+        ? MAX_CREDITS_OPTION
+        : "";
+
+  async function persist(next: AccountStrategy) {
+    setSaving(true);
+    try {
+      await saveStrategy(region, next);
+      toast.success(t("wbStats.gateway.strategySaved"));
+    } catch (e) {
+      toast.error(t("wbStats.gateway.strategySaveFail"), { description: api.asError(e) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function onPreferredChange(next: string) {
+    if (next === MAX_CREDITS_OPTION) {
+      void persist({ kind: "max_credits" });
+      return;
+    }
+    if (next === AUTO_OPTION || next === "") {
+      // 取消指定 ⇒ 回到默认（跟随客户端登录态；池非空时由池自动择优）。
+      void persist({ kind: "current" });
+      return;
+    }
+    void persist({ kind: "pinned", account_id: next });
+  }
+
+  return (
+    <AccountPoolCard
+      pool={pool}
+      accounts={accounts}
+      diagnose={diagnose}
+      preferredUid={preferredUid}
+      onPreferredUidChange={onPreferredChange}
+      saving={saving}
+      // WorkBuddy 池不存积分有效期 ⇒ 没有「积分过期」格（见卡片注释）。
+      tiles={WB_POOL_TILES}
+      autoOptions={[
+        { value: AUTO_OPTION, label: t("shared.gateway.pool.preferredAuto") },
+        { value: MAX_CREDITS_OPTION, label: t("shared.gateway.pool.strategyMaxCredits") },
+      ]}
+      title={`${t("shared.gateway.pool.title")} · ${regionDescriptor(region).versionLabel}`}
+      className="mb-6"
+    />
   );
 }

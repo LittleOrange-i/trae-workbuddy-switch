@@ -15,12 +15,32 @@ export const en = {
   // ---- Statistics scope bar (region-bar.tsx) ----
   "shared.region.scope.aria": "Statistics scope",
 
-  // ---- Trae gateway account pool status (trae-gateway.ts) ----
-  "shared.trae.poolStatus.available": "Available",
-  "shared.trae.poolStatus.cooling": "Cooling",
-  "shared.trae.poolStatus.disabled": "Session expired",
-  "shared.trae.poolStatus.expired": "Credits expired",
-  "shared.trae.poolStatus.noCredits": "No credits",
+  // ---- Gateway account pool status (gateway.ts — one card shared by both sides) ----
+  "shared.poolStatus.available": "Available",
+  "shared.poolStatus.cooling": "Cooling",
+  "shared.poolStatus.disabled": "Session expired",
+  "shared.poolStatus.expired": "Credits expired",
+  "shared.poolStatus.noCredits": "No credits",
+
+  // ---- Gateway account pool card (components/gateway/account-pool-card.tsx) ----
+  "shared.gateway.pool.title": "Account pool",
+  "shared.gateway.pool.totalRequests": "{count} requests",
+  "shared.gateway.pool.tile.available": "Routable",
+  "shared.gateway.pool.tile.cooling": "Cooling",
+  "shared.gateway.pool.tile.disabled": "Session dead",
+  "shared.gateway.pool.tile.expired": "Credits expired",
+  "shared.gateway.pool.tile.zeroCredits": "No credits",
+  "shared.gateway.pool.empty": "The pool is empty. Add accounts under Accounts first.",
+  "shared.gateway.pool.credits": "{credits} credits",
+  "shared.gateway.pool.diagnoseNote": "When a request reports \"no available account\", check these reasons one by one:",
+  "shared.gateway.pool.preferredLabel": "Preferred account",
+  "shared.gateway.pool.preferredAria": "Account to consume first",
+  "shared.gateway.pool.preferredAuto": "Auto (best available)",
+  // WorkBuddy only: the second non-account option (writes `AccountStrategy::MaxCredits`).
+  "shared.gateway.pool.strategyMaxCredits": "Pick by live credits (queried per request)",
+  "shared.gateway.pool.preferredMissing": "Preferred account (not in this pool)",
+  // Preference, not a hard pin: falls back when the preferred account can't serve.
+  "shared.gateway.pool.preferredHint": "A preference, not a hard pin: if it is cooling, dead, or out of credits, another account is used instead — requests are never rejected.",
 
   // ---- Clipboard (clipboard.ts) ----
   "shared.clipboard.copied": "Copied",
@@ -69,6 +89,11 @@ export const en = {
   "shared.demo.catalog.globalStale": "The upstream API may have changed; showing the last successful cache",
   // ---- Account strategy ----
   "shared.demo.strategy.realtime": "Chosen at request time",
+  // Demo data for the WorkBuddy gateway account pool (`demoGatewayStatus`).
+  "shared.demo.pool.reasonRateLimited": "Rate limited",
+  "shared.demo.pool.reasonSessionDead": "Session expired",
+  "shared.demo.pool.diagnose": "{name} ({tail}: {reason}, credits={credits})",
+  "shared.demo.pool.creditsUnknown": "unknown",
   // ---- Trae: fake account names / group / packages / cooldown ----
   "shared.demo.trae.name.main": "Primary",
   "shared.demo.trae.name.altA": "Alt A",

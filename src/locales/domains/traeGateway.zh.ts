@@ -5,8 +5,8 @@
  * `src/components/trae-variant-bar.tsx`、`src/components/trae-variant-switch.tsx`、
  * `src/components/gateway/trae-model-list.tsx`、`src/components/gateway/trae-request-log.tsx`、
  * `src/components/gateway/trae-integration-guide.tsx`、
- * `src/components/gateway/trae-account-pool-card.tsx`、
  * `src/components/gateway/trae-api-key-table.tsx`
+ * （账号池卡已两侧共用，文案在 `shared.zh.ts`）
  *
  * ⚠️ 命名空间用 `trae`（不是 `traeGateway`）：与另两个 Trae 域共用前缀、靠二级段区分。
  *
@@ -82,22 +82,9 @@ export const zh = {
   "trae.gateway.guide.snippet.model": "模型",
 
   // =====================================================================
-  // gateway/trae-account-pool-card.tsx —— 账号池
+  // 账号池卡已**两侧共用**（`gateway/account-pool-card.tsx`），文案随之迁到
+  // `shared.gateway.pool.*` / `shared.poolStatus.*`（见 `shared.zh.ts`）。
   // =====================================================================
-  "trae.gateway.pool.title": "账号池",
-  "trae.gateway.pool.totalRequests": "累计请求 {count}",
-  "trae.gateway.pool.tile.available": "可路由",
-  "trae.gateway.pool.tile.cooling": "冷却中",
-  "trae.gateway.pool.tile.disabled": "会话失效",
-  "trae.gateway.pool.tile.expired": "积分过期",
-  "trae.gateway.pool.tile.zeroCredits": "零积分",
-  "trae.gateway.pool.empty": "账号池为空。请先在「账号管理」中添加 Trae 账号。",
-  "trae.gateway.pool.credits": "{credits} 积分",
-  "trae.gateway.pool.diagnoseNote": "请求报「没有可用账号」时，按下面的原因逐条排查：",
-  "trae.gateway.pool.preferredLabel": "指定账号",
-  "trae.gateway.pool.preferredAria": "指定优先消耗的账号",
-  "trae.gateway.pool.preferredAuto": "不指定（自动择优）",
-  "trae.gateway.pool.preferredMissing": "已指定的账号（当前不在池中）",
 
   // =====================================================================
   // gateway/trae-api-key-table.tsx —— API Key 列表 / 创建 / 吊销 / 删除

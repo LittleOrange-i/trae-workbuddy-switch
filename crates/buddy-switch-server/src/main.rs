@@ -139,18 +139,16 @@ fn spawn_background_task(task: BackgroundTask) {
         BackgroundTask::CreditsRefresh => {
             tokio::spawn(async move {
                 let state = gateway_host::shared_state();
-                // 启动即刷一次：补齐上次进程遗留的「从未取过余额」账号。
-                let _ = buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
                 loop {
-                    let interval_ms = state
-                        .pool
-                        .read()
-                        .await
-                        .config()
-                        .credits_refresh_interval_ms
-                        .max(1);
-                    tokio::time::sleep(std::time::Duration::from_millis(interval_ms as u64)).await;
+                    // 启动即刷一次（循环首轮）：补齐上次进程遗留的「从未取过余额」账号。
                     let _ = buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
+                    // ★ 等待时长由 gateway 侧统一给（两侧宿主共用同一判据）：
+                    //   池为空 ⇒ 短探测，否则「刚导入账号」要等满一整个周期才看得到积分。
+                    let wait_ms = {
+                        let pool = state.pool.read().await;
+                        buddy_switch_gateway::credits_refresh::next_refresh_wait_ms(&pool)
+                    };
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                 }
             });
         }

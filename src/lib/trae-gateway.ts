@@ -10,7 +10,6 @@
  * camelCase 只作防御性兜底。
  */
 
-import { t } from "@/lib/i18n";
 import type {
   TraeGatewayAccountStatus,
   TraeGatewayConfig,
@@ -210,40 +209,6 @@ export function normalizeTraeGatewayLogs(raw: unknown): TraeGatewayLogEntry[] {
     .filter((item): item is TraeGatewayLogEntry => item !== null);
 }
 
-/** 账号状态 → 展示标签与语气。 */
-export const TRAE_POOL_STATUS_LABELS: Record<
-  TraeGatewayAccountStatus["status"],
-  { label: string; tone: "ok" | "warn" | "danger" | "muted" }
-> = {
-  // 表在模块加载时就定型 ⇒ 只存文案键，标签在**读取时**现取（调用方照旧读 `meta.label`）。
-  available: {
-    get label() {
-      return t("shared.trae.poolStatus.available");
-    },
-    tone: "ok",
-  },
-  cooling: {
-    get label() {
-      return t("shared.trae.poolStatus.cooling");
-    },
-    tone: "warn",
-  },
-  disabled: {
-    get label() {
-      return t("shared.trae.poolStatus.disabled");
-    },
-    tone: "danger",
-  },
-  expired: {
-    get label() {
-      return t("shared.trae.poolStatus.expired");
-    },
-    tone: "warn",
-  },
-  no_credits: {
-    get label() {
-      return t("shared.trae.poolStatus.noCredits");
-    },
-    tone: "muted",
-  },
-};
+// 账号状态标签原先在本文件（`TRAE_POOL_STATUS_LABELS`），账号池卡**两侧共用**后
+// 迁到 `@/lib/gateway` 的 `POOL_STATUS_LABELS`（文案键 `shared.poolStatus.*`）——
+// 别在这里再建第二份，两侧文案会各自漂移。

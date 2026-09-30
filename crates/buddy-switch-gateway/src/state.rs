@@ -11,7 +11,7 @@
 //! 若日后确要实现该能力，需要一并补：第二端口的配置位、监听生命周期、按 region 的路由分发。
 //! 那时应按新需求重新设计，**不要只是把字段加回来**（加回来又是一个空开关）。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +19,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use buddy_switch_core::modules::account;
 use buddy_switch_core::modules::catalog::CatalogStore;
 use buddy_switch_core::modules::config as core_config;
 use buddy_switch_core::modules::region::{self, Region};
@@ -28,7 +29,7 @@ use crate::account_strategy::{load_strategies, AccountStrategy};
 use crate::apikey::ApiKeyStore;
 use crate::logging::RequestLog;
 use crate::outbound::{DegradeGate, PromptSettings};
-use crate::pool::{Pool, PoolConfig};
+use crate::pool::{Pool, PoolConfig, PoolSummary, RealmTag};
 use crate::sticky::StickyTable;
 
 /// 网关运行配置。
@@ -156,7 +157,10 @@ impl GatewayConfig {
 ///
 /// `running` / `addr` / `version` 来自运行时而非持久化配置，故 [`From<&GatewayConfig>`]
 /// 只填充配置派生字段，这三项由调用方补充。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+//
+// ⚠️ 只 derive `PartialEq`（**不含 `Eq`**）：池视图带 `f64`（`total_credits`）与
+// `serde_json::Value`（`accounts`），两者都没有 `Eq`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GatewayStatusView {
     /// 配置中的启用开关（与 [`GatewayConfig::enabled`] 同步）。
@@ -175,6 +179,18 @@ pub struct GatewayStatusView {
     pub allow_non_loopback: bool,
     /// 应用版本号。
     pub version: String,
+    /// 账号池五态计数，**按域分家**（键恒为 `cn` / `global`）。
+    ///
+    /// 形状与 Trae 侧 `TraeGatewayStatusView::pool` 同源（同一张管理面卡片读它）。
+    pub pools: BTreeMap<String, PoolSummary>,
+    /// 逐账号状态（含 `realm`，前端按域过滤）。键名与 Trae 侧 `accounts` 一致。
+    pub accounts: Vec<serde_json::Value>,
+    /// 逐账号「此刻为什么（不）能路由」，供排查「没有可用账号」。
+    pub diagnose: Vec<String>,
+    /// **最近一次请求失败**的可读原因（`None` = 本进程内还没失败过）。
+    ///
+    /// 与 Trae 侧 `TraeGatewayStatusView::last_error` 同名同义，管理面共用同一块展示。
+    pub last_error: Option<String>,
 }
 
 impl Default for GatewayStatusView {
@@ -188,12 +204,26 @@ impl Default for GatewayStatusView {
             port: 0,
             allow_non_loopback: false,
             version: String::new(),
+            pools: default_pool_summaries(),
+            accounts: Vec::new(),
+            diagnose: Vec::new(),
+            last_error: None,
         }
     }
 }
 
+/// `pools` 的缺省值：**两个域的键恒定存在**（该域没有账号时计数全为 0）。
+///
+/// 让前端不必处理键缺失 —— 「CN 版一个号都没有」是正常状态，不该显示成「未知」。
+pub fn default_pool_summaries() -> BTreeMap<String, PoolSummary> {
+    BTreeMap::from([
+        ("cn".to_string(), PoolSummary::default()),
+        ("global".to_string(), PoolSummary::default()),
+    ])
+}
+
 impl From<&GatewayConfig> for GatewayStatusView {
-    /// 由配置派生响应视图；`running` / `addr` / `version` 需由调用方补充。
+    /// 由配置派生响应视图；`running` / `addr` / `version` / 池视图需由调用方补充。
     fn from(config: &GatewayConfig) -> Self {
         Self {
             enabled: config.enabled,
@@ -204,7 +234,48 @@ impl From<&GatewayConfig> for GatewayStatusView {
             port: config.port,
             allow_non_loopback: config.allow_non_loopback,
             version: String::new(),
+            pools: default_pool_summaries(),
+            accounts: Vec::new(),
+            diagnose: Vec::new(),
+            last_error: None,
         }
+    }
+}
+
+impl GatewayStatusView {
+    /// 填入账号池视图（`pools` / `accounts` / `diagnose`）；**只读**，不改动池。
+    ///
+    /// 由两侧宿主（server / 桌面端）在 [`sync_pool_with_accounts`] 之后调用。
+    /// 之所以不在这里自己取锁：桌面端那条命令是**同步**的，只能 `try_write`。
+    ///
+    /// ★ 保持只读是**有意的**：本函数被单测直接覆盖，一旦它自己去读账号库
+    /// （无入参的全局路径函数），用例就会被**本机真实账号库**污染（踩过）。
+    pub fn fill_pool(&mut self, pool: &Pool, now_ms: i64) {
+        self.pools = BTreeMap::from([
+            ("cn".to_string(), pool.summary(now_ms, Some(RealmTag::Cn))),
+            (
+                "global".to_string(),
+                pool.summary(now_ms, Some(RealmTag::Global)),
+            ),
+        ]);
+        self.accounts = pool.status_list(now_ms);
+        self.diagnose = pool.diagnose(now_ms);
+    }
+}
+
+/// 用**账号库**对齐池（增量 upsert，不删条目、不动治理状态）。
+///
+/// ★ 为什么管理面读状态前必须先对齐一次：池条目平时只在有请求经过
+/// （[`crate::routes::relay::relay`]）时才同步，于是「刚导入账号、还没发过请求」
+/// 时池是空的 —— 用户打开管理页会看到「账号池为空」，而账号管理页明明列着好几个号。
+///
+/// 与请求路径同款（同一函数），因此不会引入第二套对齐语义。
+pub fn sync_pool_with_accounts(pool: &mut Pool) {
+    for (region, realm) in [
+        (Region::Cn, RealmTag::Cn),
+        (Region::Global, RealmTag::Global),
+    ] {
+        pool.sync_accounts(&account::load_accounts_for(region), Some(realm));
     }
 }
 
@@ -255,6 +326,12 @@ pub struct GatewayState {
     /// 提示词加载失败原因（`None` 表示加载正常）；用于 `/status` 透出，
     /// 避免「配置写错但静默回落 passthrough」这种无声失效。
     pub prompt_error: Option<String>,
+    /// **最近一次请求失败**的可读原因（`None` = 本次进程内还没失败过）。
+    ///
+    /// 由 [`crate::routes::relay::relay`] 在失败出口写入（一处覆盖全部失败路径），
+    /// 管理面「网关卡」直接展示 —— 用户不必去翻请求日志才知道刚才为什么 502。
+    /// **成功不清空**（与 Trae 侧同语义）：残留一条历史失败比「什么都没显示」更利于排查。
+    pub last_error: Arc<RwLock<Option<String>>>,
     /// 请求体上限的**字节数**（由配置在构造时固化）。
     ///
     /// 之所以在构造时算一次而不是每次读配置：axum 的 `DefaultBodyLimit` 是 **layer**，
@@ -315,8 +392,14 @@ impl GatewayState {
             degrade: Arc::new(RwLock::new(DegradeGate::new())),
             sticky: Arc::new(RwLock::new(StickyTable::new(config.sticky_ttl_ms))),
             prompt_error,
+            last_error: Arc::new(RwLock::new(None)),
             body_limit_bytes: body_limit_bytes(config.max_body_mb),
         }
+    }
+
+    /// 记下「最近一次请求失败」的可读原因（管理面 `last_error`）。
+    pub async fn note_last_error(&self, message: impl Into<String>) {
+        *self.last_error.write().await = Some(message.into());
     }
 
     /// 读取配置快照。
@@ -403,11 +486,22 @@ mod tests {
             "port",
             "allow_non_loopback",
             "version",
+            // 账号池视图（与 Trae 侧 `trae_gateway_status` 的 pool/accounts/diagnose 对位）。
+            "pools",
+            "accounts",
+            "diagnose",
+            "last_error",
         ]
         .into_iter()
         .collect();
         // 精确匹配：多一个少一个都会失败，防止契约再次漂移。
         assert_eq!(keys_of(&value), expected, "gateway_status key set must be pinned");
+
+        // 「某域一个账号都没有」是正常状态，`pools` 的两个键必须**恒定存在**，
+        // 否则前端会把「空池」显示成「未知」。
+        let pools = value["pools"].as_object().expect("pools 对象");
+        assert_eq!(keys_of(&value["pools"]), BTreeSet::from(["cn", "global"]));
+        assert_eq!(pools["cn"]["total"], 0);
 
         // 不得再出现 camelCase 键（此前手工拼装的风格）。
         assert!(!value.as_object().unwrap().contains_key("baseUrl"));
@@ -444,6 +538,37 @@ mod tests {
         assert!(!view.running);
         assert_eq!(view.addr, None);
         assert_eq!(view.version, "");
+    }
+
+    /// 池视图由 [`GatewayStatusView::fill_pool`] 填入：`pools` 按域分家、`accounts`
+    /// 逐账号带 `realm`、`diagnose` 逐账号一行。
+    ///
+    /// ⚠️ 这里**只测 `fill_pool`（纯读）**：`sync_pool_with_accounts` 会读本机账号库
+    /// （无入参的全局路径函数），在本进程并行跑的 lib 单测里必然读到**真实数据**，
+    /// 断言只能写成「≥ 0 条」这种不痛不痒的形式 —— 那还不如不写。
+    #[test]
+    fn fill_pool_splits_counts_by_realm_and_tags_every_account() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("cn-1", Some(RealmTag::Cn), "CN 一号");
+        pool.upsert("g-1", Some(RealmTag::Global), "国际一号");
+        pool.set_credits("cn-1", 7, 0);
+        pool.mark_credits_refreshed("cn-1", 1_000);
+
+        let mut view = GatewayStatusView::default();
+        view.fill_pool(&pool, 1_000);
+
+        assert_eq!(view.pools["cn"].total, 1);
+        assert_eq!(view.pools["global"].total, 1);
+        assert_eq!(view.pools["cn"].total_credits, 7.0);
+        assert_eq!(view.accounts.len(), 2, "两个域的账号都给出，由前端按 realm 过滤");
+        assert_eq!(view.diagnose.len(), 2);
+
+        let realms: BTreeSet<&str> = view
+            .accounts
+            .iter()
+            .map(|item| item["realm"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(realms, BTreeSet::from(["cn", "global"]));
     }
 
     #[test]

@@ -74,22 +74,10 @@ export const en = {
   "trae.gateway.guide.snippet.model": "Model",
 
   // =====================================================================
-  // gateway/trae-account-pool-card.tsx —— account pool
+  // The account pool card is now **shared by both sides**
+  // (`gateway/account-pool-card.tsx`); its strings moved to
+  // `shared.gateway.pool.*` / `shared.poolStatus.*` (see `shared.en.ts`).
   // =====================================================================
-  "trae.gateway.pool.title": "Account pool",
-  "trae.gateway.pool.totalRequests": "{count} requests total",
-  "trae.gateway.pool.tile.available": "Routable",
-  "trae.gateway.pool.tile.cooling": "Cooling down",
-  "trae.gateway.pool.tile.disabled": "Session invalid",
-  "trae.gateway.pool.tile.expired": "Credits expired",
-  "trae.gateway.pool.tile.zeroCredits": "Zero credits",
-  "trae.gateway.pool.empty": "The account pool is empty. Add a Trae account under \"Account management\" first.",
-  "trae.gateway.pool.credits": "{credits} credits",
-  "trae.gateway.pool.diagnoseNote": "When a request reports \"no available account\", check the reasons below one by one:",
-  "trae.gateway.pool.preferredLabel": "Preferred account",
-  "trae.gateway.pool.preferredAria": "Account to consume credits from first",
-  "trae.gateway.pool.preferredAuto": "Auto (no preference)",
-  "trae.gateway.pool.preferredMissing": "Preferred account (not in pool now)",
 
   // =====================================================================
   // gateway/trae-api-key-table.tsx —— API Key list / create / revoke / delete

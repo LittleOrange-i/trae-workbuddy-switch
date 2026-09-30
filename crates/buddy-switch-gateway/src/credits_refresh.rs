@@ -40,6 +40,33 @@ use crate::timeutil;
 /// 里归一，这里是第二道防线，保证刷新器独立可用时也安全）。
 pub const DEFAULT_REFRESH_INTERVAL_MS: i64 = 30 * 60 * 1000;
 
+/// 池为空时的探测周期（毫秒）。
+///
+/// ## 为什么必须有这条（2026-09-30 实测缺陷）
+///
+/// 池的账号同步**只发生在**「有请求经过」（`relay`）或「管理面读状态」（`fill_pool` 之前）
+/// 时 —— 因此**进程刚启动时池通常是空的**（`state.json` 只在治理状态有改动时才写盘）。
+///
+/// 而刷新循环是「启动即刷一次，然后等一个周期」。池空 ⇒ 本轮 `refresh_targets` 为空 ⇒
+/// 什么都没刷，却照样等满 **30 分钟**。实测：19:54 起服务，20:24 才出现第一条余额读数 ——
+/// 用户看到的是「刚导入账号，页面上积分一直是『—』」。
+///
+/// 探测成本 = 一次读锁 + 遍历空表，可忽略；换来「账号一进池就被刷新」。
+pub const EMPTY_POOL_PROBE_MS: u64 = 15_000;
+
+/// 下一轮余额刷新的等待时长（毫秒）——**两侧宿主共用**，别各写一份判据。
+///
+/// - **池为空** ⇒ 短探测：本轮必然空转，但账号随时可能被同步进来。
+/// - **池非空** ⇒ 按池配置的正常周期。注意「池非空但取数失败」也走这条 ——
+///   失败时上游多半在闹脾气，短周期重试只会把上游打得更狠。
+pub fn next_refresh_wait_ms(pool: &Pool) -> u64 {
+    if pool.is_empty() {
+        EMPTY_POOL_PROBE_MS
+    } else {
+        pool.config().credits_refresh_interval_ms.max(1) as u64
+    }
+}
+
 /// 取余额的可注入缝。
 ///
 /// 实现者按 `(region, uid)` 取回该账号的**真实**余额；返回体是 `credits.rs::credit_result`
@@ -294,6 +321,25 @@ mod tests {
         let mut pool = Pool::new(PoolConfig::default());
         pool.upsert(uid, Some(RealmTag::Cn), uid);
         pool
+    }
+
+    /// ★ 池为空时必须**短探测**：否则「刚导入账号 → 打开页面」会看到长达一整个
+    /// 周期（默认 30 分钟）的「积分未知」——实测踩过（19:54 起服务，20:24 才有读数）。
+    #[test]
+    fn empty_pool_probes_short_instead_of_waiting_a_full_interval() {
+        let empty = Pool::new(PoolConfig::default());
+        assert_eq!(next_refresh_wait_ms(&empty), EMPTY_POOL_PROBE_MS);
+        assert!(
+            EMPTY_POOL_PROBE_MS < DEFAULT_REFRESH_INTERVAL_MS as u64,
+            "探测周期必须远短于正常周期，否则等于没修"
+        );
+
+        let pool = cn_pool("u1");
+        assert_eq!(
+            next_refresh_wait_ms(&pool),
+            pool.config().credits_refresh_interval_ms as u64,
+            "非空池走配置周期（避免失败时高频打上游）"
+        );
     }
 
     #[tokio::test]

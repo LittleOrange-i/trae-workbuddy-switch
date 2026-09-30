@@ -437,6 +437,47 @@ impl PoolEntry {
         (self.until_ms - now_ms).max(0)
     }
 
+    /// 此刻的可路由状态（**与 Trae 侧 `status_list` 同枚举**）。
+    ///
+    /// 两侧管理面的「账号池」卡读同一份枚举，前端因此能共用一张卡。
+    /// 判定顺序与选号判据同源（禁用 > 冷却/熔断 > 零积分）。
+    ///
+    /// ⚠️ **不产出 `expired`**：本条目只存「快过期的积分**数量**」（`credits_expiring`），
+    /// **不存有效期**，没有判据就不造数 —— 管理面据此不渲染该格（见 `Pool::summary`）。
+    pub fn status_of(&self, now_ms: i64) -> &'static str {
+        if self.disabled {
+            "disabled"
+        } else if self.until_ms > now_ms || self.breaker_until_ms > now_ms {
+            "cooling"
+        } else if self.credits_refreshed_ms > 0 && self.credits <= 0 {
+            // `credits_refreshed_ms == 0` = **从未刷新过**，余额是未知而非 0 ⇒ 不判为零积分。
+            "no_credits"
+        } else {
+            "available"
+        }
+    }
+
+    /// 「此刻为什么不能路由」的可读串；可路由时返回 `"可用"`。
+    ///
+    /// 优先复述后端写入的具体原因（`reason`，如「12153 session dead」「余额不足」），
+    /// 没有具体原因时才回落到状态默认文案 —— 排查时具体原因远比状态名有用。
+    pub fn rejection(&self, now_ms: i64) -> String {
+        match self.status_of(now_ms) {
+            "disabled" => self
+                .reason
+                .is_empty()
+                .then(|| "会话失效（需重新登录）".to_string())
+                .unwrap_or_else(|| self.reason.clone()),
+            "cooling" => self
+                .reason
+                .is_empty()
+                .then(|| "冷却中".to_string())
+                .unwrap_or_else(|| self.reason.clone()),
+            "no_credits" => "零积分".to_string(),
+            _ => "可用".to_string(),
+        }
+    }
+
     /// 解冻时刻（取账号级冷却与熔断的较早者；都未定时返回 0）。
     ///
     /// 全冷却兜底选号用它挑「最早会解冻」的账号。
@@ -634,6 +675,58 @@ mod tests {
 
     fn entry() -> PoolEntry {
         PoolEntry::new("u1")
+    }
+
+    /// 五态判定顺序：禁用 > 冷却/熔断 > 零积分 > 可路由。
+    ///
+    /// ★ 断言里**不含** `expired`：本侧不存积分有效期，没有判据就不造该状态
+    /// （管理面据此不渲染「积分过期」格）。
+    #[test]
+    fn status_of_orders_disabled_then_cooling_then_no_credits() {
+        let mut item = entry();
+        assert_eq!(item.status_of(1000), "available");
+
+        // 余额未知（从未刷新）⇒ 仍是可路由，不能算零积分。
+        item.credits = 0;
+        assert_eq!(item.status_of(1000), "available", "credits_refreshed_ms=0 ⇒ 未知");
+
+        item.credits_refreshed_ms = 1000;
+        assert_eq!(item.status_of(1000), "no_credits");
+
+        item.credits = 5;
+        item.breaker_until_ms = 2000;
+        assert_eq!(item.status_of(1000), "cooling", "熔断也算临时不可用");
+        item.breaker_until_ms = 0;
+        item.until_ms = 2000;
+        assert_eq!(item.status_of(1000), "cooling");
+        assert_eq!(item.status_of(2000), "available", "边界：等于截止即解冻");
+
+        item.disabled = true;
+        assert_eq!(item.status_of(999_999), "disabled", "禁用优先于冷却");
+    }
+
+    /// `rejection` 复述**具体原因**，而不是状态名 —— 排查时「12153」比「冷却中」有用。
+    #[test]
+    fn rejection_prefers_the_written_reason_over_the_state_name() {
+        let mut item = entry();
+        assert_eq!(item.rejection(1000), "可用");
+
+        item.until_ms = 2000;
+        item.reason = "6004 rate limit".to_string();
+        assert_eq!(item.rejection(1000), "6004 rate limit");
+
+        // 没有具体原因时才回落到状态默认文案。
+        item.reason.clear();
+        assert_eq!(item.rejection(1000), "冷却中");
+
+        item.until_ms = 0;
+        item.disabled = true;
+        assert_eq!(item.rejection(1000), "会话失效（需重新登录）");
+
+        item.disabled = false;
+        item.credits_refreshed_ms = 1000;
+        item.credits = 0;
+        assert_eq!(item.rejection(1000), "零积分");
     }
 
     #[test]

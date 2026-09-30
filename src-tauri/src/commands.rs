@@ -9,9 +9,9 @@ use std::sync::Mutex;
 
 use tauri::{Emitter, Manager};
 use buddy_switch_core::modules::{
-    account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, credit_usage, credits, export_import, migrate,
-    oauth, process, refresh, region::Region, region::RegionFilter, rotate, session, switch, token_stats, trae, travel,
-    update,
+    account, auth_file, capability, checkin, codebuddy_cli, codebuddy_cn_ide, credit_usage, credits, export_import,
+    migrate, oauth, process, refresh, region::Region, region::RegionFilter, rotate, session, switch, token_stats, trae,
+    travel, update,
 };
 use buddy_switch_gateway::{AccountStrategy, GatewayConfig, GatewayStatusView};
 
@@ -1119,7 +1119,44 @@ pub fn gateway_status(app: tauri::AppHandle) -> Value {
     view.running = runtime.is_running();
     view.addr = runtime.addr();
     view.version = update::APP_VERSION.to_string();
+    // 账号池视图（与 server 侧 `/api/gateway/status` 逐字一致）。
+    // 本命令是**同步**的，只能用 `try_write`：拿不到锁就只缺池字段，
+    // 绝不能为此阻塞 UI 线程。
+    let state = gateway::shared_state();
+    if let Ok(mut pool) = state.pool.try_write() {
+        // 先与账号库对齐（否则「刚导入、还没发过请求」的账号不在池里 ⇒ 页面显示空池）。
+        buddy_switch_gateway::sync_pool_with_accounts(&mut pool);
+        view.fill_pool(&pool, buddy_switch_gateway::timeutil::now_ms());
+    }
+    view.last_error = state
+        .last_error
+        .try_read()
+        .ok()
+        .and_then(|guard| guard.clone());
+
+    // ★ 顺手触发一次余额刷新（**不阻塞本命令**）——与 server 侧同一理由：
+    // 账号刚在本命令里同步进池、多半「从未取过余额」，而周期循环下一轮要等满一个间隔，
+    // 用户会看到「刚导入账号，积分一直是『—』」。刷新器自带 `needs_refresh` 节流。
+    //
+    // ⚠️ 本命令是**同步**的，没有 tokio 上下文 ⇒ 必须用 tauri 的 async runtime spawn，
+    // 直接 `tokio::spawn` 会 panic（no reactor running）。
+    {
+        let state = state.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
+        });
+    }
+
     serde_json::to_value(view).unwrap_or(Value::Null)
+}
+
+/// POST /api/gateway/open-data-dir —— 打开 **WorkBuddy 客户端**的数据目录（`{region?}`）。
+///
+/// 与 Trae 侧的 `open_trae_data_dir` 同形：形状（`{ok,path}` 或结构化 `Unsupported`）
+/// 由 `capability::open_workbuddy_data_dir` 唯一产出，前端用同一段分支渲染。
+#[tauri::command]
+pub fn open_workbuddy_data_dir(region: Option<String>) -> Result<Value, String> {
+    capability::open_workbuddy_data_dir(parse_region(region.as_deref()))
 }
 
 /// GET /api/gateway/keys —— Key 列表（脱敏）。

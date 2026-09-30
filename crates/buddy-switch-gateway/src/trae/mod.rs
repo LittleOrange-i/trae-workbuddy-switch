@@ -51,7 +51,8 @@ use buddy_switch_core::modules::trae::{paths, TRAE_DEFAULT_API_PORT};
 use crate::logging::RequestLog;
 use crate::GatewayHandle;
 
-use pool::{TraePool, TraePoolSummary};
+use pool::{TraePool};
+use crate::pool::PoolSummary;
 
 // ---------------------------------------------------------------------------
 // 上游常量
@@ -512,7 +513,8 @@ pub struct TraeGatewayStatusView {
     /// API Key 的脱敏展示（`sk-trae-abcd…`）。
     pub api_key_prefix: String,
     /// 账号池摘要。
-    pub pool: TraePoolSummary,
+    /// 池五态计数（形状与 WorkBuddy 侧 `GatewayStatusView::pools` 同源）。
+    pub pool: PoolSummary,
 }
 
 impl TraeGatewayStatusView {
@@ -530,7 +532,7 @@ impl TraeGatewayStatusView {
             total_requests: 0,
             last_error: None,
             api_key_prefix: String::new(),
-            pool: TraePoolSummary::default(),
+            pool: PoolSummary::default(),
         }
     }
 }

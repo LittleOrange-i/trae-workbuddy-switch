@@ -133,18 +133,16 @@ fn spawn_background_task(task: BackgroundTask) {
         BackgroundTask::CreditsRefresh => {
             tauri::async_runtime::spawn(async move {
                 let state = gateway::shared_state();
-                // 启动即刷一次：补齐上次进程遗留的「从未取过余额」账号。
-                let _ = buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
                 loop {
-                    let interval_ms = state
-                        .pool
-                        .read()
-                        .await
-                        .config()
-                        .credits_refresh_interval_ms
-                        .max(1);
-                    tokio::time::sleep(Duration::from_millis(interval_ms as u64)).await;
+                    // 启动即刷一次（循环首轮）：补齐上次进程遗留的「从未取过余额」账号。
                     let _ = buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
+                    // ★ 与 server 侧**同一判据**（`next_refresh_wait_ms`）：
+                    //   池为空 ⇒ 短探测，否则「刚导入账号」要等满一整个周期才看得到积分。
+                    let wait_ms = {
+                        let pool = state.pool.read().await;
+                        buddy_switch_gateway::credits_refresh::next_refresh_wait_ms(&pool)
+                    };
+                    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                 }
             });
         }
@@ -304,6 +302,7 @@ pub fn run() {
             commands::get_gateway_config,
             commands::save_gateway_config,
             commands::gateway_status,
+            commands::open_workbuddy_data_dir,
             commands::list_api_keys,
             commands::create_api_key,
             commands::revoke_api_key,

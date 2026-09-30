@@ -44,7 +44,8 @@ pub use error::GatewayError;
 pub use outbound::{OutboundMeta, OutboundOptions};
 pub use rng::Pcg32;
 pub use state::{
-    body_limit_bytes, GatewayConfig, GatewayState, GatewayStatusView, DEFAULT_MAX_BODY_MB,
+    body_limit_bytes, sync_pool_with_accounts, GatewayConfig, GatewayState, GatewayStatusView,
+    DEFAULT_MAX_BODY_MB,
 };
 pub use sticky::StickyTable;
 

@@ -84,8 +84,28 @@ import type {
  * 双通道适配层：
  * - 桌面 App（Tauri）：`invoke` 调用 Rust commands
  * - webui（浏览器）：HTTP fetch 调用本地 buddy-switch 服务（127.0.0.1）
+ *
+ * ## webui 的基址为什么不能硬编码（2026-09-30 用户报障）
+ *
+ * 原先这里是 `const API_BASE = "http://127.0.0.1:57890"`（默认端口），于是
+ * `buddy-switch serve --port 60000` 打开的页面**能渲染、却整页「操作失败」**：
+ * 页面由 60000 提供，JS 却去请求 57890 —— 那里没有服务。
+ * ⇒ 那个「可用 --port 指定其他端口」的参数**形同虚设**，而报错信息（`unreachable`）
+ * 只说「连不上」，不指向「基址写死了」。
+ *
+ * 修法按**构建模式**分（`import.meta.env.DEV` 由 Vite 在构建期固化）：
+ * - **生产构建**：`dist` 只会被 `serve` 或 Tauri 托管，同源 ⇒ 用 `location.origin`，
+ *   于是页面在哪个端口，API 就在哪个端口。
+ * - **dev**（`npm run dev`，页面来自 Vite 的 1420）：API 在**另一个进程**里，
+ *   必须显式指向它 —— 保留原默认端口。
+ *
+ * 演示构建（`build:demo`）不受影响：`demoModeEnabled` 时 `call()` 走本地假数据，
+ * 根本不进 [`httpCall`]。
  */
-const API_BASE = "http://127.0.0.1:57890";
+const API_BASE =
+  import.meta.env.DEV || typeof window === "undefined"
+    ? "http://127.0.0.1:57890"
+    : window.location.origin;
 
 const DEMO_READ_COMMANDS = new Set([
   "get_status", "get_accounts", "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_checkin_status",
@@ -189,6 +209,8 @@ const ROUTES: Record<string, Route> = {
   get_gateway_config: { method: "GET", path: "/api/gateway/config" },
   save_gateway_config: { method: "POST", path: "/api/gateway/config" },
   gateway_status: { method: "GET", path: "/api/gateway/status" },
+  // 打开 WorkBuddy 客户端数据目录（非 Windows 返回结构化 Unsupported）。
+  open_workbuddy_data_dir: { method: "POST", path: "/api/gateway/open-data-dir" },
   list_api_keys: { method: "GET", path: "/api/gateway/keys" },
   create_api_key: { method: "POST", path: "/api/gateway/keys" },
   revoke_api_key: { method: "POST", path: "/api/gateway/keys/revoke" },
@@ -911,6 +933,24 @@ export function saveGatewayConfig(config: GatewayConfig): Promise<GatewayConfig>
 
 export function gatewayStatus(): Promise<GatewayStatus> {
   return call("gateway_status");
+}
+
+/**
+ * 打开 **WorkBuddy 客户端**的数据目录（在文件管理器中）。
+ *
+ * 返回形状与 Trae 侧的 [`openTraeDataDir`] 同构：成功 `{ok, path, region}`，
+ * 平台不支持时是**结构化 `Unsupported`**（`{capability, label, supportedOn, reason}`，
+ * **不带 `ok`**）—— 调用方据此区分「做不到」与「失败」，而不是把两者都当错误弹。
+ */
+export function openWorkbuddyDataDir(region?: Region): Promise<{
+  ok?: boolean;
+  path?: string;
+  capability?: string;
+  label?: string;
+  supportedOn?: string;
+  reason?: string;
+}> {
+  return call("open_workbuddy_data_dir", regionArg(region));
 }
 
 export function listApiKeys(): Promise<{ keys: ApiKeyRecord[] }> {
