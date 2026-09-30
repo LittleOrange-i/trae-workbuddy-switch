@@ -13,6 +13,7 @@ const TOOLS = [
   { key: "cursor", label: "Cursor" },
   { key: "cline", label: "Cline" },
   { key: "continue", label: "Continue" },
+  { key: "claude-code", label: "Claude Code" },
   { key: "cherry", label: "Cherry Studio" },
 ] as const;
 
@@ -24,7 +25,14 @@ type ToolKey = (typeof TOOLS)[number]["key"];
  * 同 `integration-guide.tsx`：`t` 只管字段标签，片段里的键名（`apiProvider`、
  * `apiBase` 等）保持英文 —— 那是外部工具读取的契约。
  */
-function snippetFor(t: Translate, tool: ToolKey, baseUrl: string, key: string, model: string): string {
+function snippetFor(
+  t: Translate,
+  tool: ToolKey,
+  baseUrl: string,
+  rootUrl: string,
+  key: string,
+  model: string,
+): string {
   switch (tool) {
     case "cursor":
       return [
@@ -53,6 +61,17 @@ function snippetFor(t: Translate, tool: ToolKey, baseUrl: string, key: string, m
         `    model: ${model}`,
         `    apiBase: ${baseUrl}`,
         `    apiKey: ${key}`,
+      ].join("\n");
+    case "claude-code":
+      // Anthropic 客户端会自己拼 `/v1/messages`，所以给**根地址**（不是 `baseUrl`）。
+      //
+      // `ANTHROPIC_MODEL` 必须显式给：Trae 的模型名（`deepseek-v4-flash` 等）与 Claude
+      // 的默认模型名不同，不设的话客户端会请求一个网关上不存在的模型 —— 而报错发生在
+      // 客户端侧，用户看到的只是「模型不可用」，很难联想到是这里少了一行。
+      return [
+        `export ANTHROPIC_BASE_URL=${rootUrl}`,
+        `export ANTHROPIC_AUTH_TOKEN=${key}`,
+        `export ANTHROPIC_MODEL=${model}`,
       ].join("\n");
     case "cherry":
       return [
@@ -93,7 +112,10 @@ export function TraeIntegrationGuide({
   const [copied, setCopied] = useState(false);
 
   const key = keyPrefix ? `${keyPrefix}…` : t("trae.gateway.guide.noKey");
-  const snippet = snippetFor(t, tool, baseUrl, key, model);
+  // Anthropic 系客户端（Claude Code）自己会拼 `/v1/messages`，因此要给它**根地址**。
+  // 与 WorkBuddy 侧的 `integration-guide.tsx` 同算法。
+  const rootUrl = baseUrl.replace(/\/v1\/?$/, "");
+  const snippet = snippetFor(t, tool, baseUrl, rootUrl, key, model);
 
   async function onCopy() {
     await copyText(snippet, t("trae.gateway.guide.copied"));
