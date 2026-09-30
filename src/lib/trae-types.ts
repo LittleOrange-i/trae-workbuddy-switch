@@ -577,6 +577,8 @@ export interface TraeGatewayConfigRaw {
   max_body_mb: number;
   default_model: string;
   max_rotate: number;
+  /** 「指定账号」：优先消耗该 uid 的积分；空串 = 不指定（自动择优）。 */
+  preferred_uid: string;
 }
 
 /** 归一化后的网关配置（前端统一用 camelCase）。 */
@@ -590,6 +592,8 @@ export interface TraeGatewayConfig {
   maxBodyMb: number;
   defaultModel: string;
   maxRotate: number;
+  /** 「指定账号」：优先消耗该 uid 的积分；空串 = 不指定（自动择优）。 */
+  preferredUid: string;
 }
 
 /** 账号池摘要（`pool` 字段）。 */

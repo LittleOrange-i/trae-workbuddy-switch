@@ -31,6 +31,8 @@ export const DEFAULT_TRAE_GATEWAY_CONFIG: TraeGatewayConfig = {
   maxBodyMb: 8,
   defaultModel: "deepseek-v4-flash",
   maxRotate: 3,
+  // 空串 = 不指定账号（自动择优）。
+  preferredUid: "",
 };
 
 function asString(value: unknown): string | undefined {
@@ -72,6 +74,12 @@ export function normalizeTraeGatewayConfig(raw: unknown): TraeGatewayConfig {
       DEFAULT_TRAE_GATEWAY_CONFIG.defaultModel,
     maxRotate:
       asNumber(read("maxRotate", "max_rotate")) ?? DEFAULT_TRAE_GATEWAY_CONFIG.maxRotate,
+    // 空串是**合法值**（= 不指定），因此 `asString` 对空串返回 undefined 时
+    // 这里必须回落到空串而不是某个「默认账号」—— 否则用户清空选择后会被写回一个
+    // 他并没有指定的账号。
+    preferredUid:
+      asString(read("preferredUid", "preferred_uid")) ??
+      DEFAULT_TRAE_GATEWAY_CONFIG.preferredUid,
   };
 }
 
@@ -92,6 +100,7 @@ export function toTraeGatewayConfigRaw(config: TraeGatewayConfig): TraeGatewayCo
     max_body_mb: config.maxBodyMb,
     default_model: config.defaultModel,
     max_rotate: config.maxRotate,
+    preferred_uid: config.preferredUid,
   };
 }
 

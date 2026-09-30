@@ -81,6 +81,10 @@ export const en = {
   "trae.gateway.pool.empty": "The account pool is empty. Add a Trae account under \"Account management\" first.",
   "trae.gateway.pool.credits": "{credits} credits",
   "trae.gateway.pool.diagnoseNote": "When a request reports \"no available account\", check the reasons below one by one:",
+  "trae.gateway.pool.preferredLabel": "Preferred account",
+  "trae.gateway.pool.preferredAria": "Account to consume credits from first",
+  "trae.gateway.pool.preferredAuto": "Auto (no preference)",
+  "trae.gateway.pool.preferredMissing": "Preferred account (not in pool now)",
 
   // =====================================================================
   // gateway/trae-api-key-table.tsx —— API Key list / create / revoke / delete

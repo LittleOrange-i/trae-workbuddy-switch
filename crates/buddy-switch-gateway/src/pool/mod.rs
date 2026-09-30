@@ -12,6 +12,7 @@
 //! 4. **模型级冷却**（`model_cooldowns`）——只封锁触发限流的那个模型。
 
 pub mod entry;
+pub mod entry_like;
 pub mod pick;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -24,7 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub use entry::{CoolKind, CostTier, ModelCooldown, ModelCost, PoolEntry};
-pub use pick::{pick, weight_of, PickPolicy, SHORTLIST_SIZE};
+pub use entry_like::PoolEntryLike;
+pub use pick::{pick, pick_with_preference, weight_of, PickPolicy, SHORTLIST_SIZE};
 
 /// 池内账号的归属域标记（与 core 的 `Region` 解耦，避免循环依赖）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +62,17 @@ pub struct PoolConfig {
     pub soft_rate_max_ms: i64,
     /// 快过期积分权重。
     pub expiring_weight: f64,
+    /// 「到期紧迫度」独立因子的权重。
+    ///
+    /// 默认 `0.0` = 不启用 —— WorkBuddy 的紧迫度已由 `expiring_weight` 表达，
+    /// 引入该字段前后它的选号结果逐字一致。需要「按积分到期时间择优」的产品线
+    /// （如 Trae）在自己的策略里覆写，见 [`crate::pool::PickPolicy::expiry_urgency_weight`]。
+    pub expiry_urgency_weight: f64,
+    /// 是否走严格择优（跳过加权抽签）。
+    ///
+    /// 默认 `false`（有界随机，WorkBuddy 既有语义）。见
+    /// [`crate::pool::PickPolicy::deterministic`]。
+    pub deterministic: bool,
     /// 防惊群间隔（毫秒，默认 100）。
     pub min_pick_gap_ms: i64,
     /// 成本账本有效期（毫秒，默认 6h）。
@@ -86,6 +99,8 @@ impl Default for PoolConfig {
             soft_rate_ms: 600 * 1000,
             soft_rate_max_ms: entry::DEFAULT_SOFT_RATE_MAX_MS,
             expiring_weight: 8.0,
+            expiry_urgency_weight: 0.0,
+            deterministic: false,
             min_pick_gap_ms: 100,
             model_cost_ttl_ms: 6 * 60 * 60 * 1000,
             session_dead_threshold: 3,
@@ -471,12 +486,14 @@ impl Pool {
     fn policy(&self) -> PickPolicy {
         PickPolicy {
             expiring_weight: self.config.expiring_weight,
+            expiry_urgency_weight: self.config.expiry_urgency_weight,
             idle_weight_per_hour: self.config.idle_weight_per_hour,
             idle_weight_max: self.config.idle_weight_max,
             min_pick_gap_ms: self.config.min_pick_gap_ms,
             model_cost_ttl_ms: self.config.model_cost_ttl_ms,
             max_in_flight: self.config.max_in_flight,
             max_in_flight_global: self.config.max_in_flight_global,
+            deterministic: self.config.deterministic,
         }
     }
 

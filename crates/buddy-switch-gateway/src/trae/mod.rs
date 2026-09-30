@@ -125,6 +125,14 @@ pub struct TraeGatewayConfig {
     /// 单轮最多换号次数。
     #[serde(alias = "maxRotate")]
     pub max_rotate: usize,
+    /// 「指定账号」：优先消耗该 uid 的积分；空串表示不指定（自动择优）。
+    ///
+    /// ★ 偏好是**优化而非约束**：该账号不可用（冷却 / 禁用 / 零积分 / 该模型被限流 /
+    /// 已在本轮试过）时**回落**到自动择优，绝不因此拒绝服务。
+    /// 判定与自动选号共用同一套可用性判据（`pool::entry_usable`），
+    /// 否则会出现「明明有别的号可用却一直失败」这种不报错的偶发故障。
+    #[serde(alias = "preferredUid")]
+    pub preferred_uid: String,
 }
 
 impl Default for TraeGatewayConfig {
@@ -139,6 +147,7 @@ impl Default for TraeGatewayConfig {
             max_body_mb: DEFAULT_MAX_BODY_MB,
             default_model: TRAE_DEFAULT_MODEL.to_string(),
             max_rotate: DEFAULT_MAX_ROTATE,
+            preferred_uid: String::new(),
         }
     }
 }
@@ -569,6 +578,7 @@ mod tests {
             "max_body_mb",
             "default_model",
             "max_rotate",
+            "preferred_uid",
         ]
         .into_iter()
         .collect();

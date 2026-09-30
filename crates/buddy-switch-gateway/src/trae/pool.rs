@@ -20,13 +20,17 @@
 //! 代价是每个请求要读 3 个小 JSON（账号库 / 冷却 / 剩余积分）。对本机单用户工具
 //! 这是可接受的，且与 WorkBuddy 网关「每请求 `load_accounts_for`」的既有做法一致。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use buddy_switch_core::modules::trae::variant::TraeVariant;
 use buddy_switch_core::modules::trae::{account, credits, device};
+
+use crate::pool::entry::CoolKind;
+use crate::pool::entry_like::PoolEntryLike;
+use crate::pool::pick::{pick_with_preference, PickPolicy};
 
 /// 上游错误的治理类别。
 ///
@@ -134,6 +138,23 @@ pub struct TraePoolEntry {
     pub disabled: bool,
     pub cooldown_until: i64,
     pub cooldown_reason: String,
+    /// 冷却类别（供共用选号内核判定「硬冷却不兜底」）。
+    ///
+    /// 由冷却文件的 `type` 映射：`PlanLimit`（套餐额度用尽）⇒ `Hard`，
+    /// 其余（限流 / 4xx / 5xx）⇒ `Soft`，`SessionDead` ⇒ `None`
+    /// （它已由 `disabled` 表达为终态，再算冷却会重复计数）。
+    ///
+    /// 与 WorkBuddy 的语义对齐：额度类冷却期间强试**必然再失败**且浪费一次上游调用，
+    /// 因此不参与「全冷却兜底」。
+    pub cool_kind: Option<CoolKind>,
+    /// 最近被选中时刻（毫秒；`0` = 从未）。
+    ///
+    /// ⚠️ **不跨请求保留**：池在每次选号前都会 [`TraePool::sync_for`] 重建，
+    /// 该字段随之归零。因此共用内核的「防惊群」与「LRU 兜底」在 Trae 侧
+    /// **不生效**（属已知降级，见模块文档）。
+    pub last_used_ms: i64,
+    /// 选中单调序号（同上，不跨请求保留）。
+    pub used_seq: u64,
 }
 
 impl TraePoolEntry {
@@ -204,6 +225,11 @@ pub struct TraePool {
     entries: Vec<TraePoolEntry>,
     /// 本池所属的产品线变体。冷却写回（[`Self::apply_error`]）据此选文件。
     variant: TraeVariant,
+    /// 选号单调序号（供共用内核的 LRU 语义使用）。
+    ///
+    /// ⚠️ 池每次 `sync_for` 重建条目，但 `pick_seq` **不重置** —— 它是进程内的
+    /// 单调计数，重置会让 LRU 比较失去意义。
+    pick_seq: u64,
 }
 
 impl TraePool {
@@ -220,6 +246,7 @@ impl TraePool {
         Self {
             entries: Vec::new(),
             variant,
+            pick_seq: 0,
         }
     }
 
@@ -268,6 +295,17 @@ impl TraePool {
                         .unwrap_or(false),
                     cooldown_until: cooldown.map(|entry| entry.until).unwrap_or(0),
                     cooldown_reason: cooldown.map(|entry| entry.reason.clone()).unwrap_or_default(),
+                    cool_kind: cooldown.and_then(|entry| match entry.error_type.as_str() {
+                        // 会话失效已由 `disabled` 表达为终态，再标冷却会重复计数。
+                        "SessionDead" => None,
+                        // 套餐额度用尽：强试必然再失败且浪费一次上游调用 ⇒ 硬冷却。
+                        "PlanLimit" => Some(CoolKind::Hard),
+                        // 限流 / 4xx / 5xx：值得再试一次 ⇒ 软冷却。
+                        _ => Some(CoolKind::Soft),
+                    }),
+                    // 选号产生的使用痕迹不跨请求保留（池每次 `sync_for` 重建）。
+                    last_used_ms: 0,
+                    used_seq: 0,
                     uid,
                 }
             })
@@ -287,50 +325,66 @@ impl TraePool {
         self.entries.is_empty()
     }
 
-    /// 选号。
+    /// 选号：走**共用选号内核**（与 WorkBuddy 同一套算法），并支持「指定账号」。
     ///
-    /// 择优规则与参考实现一致：**积分到期时间最近的优先**（先用掉快过期的额度），
-    /// 到期时间相同则积分多的优先。零积分与已过期账号直接跳过，避免必然失败的请求。
-    pub fn pick(&self, now: i64, tried: &HashSet<String>) -> Option<PickedTraeAccount> {
-        let mut best: Option<&TraePoolEntry> = None;
-        for entry in &self.entries {
-            if tried.contains(&entry.uid) || entry.rejection(now).is_some() {
-                continue;
-            }
-            best = Some(match best {
-                None => entry,
-                Some(current) => match (entry.credits_expire_at, current.credits_expire_at) {
-                    // 有到期时间的优先于没有的。
-                    (Some(_), None) => entry,
-                    (None, Some(_)) => current,
-                    (Some(left), Some(right)) => {
-                        if left < right {
-                            entry
-                        } else if left > right {
-                            current
-                        } else if entry.credits.unwrap_or(0.0) > current.credits.unwrap_or(0.0) {
-                            entry
-                        } else {
-                            current
-                        }
-                    }
-                    (None, None) => {
-                        if entry.credits.unwrap_or(0.0) > current.credits.unwrap_or(0.0) {
-                            entry
-                        } else {
-                            current
-                        }
-                    }
-                },
-            });
-        }
-        best.map(|entry| PickedTraeAccount {
-            uid: entry.uid.clone(),
-            name: entry.name.clone(),
-            jwt: entry.jwt.clone(),
-            device_id: entry.device_id.clone(),
-            machine_id: entry.machine_id.clone(),
-        })
+    /// ## 与旧实现的语义对齐
+    ///
+    /// 旧实现是「**积分到期时间最近的优先**，同到期则积分多的优先」。共用内核的四因子
+    /// 权重里没有「到期时间」这一维，因此由 [`TraePoolEntry::expiring_credits`] 把它
+    /// 映射成「到期紧迫度」喂给 `expiring_weight` 项 —— 映射规则见该方法文档。
+    ///
+    /// ★ 这是**降级映射，不是等价替换**：紧迫度高的账号权重更大，但短名单内仍有
+    /// 加权抽签的随机性，因此不再是旧实现那种严格字典序。
+    ///
+    /// ## 已知降级（缺数据走中性默认，见 [`crate::pool::entry_like`]）
+    ///
+    /// - `last_used_ms` / `used_seq` 不跨请求保留 ⇒ **防惊群与 LRU 兜底不生效**；
+    /// - `in_flight` 恒 0 ⇒ 在途限流不生效；
+    /// - 无成本观测 ⇒ 成本分层恒为 `Unknown`（不产生过滤）。
+    ///
+    /// ## 指定账号
+    ///
+    /// `preferred_uid` 可用则优先选中；**不可用则回落到通用选号** ——
+    /// 偏好是优化而非约束，绝不因为偏好账号不可用就拒绝服务。
+    pub fn pick(
+        &mut self,
+        now: i64,
+        tried: &HashSet<String>,
+        preferred_uid: Option<&str>,
+    ) -> Option<PickedTraeAccount> {
+        // 共用内核按 `BTreeMap<uid, E>` 组织候选；池本身用 `Vec`（沿用账号库顺序，
+        // 供展示层直接遍历），故这里临时构造一份候选表。
+        // 条目只有几十个，clone 的代价可忽略，换来的是**选号算法只有一份实现**。
+        let mut candidates: BTreeMap<String, TraePoolEntry> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.uid.clone(), entry.clone()))
+            .collect();
+
+        // `now` 是 Unix 秒（沿用本模块既有口径），共用内核要求毫秒 ⇒ 在此换算。
+        let seed = (now.max(0) as u64) ^ self.pick_seq;
+        let uid = pick_with_preference(
+            &mut candidates,
+            &mut self.pick_seq,
+            &trae_pick_policy(),
+            now.saturating_mul(1000),
+            None,
+            "",
+            tried,
+            seed,
+            preferred_uid,
+        )?;
+
+        self.entries
+            .iter()
+            .find(|entry| entry.uid == uid)
+            .map(|entry| PickedTraeAccount {
+                uid: entry.uid.clone(),
+                name: entry.name.clone(),
+                jwt: entry.jwt.clone(),
+                device_id: entry.device_id.clone(),
+                machine_id: entry.machine_id.clone(),
+            })
     }
 
     /// 记录一次上游错误：写回**本池所属变体**的冷却文件，并就地更新内存视图。
@@ -448,6 +502,176 @@ impl TraePool {
     }
 }
 
+/// Trae 侧的选号策略参数。
+///
+/// ★ `expiring_weight` 刻意**高于积分项上限（10.0）**：旧实现的语义是
+/// 「**先看到期时间**，再看积分」。若紧迫度权重低于积分项，一个积分很多但一年后
+/// 才到期的账号就会压过明天到期的账号 —— 等于把「先用掉快过期的额度」这条核心
+/// 语义丢掉，而这恰恰是用户最在意的行为。
+///
+/// 其余项按「Trae 没有对应数据」置零，避免引入无判据的噪声（见模块文档的降级说明）。
+fn trae_pick_policy() -> PickPolicy {
+    PickPolicy {
+        // Trae 没有「快过期积分的绝对值」概念 ⇒ 该项不启用，改由 `expiry_urgency` 承载。
+        expiring_weight: 0.0,
+        // ★ 必须**大于积分项上限（10.0）**：旧实现的语义是「先看到期时间，再看积分」。
+        // 若该权重不足，一个积分多但一年后才到期的账号会压过明天到期的账号 ——
+        // 等于把「先用掉快过期的额度」这条核心语义丢掉。
+        expiry_urgency_weight: 50.0,
+        // 无使用记录 ⇒ 闲置补偿会给所有账号同样的分，纯噪声。
+        idle_weight_per_hour: 0.0,
+        idle_weight_max: 0.0,
+        // 无 `last_used_ms` 记录 ⇒ 防惊群无判据，0 表示不启用。
+        min_pick_gap_ms: 0,
+        // 无成本账本 ⇒ TTL 置 0，观测立即过期，分层恒为 Unknown。
+        model_cost_ttl_ms: 0,
+        // 无在途统计 ⇒ 0 表示不限。
+        max_in_flight: 0,
+        max_in_flight_global: 0,
+        // ★ 严格择优：Trae 账号通常只有两三个，且旧实现是**确定性**的字典序择优。
+        // 加权抽签会把「先用掉快过期额度」变成「约 60% 概率用掉它」，用户不可预期 ——
+        // 这正是 issue #6 想解决的那类诉求。防惊群在 Trae 侧本来就无效
+        // （`last_used_ms` 不跨请求保留），因此这里没有损失。
+        deterministic: true,
+    }
+}
+
+/// [`PoolEntryLike`] 实现：Trae 侧缺的数据一律**中性降级**。
+///
+/// ★ 降级的方向必须是「像没有证据」，不是「像证据指向坏结果」——
+/// 否则某个账号会**静默地永远选不上**。具体取舍见 [`crate::pool::entry_like`] 的契约。
+impl PoolEntryLike for TraePoolEntry {
+    fn uid(&self) -> &str {
+        &self.uid
+    }
+
+    fn credits(&self) -> i64 {
+        // 共用内核用 i64；Trae 的积分是 f64（如 3618.69）。取整不影响相对大小，
+        // 而相对大小才是权重唯一用到的信息。
+        self.credits.unwrap_or(0.0) as i64
+    }
+
+    /// Trae 没有「快过期积分的绝对值」概念（只有单一到期时刻）⇒ `0`。
+    ///
+    /// 「还有多久到期」由 [`TraePoolEntry::expiry_urgency`] 表达 —— 两者分工见
+    /// [`crate::pool::entry_like`] 的契约说明。
+    fn expiring_credits(&self, _now_ms: i64) -> i64 {
+        0
+    }
+
+    /// 到期紧迫度：**把旧实现的「积分到期最近优先」语义搬到这里**。
+    ///
+    /// ## 为什么用对数映射
+    ///
+    /// 线性映射（`1 - remaining/HORIZON`）无法区分「1 分钟后到期」与「1 天后到期」——
+    /// 在一年尺度下两者的相对差小到可以忽略，紧迫度差不足 0.004，乘以任何合理权重
+    /// 都压不过积分项（上限 10.0），旧语义照样丢失。
+    ///
+    /// 因此按「距到期的**数量级**」取对数：`1 分钟 → ≈1.0`、`1 天 → ≈0.56`、
+    /// `1 年 → ≈0.0`。配合 `expiry_urgency_weight = 50.0`，「一分钟 vs 一天」的
+    /// 权重差约 20 分，稳稳压过积分差异。
+    ///
+    /// 无到期时间返回 `0`（对应旧语义「无到期时间的排在有到期时间的之后」）。
+    fn expiry_urgency(&self, now_ms: i64) -> f64 {
+        /// 对数映射的下界：低于此值一律按「立刻到期」处理。
+        const FLOOR_MS: f64 = 60_000.0;
+        /// 对数映射的上界（一年）。
+        const HORIZON_MS: f64 = 365.0 * 86_400_000.0;
+
+        let credits = self.credits.unwrap_or(0.0);
+        let Some(expire_secs) = self.credits_expire_at else {
+            return 0.0;
+        };
+        if credits <= 0.0 || expire_secs <= 0 {
+            return 0.0;
+        }
+        // 字段单位是 Unix 秒，契约为毫秒 —— 在这里换算，不外泄到算法。
+        let expire_ms = expire_secs.saturating_mul(1000);
+        if expire_ms <= now_ms {
+            // 已过期由 `healthy_for_request` 拒绝，这里给 0 即可。
+            return 0.0;
+        }
+        let t = ((expire_ms - now_ms) as f64).max(FLOOR_MS);
+        let span = HORIZON_MS.ln() - FLOOR_MS.ln();
+        (1.0 - (t.ln() - FLOOR_MS.ln()) / span).clamp(0.0, 1.0)
+    }
+
+    /// Trae 侧没有成功率统计 ⇒ 返回中性 `0.0`（内核据此给中性权重 1.5）。
+    fn success_ema(&self) -> f64 {
+        0.0
+    }
+
+    /// 同上：**不能**返回 1.0，那会让账号被当成「一直在失败」而永久压制。
+    fn error_ema(&self) -> f64 {
+        0.0
+    }
+
+    fn last_used_ms(&self) -> i64 {
+        self.last_used_ms
+    }
+
+    fn used_seq(&self) -> u64 {
+        self.used_seq
+    }
+
+    /// Trae 侧无在途统计 ⇒ `0`（不触发在途限流）。
+    fn in_flight(&self) -> i64 {
+        0
+    }
+
+    /// Trae 池本身已按产品线变体分家，池内不再按区域过滤。
+    fn realm(&self) -> Option<crate::pool::RealmTag> {
+        None
+    }
+
+    fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    fn cool_expiry_ms(&self) -> i64 {
+        // 字段单位是 Unix 秒，契约为毫秒。
+        if self.cooldown_until > 0 {
+            self.cooldown_until.saturating_mul(1000)
+        } else {
+            0
+        }
+    }
+
+    fn is_hard_cooled(&self, now_ms: i64) -> bool {
+        self.cool_kind == Some(CoolKind::Hard) && now_ms < self.cool_expiry_ms()
+    }
+
+    fn healthy_for_request(&self, now_ms: i64, _model: &str) -> bool {
+        // Trae 没有模型级冷却，模型维度忽略。
+        // 账号级判据复用既有的 `rejection` —— 它是「为什么不可路由」的**唯一来源**，
+        // 展示层（诊断/状态列表）与选号必须共用同一套条件，否则会出现
+        // 「界面说可用、选号却跳过」这类不报错的不一致。
+        self.rejection(now_ms / 1000).is_none()
+    }
+
+    /// Trae 无模型级冷却 ⇒ 空操作。
+    fn prune_model_cooldowns(&mut self, _now_ms: i64) {}
+
+    /// Trae 无实测成本账本 ⇒ `0.0`（分层恒为 `Unknown`）。
+    fn cost_per_1k(&self, _now_ms: i64, _model: &str, _ttl_ms: i64) -> f64 {
+        0.0
+    }
+
+    /// Trae 无实测成本账本 ⇒ `Unknown`（保留「值得一试」的语义，不产生过滤）。
+    fn cost_tier(&self, _now_ms: i64, _model: &str, _ttl_ms: i64) -> crate::pool::entry::CostTier {
+        crate::pool::entry::CostTier::Unknown
+    }
+
+    fn mark_picked(&mut self, now_ms: i64, seq: u64) {
+        self.last_used_ms = now_ms;
+        self.used_seq = seq;
+    }
+
+    fn mark_probed(&mut self, now_ms: i64) {
+        self.last_used_ms = now_ms;
+    }
+}
+
 /// 剥掉 `Cloud-IDE-JWT ` 前缀并去掉首尾空白。
 ///
 /// 账号库里两种形态都可能存在（OAuth 登录存裸 token，手工粘贴常带前缀），
@@ -502,6 +726,9 @@ mod tests {
             disabled: false,
             cooldown_until: 0,
             cooldown_reason: String::new(),
+            cool_kind: None,
+            last_used_ms: 0,
+            used_seq: 0,
         }
     }
 
@@ -596,18 +823,22 @@ mod tests {
         cooling.cooldown_until = now + 500;
         let zero = entry("zero", Some(0.0), Some(now + 10));
 
-        let pool = pool_with(vec![soon, later, cooling, zero]);
-        let picked = pool.pick(now, &HashSet::new()).expect("应选出账号");
+        let mut pool = pool_with(vec![soon, later, cooling, zero]);
+        let picked = pool.pick(now, &HashSet::new(), None).expect("应选出账号");
         assert_eq!(picked.uid, "soon", "到期最近的优先");
 
         // 已试过的账号不再选。
         let mut tried = HashSet::new();
         tried.insert("soon".to_string());
-        assert_eq!(pool.pick(now, &tried).unwrap().uid, "later");
+        assert_eq!(pool.pick(now, &tried, None).unwrap().uid, "later");
 
-        // 全试过 → 没有可选。
+        // 全试过 → 不重复尝试已试账号，但会走**全冷却兜底**挑「最早解冻者」。
+        // ★ 这是接入共用内核后新增的能力（旧实现此时直接返回 None）。
+        // `cooling` 是唯一「有冷却时间且未被试过」的账号；`zero` 零积分且无冷却时间
+        // （`cool_expiry_ms() == 0`），不参与兜底。
         tried.insert("later".to_string());
-        assert!(pool.pick(now, &tried).is_none());
+        let fallback = pool.pick(now, &tried, None).expect("全冷却兜底应挑出最早解冻者");
+        assert_eq!(fallback.uid, "cooling");
     }
 
     #[test]
@@ -615,8 +846,125 @@ mod tests {
         let now = 1_000_000;
         let unknown = entry("unknown", Some(5000.0), None);
         let known = entry("known", Some(1.0), Some(now + 999));
-        let pool = pool_with(vec![unknown, known]);
-        assert_eq!(pool.pick(now, &HashSet::new()).unwrap().uid, "known");
+        let mut pool = pool_with(vec![unknown, known]);
+        assert_eq!(pool.pick(now, &HashSet::new(), None).unwrap().uid, "known");
+    }
+
+    /// ★★ 护栏：旧实现的「**积分到期最近优先**」语义必须在新算法下继续成立。
+    ///
+    /// 这条专治最危险的一类回归：把「到期时间」硬塞进 `expiring_credits`（绝对值）
+    /// 会被 `credits` 归一化抹平 —— 积分多但远未到期的账号会压过积分少但即将到期的
+    /// 账号，**而且不报错**。本用例让「即将到期」的账号积分远少于对手，只有独立因子
+    /// 足够强才能选中它。
+    #[test]
+    fn soonest_expiry_wins_even_with_far_fewer_credits() {
+        let now = 1_000_000;
+        // 一分钟后到期，但积分只有 10。
+        let soon = entry("soon", Some(10.0), Some(now + 60));
+        // 一年后到期，积分 999（是前者的近百倍）。
+        let far = entry("far", Some(999.0), Some(now + 365 * 24 * 3600));
+        let mut pool = pool_with(vec![far, soon]);
+
+        let picked = pool.pick(now, &HashSet::new(), None).expect("应选出账号");
+        assert_eq!(
+            picked.uid, "soon",
+            "「先用掉快过期的额度」必须压过积分多寡"
+        );
+    }
+
+    /// 指定账号可用时必须被优先选中 —— 即使它的积分远少于别人。
+    #[test]
+    fn preferred_uid_wins_when_usable() {
+        let now = 1_000_000;
+        let rich = entry("rich", Some(9999.0), Some(now + 60));
+        let poor = entry("poor", Some(1.0), Some(now + 60));
+        let mut pool = pool_with(vec![rich, poor]);
+
+        let picked = pool
+            .pick(now, &HashSet::new(), Some("poor"))
+            .expect("应选出账号");
+        assert_eq!(picked.uid, "poor", "指定账号可用时必须优先");
+    }
+
+    /// ★★ 护栏：指定账号**不可用**时必须回落到自动择优，而不是返回 None。
+    ///
+    /// 「偏好是优化而非约束」—— 若偏好不可用就拒绝服务，一次临时冷却会让整个网关
+    /// 停止工作。三种不可用形态（冷却中 / 禁用 / 已在本轮试过）都要覆盖。
+    #[test]
+    fn preferred_uid_falls_back_when_unusable() {
+        let now = 1_000_000;
+        let mut cooling = entry("cooling", Some(9999.0), Some(now + 60));
+        cooling.cooldown_until = now + 500;
+        let mut disabled = entry("disabled", Some(9999.0), Some(now + 60));
+        disabled.disabled = true;
+        let healthy = entry("healthy", Some(1.0), Some(now + 60));
+        let mut pool = pool_with(vec![cooling, disabled, healthy]);
+
+        // 冷却中的偏好 → 回落
+        assert_eq!(
+            pool.pick(now, &HashSet::new(), Some("cooling")).unwrap().uid,
+            "healthy"
+        );
+        // 禁用的偏好 → 回落
+        assert_eq!(
+            pool.pick(now, &HashSet::new(), Some("disabled")).unwrap().uid,
+            "healthy"
+        );
+        // 本轮已试过的偏好 → 回落（换号重试不得钉死在同一个账号上）
+        let mut tried = HashSet::new();
+        tried.insert("healthy".to_string());
+        let picked = pool.pick(now, &tried, Some("healthy")).expect("应回落到其它账号");
+        assert_ne!(picked.uid, "healthy", "已试过的偏好必须被跳过");
+        // 不存在的 uid → 回落
+        assert_eq!(
+            pool.pick(now, &HashSet::new(), Some("no-such-uid")).unwrap().uid,
+            "healthy"
+        );
+    }
+
+    /// ★ 硬冷却（套餐额度用尽）不得被「全冷却兜底」强试 —— 强试必然再失败，
+    /// 只会白白消耗一次上游调用并加重风控。
+    #[test]
+    fn plan_limited_account_is_not_probed_by_fallback() {
+        let now = 1_000_000;
+        let mut limited = entry("limited", Some(9999.0), Some(now + 60));
+        limited.cooldown_until = now + 43_200;
+        limited.cool_kind = Some(CoolKind::Hard);
+        let mut pool = pool_with(vec![limited]);
+
+        assert!(
+            pool.pick(now, &HashSet::new(), None).is_none(),
+            "硬冷却账号既不在候选里，也不该被兜底强试"
+        );
+    }
+
+    /// 到期紧迫度必须随剩余时间**单调递减**（剩余越短 → 紧迫度越高）。
+    #[test]
+    fn expiry_urgency_is_monotonic_and_bounded() {
+        let now = 1_000_000;
+        let now_ms = now * 1000;
+
+        let urgency_of = |seconds_ahead: i64| {
+            entry("u", Some(10.0), Some(now + seconds_ahead)).expiry_urgency(now_ms)
+        };
+
+        let one_minute = urgency_of(60);
+        let one_hour = urgency_of(3600);
+        let one_day = urgency_of(86_400);
+        let one_year = urgency_of(365 * 86_400);
+
+        assert!(one_minute > one_hour, "{one_minute} 应大于 {one_hour}");
+        assert!(one_hour > one_day, "{one_hour} 应大于 {one_day}");
+        assert!(one_day > one_year, "{one_day} 应大于 {one_year}");
+        for value in [one_minute, one_hour, one_day, one_year] {
+            assert!((0.0..=1.0).contains(&value), "紧迫度必须落在 [0,1]：{value}");
+        }
+        // 无到期时间 / 已过期 → 0
+        assert_eq!(entry("u", Some(10.0), None).expiry_urgency(now_ms), 0.0);
+        assert_eq!(
+            entry("u", Some(10.0), Some(now - 1)).expiry_urgency(now_ms),
+            0.0
+        );
     }
 
     #[test]

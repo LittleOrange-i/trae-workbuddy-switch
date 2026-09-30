@@ -464,7 +464,13 @@ export default function TraeApiServicePage() {
       />
 
       {/* ---- 账号池 ---- */}
-      <TraeAccountPoolCard status={status} className="mb-6" />
+      <TraeAccountPoolCard
+        status={status}
+        preferredUid={config.preferredUid}
+        onPreferredUidChange={(uid) => void persist({ preferredUid: uid })}
+        saving={saving}
+        className="mb-6"
+      />
 
       {/* ---- 模型清单（读客户端缓存，可重新读取：见 TraeModelList 的模块头） ---- */}
       <TraeModelList

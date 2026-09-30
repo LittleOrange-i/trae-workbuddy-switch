@@ -89,6 +89,10 @@ export const zh = {
   "trae.gateway.pool.empty": "账号池为空。请先在「账号管理」中添加 Trae 账号。",
   "trae.gateway.pool.credits": "{credits} 积分",
   "trae.gateway.pool.diagnoseNote": "请求报「没有可用账号」时，按下面的原因逐条排查：",
+  "trae.gateway.pool.preferredLabel": "指定账号",
+  "trae.gateway.pool.preferredAria": "指定优先消耗的账号",
+  "trae.gateway.pool.preferredAuto": "不指定（自动择优）",
+  "trae.gateway.pool.preferredMissing": "已指定的账号（当前不在池中）",
 
   // =====================================================================
   // gateway/trae-api-key-table.tsx —— API Key 列表 / 创建 / 吊销 / 删除

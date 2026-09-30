@@ -543,6 +543,91 @@ pub fn soft_backoff_duration(base_ms: i64, streak: i32, max_ms: i64) -> i64 {
     }
 }
 
+/// [`PoolEntryLike`] 实现：WorkBuddy 侧字段齐全，全部直接转调。
+///
+/// ★ 本实现**不得改变任何既有行为** —— 它是「把现有语义原样暴露给共用选号算法」的
+/// 适配层，不是重新定义语义的地方。任何在这里「顺手修正」的取值都会静默改变
+/// WorkBuddy 侧的选号结果（因为算法本身不区分产品线）。
+///
+/// [`PoolEntryLike`]: crate::pool::entry_like::PoolEntryLike
+impl crate::pool::entry_like::PoolEntryLike for PoolEntry {
+    fn uid(&self) -> &str {
+        &self.uid
+    }
+
+    fn credits(&self) -> i64 {
+        self.credits
+    }
+
+    fn expiring_credits(&self, _now_ms: i64) -> i64 {
+        // WorkBuddy 的「快过期子集」由余额刷新（`credits_refresh`）写入，
+        // 是一个**已算好的字段**，与调用时刻无关 —— 因此忽略 `now_ms`。
+        self.credits_expiring
+    }
+
+    fn success_ema(&self) -> f64 {
+        self.success_ema
+    }
+
+    fn error_ema(&self) -> f64 {
+        self.error_ema
+    }
+
+    fn last_used_ms(&self) -> i64 {
+        self.last_used_ms
+    }
+
+    fn used_seq(&self) -> u64 {
+        self.used_seq
+    }
+
+    fn in_flight(&self) -> i64 {
+        self.in_flight
+    }
+
+    fn realm(&self) -> Option<crate::pool::RealmTag> {
+        self.realm
+    }
+
+    fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    fn cool_expiry_ms(&self) -> i64 {
+        self.expiry_ms()
+    }
+
+    fn is_hard_cooled(&self, now_ms: i64) -> bool {
+        self.cool_kind == Some(CoolKind::Hard) && now_ms < self.until_ms
+    }
+
+    fn healthy_for_request(&self, now_ms: i64, model: &str) -> bool {
+        PoolEntry::healthy_for_request(self, now_ms, model)
+    }
+
+    fn prune_model_cooldowns(&mut self, now_ms: i64) {
+        // 返回值（是否有条目被移除）对选号无用，这里显式丢弃。
+        let _ = PoolEntry::prune_model_cooldowns(self, now_ms);
+    }
+
+    fn cost_per_1k(&self, now_ms: i64, model: &str, ttl_ms: i64) -> f64 {
+        PoolEntry::cost_per_1k(self, now_ms, model, ttl_ms)
+    }
+
+    fn cost_tier(&self, now_ms: i64, model: &str, ttl_ms: i64) -> CostTier {
+        PoolEntry::cost_tier(self, now_ms, model, ttl_ms)
+    }
+
+    fn mark_picked(&mut self, now_ms: i64, seq: u64) {
+        self.last_used_ms = now_ms;
+        self.used_seq = seq;
+    }
+
+    fn mark_probed(&mut self, now_ms: i64) {
+        self.last_used_ms = now_ms;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,7 +11,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::pool::entry::{CostTier, PoolEntry};
+use crate::pool::entry::CostTier;
+use crate::pool::entry_like::PoolEntryLike;
 use crate::pool::RealmTag;
 use crate::rng::Pcg32;
 
@@ -20,6 +21,26 @@ use crate::rng::Pcg32;
 pub struct PickPolicy {
     /// 快过期积分占比的权重（参考实现 `expiringWeight`）。
     pub expiring_weight: f64,
+    /// 「到期紧迫度」**独立因子**的权重（`0.0` = 不启用，WorkBuddy 默认如此）。
+    ///
+    /// ## 为什么要有这个因子（而不是复用 `expiring_weight`）
+    ///
+    /// `expiring_weight` 的输入是 `credits_expiring / credits` —— 一个**比值**，
+    /// 只有当产品线能给出「快过期积分的绝对值」时才有意义（WorkBuddy 的余额刷新
+    /// 正是如此）。
+    ///
+    /// Trae 没有「分批到期」概念，只有「这批积分在某个时刻统一过期」。若把它的
+    /// 紧迫度硬塞进 `credits_expiring`，会被 `credits` 归一化抹平 ——
+    /// 实测过：积分 999、一年后到期的账号会压过积分 10、一分钟后就到期的账号，
+    /// 等于把「先用掉快过期的额度」这条核心语义**静默丢掉**。
+    ///
+    /// 因此独立成一个因子：取值范围 `[0,1]`（0 = 无到期信息或远未到期），
+    /// 由 [`PoolEntryLike::expiry_urgency`] 提供。权重为 `0.0` 时该项恒为 0，
+    /// 引入前后行为逐字一致。
+    ///
+    /// ★ 对 Trae 侧该权重需**大于积分项上限（10.0）**，否则紧迫度差异会被积分差异
+    /// 淹没；见 [`crate::trae::pool`] 的取值说明。
+    pub expiry_urgency_weight: f64,
     /// 闲置补偿：每小时增加的权重。
     pub idle_weight_per_hour: f64,
     /// 闲置补偿权重上限。
@@ -32,6 +53,17 @@ pub struct PickPolicy {
     pub max_in_flight: i64,
     /// 国际版账号在途上限（0 = 沿用 `max_in_flight`）。
     pub max_in_flight_global: i64,
+    /// 是否**跳过加权抽签**，直接取排序后的第一名（严格择优）。
+    ///
+    /// - `false`（默认）：短名单内加权抽签，把确定性排序转化为**有界随机**，
+    ///   避免同一账号被连续打死。WorkBuddy 的多账号长会话场景需要它。
+    /// - `true`：权重最高者恒胜。适用于「账号少、用户要求行为可预期」的场景。
+    ///
+    /// ★ 为什么必须有这个开关：加权抽签天然带随机性，而「先用掉快过期的额度」
+    /// 这类语义要求**确定性** —— 用户指定或按到期时间择优时，不接受「大约 60% 的概率
+    /// 选到它」。若只靠把权重调大来逼近确定性，既脆弱又需要指数级放大，
+    /// 不如把「要不要随机」这件事显式暴露成策略。
+    pub deterministic: bool,
 }
 
 /// 短名单长度。
@@ -58,6 +90,7 @@ struct Candidate {
 /// w = 1
 ///   + credits/max_credits * 10                     （积分比例，归一化到候选集最大值）
 ///   + credits_expiring/credits * expiring_weight   （快过期占比，越紧迫越高）
+///   + expiry_urgency * expiry_urgency_weight       （到期紧迫度，产品线特有）
 ///   + idle_weight                                  （闲置补偿，0.5/小时，封顶 5.0）
 ///   + success_ratio * 3                            （成功率 EMA 比率；无记录取 1.5）
 /// ```
@@ -65,22 +98,38 @@ struct Candidate {
 /// 归一化口径：**积分除以分层过滤前的候选集最大值**（截断与抽签共用同一基准），
 /// 因此「积分最多的账号」恒得满配 10 分。候选积分全为 0 时该项跳过，
 /// 而不是退化为均匀随机——否则零积分账号会获得与有余额账号相同的权重。
-pub fn weight_of(entry: &PoolEntry, max_credits: i64, now_ms: i64, policy: &PickPolicy) -> f64 {
+///
+/// ★ 泛型化说明：本函数只通过 [`PoolEntryLike`] 读取条目，因此两条产品线共用同一套
+/// 权重语义。产品线特有的「紧迫度」表达方式由各自的 [`PoolEntryLike::credits_expiring`]
+/// 实现负责（见该方法的契约）。
+pub fn weight_of<E: PoolEntryLike>(
+    entry: &E,
+    max_credits: i64,
+    now_ms: i64,
+    policy: &PickPolicy,
+) -> f64 {
     let mut weight = 1.0;
 
+    let credits = entry.credits();
+    let credits_expiring = entry.expiring_credits(now_ms);
+
     if max_credits > 0 {
-        weight += (entry.credits.max(0) as f64 / max_credits as f64) * 10.0;
+        weight += (credits.max(0) as f64 / max_credits as f64) * 10.0;
     }
 
-    if entry.credits > 0 && entry.credits_expiring > 0 {
-        let ratio = (entry.credits_expiring as f64 / entry.credits as f64).clamp(0.0, 1.0);
+    if credits > 0 && credits_expiring > 0 {
+        let ratio = (credits_expiring as f64 / credits as f64).clamp(0.0, 1.0);
         weight += ratio * policy.expiring_weight;
     }
 
-    weight += idle_weight(entry.last_used_ms, now_ms, policy);
+    // 到期紧迫度独立因子：承载「还有多久过期」这类产品线特有语义。
+    // 权重为 0 时该项恒为 0，因此对不启用它的产品线零影响。
+    weight += entry.expiry_urgency(now_ms).clamp(0.0, 1.0) * policy.expiry_urgency_weight;
 
-    let success = entry.success_ema.max(0.0);
-    let error = entry.error_ema.max(0.0);
+    weight += idle_weight(entry.last_used_ms(), now_ms, policy);
+
+    let success = entry.success_ema().max(0.0);
+    let error = entry.error_ema().max(0.0);
     let total = success + error;
     weight += if total > 0.0 {
         (success / total) * 3.0
@@ -111,15 +160,21 @@ fn idle_weight(last_used_ms: i64, now_ms: i64, policy: &PickPolicy) -> f64 {
 /// 且比 `pick` 宽松，就会把请求钉到一个 `pick` 认为不可用的账号上
 /// （症状：**明明有别的号可用却一直失败**）。两处判据一旦分家，这种缺陷不会报错、
 /// 只会表现成「偶发失败」。抽成一个函数是唯一可靠的做法。
-fn entry_usable(entry: &PoolEntry, policy: &PickPolicy, now_ms: i64, model: &str) -> bool {
+fn entry_usable<E: PoolEntryLike>(
+    entry: &E,
+    policy: &PickPolicy,
+    now_ms: i64,
+    model: &str,
+) -> bool {
     entry.healthy_for_request(now_ms, model) && !in_flight_full(entry, policy)
 }
 
 /// 指定 uid 此刻是否可用于该请求（**与 [`pick`] 同一套判据**，见 [`entry_usable`]）。
 ///
-/// 供**会话粘性**使用：粘性会先问「上次那个账号还能不能用」，能用就复用、不能用就解绑换号。
-pub fn is_usable(
-    entries: &BTreeMap<String, PoolEntry>,
+/// 供**会话粘性**与**指定账号偏好**使用：两者都要先问「那个账号还能不能用」，
+/// 能用就复用、不能用就换号。
+pub fn is_usable<E: PoolEntryLike>(
+    entries: &BTreeMap<String, E>,
     policy: &PickPolicy,
     uid: &str,
     now_ms: i64,
@@ -131,21 +186,24 @@ pub fn is_usable(
         .unwrap_or(false)
 }
 
-fn in_flight_full(entry: &PoolEntry, policy: &PickPolicy) -> bool {
-    let limit = match entry.realm {
+fn in_flight_full<E: PoolEntryLike>(entry: &E, policy: &PickPolicy) -> bool {
+    let limit = match entry.realm() {
         Some(RealmTag::Global) if policy.max_in_flight_global > 0 => policy.max_in_flight_global,
         _ => policy.max_in_flight,
     };
     // 0 = 不限（计数仍累加，但永不拒绝）。
-    limit > 0 && entry.in_flight >= limit
+    limit > 0 && entry.in_flight() >= limit
 }
 
 /// 从池中选出一个账号；返回被选中账号的 uid。
 ///
 /// `tried` 是本轮已尝试过的 uid（换号重试时由调用方累加）。
 /// `seed` 决定抽签与洗牌结果——生产用时间戳+序号，测试用固定值以保证可复现。
-pub fn pick(
-    entries: &mut BTreeMap<String, PoolEntry>,
+///
+/// ★ 泛型化：算法只通过 [`PoolEntryLike`] 读取条目，因此 WorkBuddy 与 Trae
+/// 共用同一套选号语义。需要「优先某个账号」请用 [`pick_with_preference`]。
+pub fn pick<E: PoolEntryLike>(
+    entries: &mut BTreeMap<String, E>,
     pick_seq: &mut u64,
     policy: &PickPolicy,
     now_ms: i64,
@@ -162,11 +220,11 @@ pub fn pick(
     let candidate_uids: Vec<String> = entries
         .values()
         .filter(|entry| {
-            !tried.contains(&entry.uid)
-                && entry_usable(entry, policy, now_ms, model)
-                && realm.map(|wanted| entry.realm == Some(wanted)).unwrap_or(true)
+            !tried.contains(entry.uid())
+                && entry_usable(*entry, policy, now_ms, model)
+                && realm.map(|wanted| entry.realm() == Some(wanted)).unwrap_or(true)
         })
-        .map(|entry| entry.uid.clone())
+        .map(|entry| entry.uid().to_string())
         .collect();
 
     if candidate_uids.is_empty() {
@@ -177,7 +235,7 @@ pub fn pick(
     let max_credits = candidate_uids
         .iter()
         .filter_map(|uid| entries.get(uid))
-        .map(|entry| entry.credits)
+        .map(|entry| entry.credits())
         .max()
         .unwrap_or(0);
 
@@ -185,11 +243,11 @@ pub fn pick(
         .iter()
         .filter_map(|uid| entries.get(uid))
         .map(|entry| Candidate {
-            uid: entry.uid.clone(),
+            uid: entry.uid().to_string(),
             weight: weight_of(entry, max_credits, now_ms, policy),
             cost_per_1k: entry.cost_per_1k(now_ms, model, policy.model_cost_ttl_ms),
-            used_seq: entry.used_seq,
-            last_used_ms: entry.last_used_ms,
+            used_seq: entry.used_seq(),
+            last_used_ms: entry.last_used_ms(),
             tier: entry
                 .cost_tier(now_ms, model, policy.model_cost_ttl_ms)
                 .rank(),
@@ -253,6 +311,9 @@ pub fn pick(
             .iter()
             .min_by_key(|candidate| candidate.used_seq)
             .map(|candidate| candidate.uid.clone())
+    } else if policy.deterministic {
+        // 严格择优：`eligible` 保持排序（单价升序 → 权重降序），首元素即最优。
+        eligible.first().map(|candidate| candidate.uid.clone())
     } else {
         draw_weighted(&eligible, &mut rng).map(|candidate| candidate.uid.clone())
     };
@@ -260,11 +321,56 @@ pub fn pick(
     chosen_uid.map(|uid| {
         *pick_seq += 1;
         if let Some(entry) = entries.get_mut(&uid) {
-            entry.last_used_ms = now_ms;
-            entry.used_seq = *pick_seq;
+            entry.mark_picked(now_ms, *pick_seq);
         }
         uid
     })
+}
+
+/// 带「指定账号」偏好的选号：**偏好可用则优先，不可用则回落通用选号**。
+///
+/// ## 为什么偏好走「短路」而不是「加权」
+///
+/// 用户的诉求是「先消耗指定账号的积分」，语义是**确定性优先**而非「更倾向」。
+/// 若把偏好做成权重加成，它会被积分比例项（最高 10 分）压制 —— 指定一个积分较少的
+/// 账号后，请求仍会大量落到积分多的账号上，功能等于没做。
+///
+/// ## 两条硬约束
+///
+/// 1. **偏好不是约束**：指定账号不可用（冷却 / 禁用 / 零积分 / 该模型被限流 /
+///    在途占满 / 已在本轮试过）时**必须回落**到通用选号，绝不能因此拒绝服务。
+///    这与会话粘性的取向一致 —— 粘性同样是优化而非约束。
+/// 2. **可用性判据必须与 [`pick`] 同源**：走 [`is_usable`]（即 [`entry_usable`]）。
+///    若这里另写一套更宽松的判据，就会把请求钉到一个 `pick` 认为不可用的账号上，
+///    症状是「明明有别的号可用却一直失败」且**不报错**。
+///
+/// 命中偏好时同样推进 `pick_seq` 与 `used_seq`（它确实被使用了，应参与 LRU 语义）。
+pub fn pick_with_preference<E: PoolEntryLike>(
+    entries: &mut BTreeMap<String, E>,
+    pick_seq: &mut u64,
+    policy: &PickPolicy,
+    now_ms: i64,
+    realm: Option<RealmTag>,
+    model: &str,
+    tried: &HashSet<String>,
+    seed: u64,
+    preferred_uid: Option<&str>,
+) -> Option<String> {
+    if let Some(uid) = preferred_uid {
+        let preferred_usable = !tried.contains(uid)
+            && is_usable(entries, policy, uid, now_ms, model)
+            && realm
+                .map(|wanted| entries.get(uid).and_then(|entry| entry.realm()) == Some(wanted))
+                .unwrap_or(true);
+        if preferred_usable {
+            *pick_seq += 1;
+            if let Some(entry) = entries.get_mut(uid) {
+                entry.mark_picked(now_ms, *pick_seq);
+            }
+            return Some(uid.to_string());
+        }
+    }
+    pick(entries, pick_seq, policy, now_ms, realm, model, tried, seed)
 }
 
 /// 加权抽签：`wi = round(w * 1e6)`，下界 1；前缀累积首个命中者胜出。
@@ -303,8 +409,8 @@ fn draw_weighted<'a>(items: &[&'a Candidate], rng: &mut Pcg32) -> Option<&'a Can
 /// 约束：非 `tried`、realm 匹配、非禁用、**排除仍在有效硬冷却中的账号**
 /// （硬冷却意味着余额不足，强试必然再失败且浪费一次上游调用）。
 /// 不推进 `used_seq`（它只是「试一下」，不应影响 LRU 语义）。
-fn pick_earliest_expiry(
-    entries: &mut BTreeMap<String, PoolEntry>,
+fn pick_earliest_expiry<E: PoolEntryLike>(
+    entries: &mut BTreeMap<String, E>,
     policy: &PickPolicy,
     now_ms: i64,
     realm: Option<RealmTag>,
@@ -313,28 +419,28 @@ fn pick_earliest_expiry(
     let candidate = entries
         .values()
         .filter(|entry| {
-            if tried.contains(&entry.uid) || entry.disabled {
+            if tried.contains(entry.uid()) || entry.is_disabled() {
                 return false;
             }
             if let Some(wanted) = realm {
-                if entry.realm != Some(wanted) {
+                if entry.realm() != Some(wanted) {
                     return false;
                 }
             }
-            if in_flight_full(entry, policy) {
+            if in_flight_full(*entry, policy) {
                 return false;
             }
             // 硬冷却期间余额不足，强试无意义。
-            if entry.cool_kind == Some(crate::pool::entry::CoolKind::Hard) && now_ms < entry.until_ms {
+            if entry.is_hard_cooled(now_ms) {
                 return false;
             }
-            entry.expiry_ms() > 0
+            entry.cool_expiry_ms() > 0
         })
-        .min_by_key(|entry| (entry.expiry_ms(), entry.uid.clone()))
-        .map(|entry| entry.uid.clone())?;
+        .min_by_key(|entry| (entry.cool_expiry_ms(), entry.uid().to_string()))
+        .map(|entry| entry.uid().to_string())?;
 
     if let Some(entry) = entries.get_mut(&candidate) {
-        entry.last_used_ms = now_ms;
+        entry.mark_probed(now_ms);
     }
     Some(candidate)
 }
@@ -348,12 +454,16 @@ mod tests {
     fn policy() -> PickPolicy {
         PickPolicy {
             expiring_weight: 8.0,
+            // WorkBuddy 不启用独立紧迫度因子（它的紧迫度由 `expiring_weight` 表达）。
+            expiry_urgency_weight: 0.0,
             idle_weight_per_hour: 0.5,
             idle_weight_max: 5.0,
             min_pick_gap_ms: 100,
             model_cost_ttl_ms: 6 * 60 * 60 * 1000,
             max_in_flight: 3,
             max_in_flight_global: 2,
+            // 保持 WorkBuddy 既有的有界随机语义。
+            deterministic: false,
         }
     }
 

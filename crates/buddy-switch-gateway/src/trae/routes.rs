@@ -230,6 +230,7 @@ pub async fn chat_completions(
             &model,
             &chat_id,
             max_rotate,
+            &config.preferred_uid,
             started,
             variant,
         )
@@ -242,6 +243,7 @@ pub async fn chat_completions(
             &model,
             &chat_id,
             max_rotate,
+            &config.preferred_uid,
             started,
             variant,
         )
@@ -262,6 +264,7 @@ async fn stream_chat(
     model: &str,
     chat_id: &str,
     max_rotate: usize,
+    preferred_uid: &str,
     started: Instant,
     variant: TraeVariant,
 ) -> Response {
@@ -269,7 +272,7 @@ async fn stream_chat(
     let mut last: Option<UpstreamFailure> = None;
 
     for _ in 0..max_rotate {
-        match attempt_once(state, body, default_model, &mut tried, variant).await {
+        match attempt_once(state, body, default_model, &mut tried, preferred_uid, variant).await {
             None => break,
             Some(AttemptResult::Failed { failure, .. }) => last = Some(failure),
             Some(AttemptResult::Ok { account, response }) => {
@@ -319,6 +322,7 @@ async fn aggregate_chat(
     model: &str,
     chat_id: &str,
     max_rotate: usize,
+    preferred_uid: &str,
     started: Instant,
     variant: TraeVariant,
 ) -> Response {
@@ -327,7 +331,8 @@ async fn aggregate_chat(
 
     for _ in 0..max_rotate {
         let (account, response) =
-            match attempt_once(state, body, default_model, &mut tried, variant).await {
+            match attempt_once(state, body, default_model, &mut tried, preferred_uid, variant).await
+            {
                 None => break,
                 Some(AttemptResult::Failed { failure, .. }) => {
                     last = Some(failure);
@@ -394,6 +399,7 @@ async fn attempt_once(
     body: &Bytes,
     default_model: &str,
     tried: &mut HashSet<String>,
+    preferred_uid: &str,
     variant: TraeVariant,
 ) -> Option<AttemptResult> {
     let picked = {
@@ -401,7 +407,13 @@ async fn attempt_once(
         let pool = pools.entry(variant).or_insert_with(|| TraePool::for_variant(variant));
         // 每次选号前重新同步：另一个入口（签到页 / 桌面端）可能刚写了冷却或刷新了积分。
         pool.sync_for(variant);
-        pool.pick(now_secs(), tried)
+        // 空串 = 不指定。偏好不可用时 `pick_with_preference` 会自行回落到自动择优。
+        let preferred = if preferred_uid.is_empty() {
+            None
+        } else {
+            Some(preferred_uid)
+        };
+        pool.pick(now_secs(), tried, preferred)
     }?;
     tried.insert(picked.uid.clone());
 

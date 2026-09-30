@@ -1000,6 +1000,10 @@ function demoTraeGatewayConfig(): TraeGatewayConfigRaw {
     enabled: true, bind_addr: "127.0.0.1", port: 7864, allow_non_loopback: false,
     log_keep: 200, log_bodies: false, max_body_mb: 8,
     default_model: "deepseek-v4-flash", max_rotate: 3,
+    // 演示「已指定账号」的状态：指向下方账号池里那个可用的主账号
+    // （`demoTraeGatewayStatus` 的 uid 必须与这里对得上，否则选择器会显示
+    // 「已指定的账号（当前不在池中）」，看起来像 bug）。
+    preferred_uid: "7481920",
   };
 }
 
