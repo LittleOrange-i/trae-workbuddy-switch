@@ -14,7 +14,7 @@ mod trae_gateway_host;
 use serde_json::json;
 
 use buddy_switch_core::modules::{
-    account, auth_file, config, process, region::Region, rotate, schedule, scheduler, update,
+    account, auth_file, config, process, region::Region, rotate, schedule, scheduler, trae, update,
 };
 
 fn default_port() -> u16 {
@@ -49,6 +49,12 @@ enum BackgroundTask {
     CreditsRefresh,
     /// 账号池**治理状态落盘**（冷却 / 熔断 / 成功率 EMA / 余额读数）。
     PoolPersist,
+    /// **Trae** 积分刷新（两条国内产品线，顺带自动解冻已恢复的账号）。
+    ///
+    /// Trae 的剩余积分此前只在「签到页」被刷新 —— 纯用 API（不开界面）时读数会一直
+    /// 陈旧：已耗尽积分的账号仍被选中（白撞一次上游），或尚有余额的账号被误判为
+    /// 零积分而排除。
+    TraeCreditsRefresh,
     /// 六类积分定时任务之一（各自独立排程）。
     Scheduled(schedule::ScheduleTask),
 }
@@ -61,6 +67,11 @@ enum BackgroundTask {
 /// 不会给请求路径加负担。
 const POOL_PERSIST_INTERVAL_MS: u64 = 30_000;
 
+/// Trae 积分刷新周期（毫秒）。
+///
+/// 与 WorkBuddy 余额刷新的缺省间隔（30 分钟）保持一致：同一管理面不该有两种节奏。
+const TRAE_CREDITS_REFRESH_INTERVAL_MS: u64 = 30 * 60 * 1000;
+
 /// 后台任务注册表：列出所有应启动的后台任务。
 ///
 /// [`spawn_background_loops`] **严格**按本表启动；因此「增删后台任务」是数据变化，
@@ -71,6 +82,7 @@ fn background_tasks() -> Vec<BackgroundTask> {
         BackgroundTask::AutoRotate,
         BackgroundTask::CreditsRefresh,
         BackgroundTask::PoolPersist,
+        BackgroundTask::TraeCreditsRefresh,
     ];
     tasks.extend(
         schedule::ScheduleTask::all()
@@ -142,6 +154,20 @@ fn spawn_background_task(task: BackgroundTask) {
                 }
             });
         }
+        // Trae 积分刷新（两条国内产品线）：与 WorkBuddy 余额刷新同为独立循环。
+        BackgroundTask::TraeCreditsRefresh => {
+            tokio::spawn(async move {
+                // 启动即刷一次：补齐上次进程遗留的陈旧读数。
+                refresh_trae_credits().await;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        TRAE_CREDITS_REFRESH_INTERVAL_MS,
+                    ))
+                    .await;
+                    refresh_trae_credits().await;
+                }
+            });
+        }
         // 六类积分任务各自独立排程。
         BackgroundTask::Scheduled(task) => spawn_scheduled_task(task),
         // 账号池治理状态落盘：**周期**刷新，且只在有改动时写（`flush_if_dirty`）。
@@ -168,6 +194,19 @@ fn spawn_background_task(task: BackgroundTask) {
                 }
             });
         }
+    }
+}
+
+/// 刷新 Trae **两条国内产品线**的全部账号积分（顺带自动解冻已恢复的账号）。
+///
+/// 只刷 `TraeVariant::all()`（= `TraeWork` / `Trae`）：网关的 Key 只归属这两条线
+/// （见 `buddy_switch_gateway::trae::apikey` 的 `variant`），刷国际版属于无效功。
+///
+/// 失败不中断：`refresh_all_remaining_for` 内部已对**单账号**失败做了记录与跳过，
+/// 这里再兜一层是为了「一个变体整体报错不影响另一个变体」。
+async fn refresh_trae_credits() {
+    for variant in trae::variant::TraeVariant::all() {
+        let _ = trae::credits::refresh_all_remaining_for(variant).await;
     }
 }
 
@@ -313,6 +352,23 @@ mod tests {
             tasks.contains(&BackgroundTask::CreditsRefresh),
             "后台任务注册表必须登记 CreditsRefresh（账号池余额刷新）；缺了它生产上余额永远为 0，\
              四因子加权会静默退化为两因子。当前注册表：{tasks:?}"
+        );
+    }
+
+    /// 护栏：**Trae** 积分刷新任务必须登记在注册表里。
+    ///
+    /// 回归背景：Trae 的剩余积分此前只在「签到页」被刷新 —— 纯用 API（不开界面）时
+    /// 读数会一直陈旧。选号用 `credits` 做「零积分排除」与「积分多优先」，
+    /// 陈旧读数会让**已耗尽积分的账号仍被选中**（白撞一次上游），或**尚有余额的账号
+    /// 被误判为零积分而排除**。这与上面两条是**同一类**事故：能力存在、
+    /// 类型全对、单测全绿，但生产上没有调用点。
+    #[test]
+    fn background_task_registry_includes_trae_credits_refresh() {
+        let tasks = background_tasks();
+        assert!(
+            tasks.contains(&BackgroundTask::TraeCreditsRefresh),
+            "后台任务注册表必须登记 TraeCreditsRefresh；缺了它纯用 API 时积分读数永远陈旧。\
+             当前注册表：{tasks:?}"
         );
     }
 

@@ -11,6 +11,20 @@ use buddy_switch_core::modules;
 
 const SCREENSHOT_DEMO_ENV: &str = "BUDDY_SWITCH_SCREENSHOT_DEMO";
 
+/// WorkBuddy 账号池状态落盘周期（毫秒）。
+///
+/// 与 `buddy-switch-server` 同值。取值理由：[`Pool::flush_if_dirty`] 只在**有改动**时
+/// 才真正写盘，所以这里定的是「最坏情况下最多丢多少治理状态」。30 秒足够短
+/// （冷却 / 熔断的时效是分钟级，丢 30 秒不会造成错误决策），又远长于一次请求。
+///
+/// [`Pool::flush_if_dirty`]: buddy_switch_gateway::pool::Pool::flush_if_dirty
+const POOL_PERSIST_INTERVAL_MS: u64 = 30_000;
+
+/// Trae 积分刷新周期（毫秒）。
+///
+/// 与 WorkBuddy 余额刷新的缺省间隔（30 分钟）保持一致：同一管理面不该有两种节奏。
+const TRAE_CREDITS_REFRESH_INTERVAL_MS: u64 = 30 * 60 * 1000;
+
 pub(crate) fn is_screenshot_demo() -> bool {
     std::env::var(SCREENSHOT_DEMO_ENV).as_deref() == Ok("1")
 }
@@ -31,11 +45,34 @@ enum BackgroundTask {
     AutoRotate,
     /// 六类积分定时任务之一（按 `schedule_config` 的小时表，各自独立排程）。
     Scheduled(modules::schedule::ScheduleTask),
+    /// WorkBuddy 账号池**余额刷新**（真实余额回填选号权重）。
+    ///
+    /// ★ 桌面端此前**没有**它（只有服务端有），后果是池里的 `credits` 恒为 0 ——
+    /// `weight_of` 的积分分支（权重最大的一项）静默退化为死代码，
+    /// 对外宣称的「四因子加权」实际只剩「闲置补偿 + 成功率 + 成本分层」。
+    CreditsRefresh,
+    /// WorkBuddy 账号池**治理状态落盘**（冷却 / 熔断 / 成功率 EMA / 余额读数）。
+    ///
+    /// 缺了它这些状态只在内存里，每次重启从零开始 —— 例如刚判定 `SessionDead`
+    /// 的账号重启后立刻又被选中、再撞一次同样的墙。
+    PoolPersist,
+    /// **Trae** 积分刷新（两条国内产品线，顺带自动解冻已恢复的账号）。
+    ///
+    /// Trae 的剩余积分此前只在「签到页」被刷新 —— 纯用 API（不开界面）时读数会一直
+    /// 陈旧：已耗尽积分的账号仍被选中（白撞一次上游），或尚有余额的账号被误判为
+    /// 零积分而排除。
+    TraeCreditsRefresh,
 }
 
 /// 后台任务注册表：**登记即执行**——不要在本表之外直接 `spawn` 后台循环。
 fn background_tasks() -> Vec<BackgroundTask> {
-    let mut tasks = vec![BackgroundTask::StartupMaintenance, BackgroundTask::AutoRotate];
+    let mut tasks = vec![
+        BackgroundTask::StartupMaintenance,
+        BackgroundTask::AutoRotate,
+        BackgroundTask::CreditsRefresh,
+        BackgroundTask::PoolPersist,
+        BackgroundTask::TraeCreditsRefresh,
+    ];
     tasks.extend(
         modules::schedule::ScheduleTask::all()
             .into_iter()
@@ -88,6 +125,64 @@ fn spawn_background_task(task: BackgroundTask) {
         BackgroundTask::Scheduled(task) => {
             tauri::async_runtime::spawn(modules::scheduler::schedule_loop(task));
         }
+        // WorkBuddy 账号池余额刷新：**独立**循环，首次启动先跑一次，之后按池配置
+        // `credits_refresh_interval_ms`（默认 30 分钟）周期刷新。语义与服务端同源。
+        //
+        // 为什么必须是独立后台循环：余额是慢变数据，在请求路径上同步拉余额会直接拉高
+        // 每次请求的延迟（见 `buddy_switch_gateway::credits_refresh` 的文档）。
+        BackgroundTask::CreditsRefresh => {
+            tauri::async_runtime::spawn(async move {
+                let state = gateway::shared_state();
+                // 启动即刷一次：补齐上次进程遗留的「从未取过余额」账号。
+                let _ = buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
+                loop {
+                    let interval_ms = state
+                        .pool
+                        .read()
+                        .await
+                        .config()
+                        .credits_refresh_interval_ms
+                        .max(1);
+                    tokio::time::sleep(Duration::from_millis(interval_ms as u64)).await;
+                    let _ = buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
+                }
+            });
+        }
+        // WorkBuddy 账号池治理状态落盘（只在有改动时真正写盘）。
+        BackgroundTask::PoolPersist => {
+            tauri::async_runtime::spawn(async move {
+                let state = gateway::shared_state();
+                loop {
+                    tokio::time::sleep(Duration::from_millis(POOL_PERSIST_INTERVAL_MS)).await;
+                    state.persist_pool().await;
+                }
+            });
+        }
+        // Trae 积分刷新（两条国内产品线）。
+        BackgroundTask::TraeCreditsRefresh => {
+            tauri::async_runtime::spawn(async move {
+                // 启动即刷一次：补齐上次进程遗留的陈旧读数。
+                refresh_trae_credits().await;
+                loop {
+                    tokio::time::sleep(Duration::from_millis(TRAE_CREDITS_REFRESH_INTERVAL_MS))
+                        .await;
+                    refresh_trae_credits().await;
+                }
+            });
+        }
+    }
+}
+
+/// 刷新 Trae **两条国内产品线**的全部账号积分（顺带自动解冻已恢复的账号）。
+///
+/// 只刷 `TraeVariant::all()`（= `TraeWork` / `Trae`）：网关的 Key 只归属这两条线
+/// （见 `buddy_switch_gateway::trae::apikey` 的 `variant`），刷国际版属于无效功。
+///
+/// 失败不中断：`refresh_all_remaining_for` 内部已对**单账号**失败做了记录与跳过，
+/// 这里再兜一层是为了「一个变体整体报错不影响另一个变体」。
+async fn refresh_trae_credits() {
+    for variant in modules::trae::variant::TraeVariant::all() {
+        let _ = modules::trae::credits::refresh_all_remaining_for(variant).await;
     }
 }
 
@@ -307,6 +402,20 @@ mod tests {
         assert!(
             tasks.contains(&BackgroundTask::AutoRotate),
             "注册表缺少自动轮换任务"
+        );
+        assert!(
+            tasks.contains(&BackgroundTask::CreditsRefresh),
+            "注册表缺少账号池余额刷新 —— 缺了它池里的 credits 恒为 0，\
+             「四因子加权」会静默退化为两因子（服务端早已有该任务，桌面端此前漏了）"
+        );
+        assert!(
+            tasks.contains(&BackgroundTask::PoolPersist),
+            "注册表缺少账号池落盘 —— 缺了它冷却 / 熔断 / 成功率 EMA 只在内存里，重启即清零"
+        );
+        assert!(
+            tasks.contains(&BackgroundTask::TraeCreditsRefresh),
+            "注册表缺少 Trae 积分刷新 —— 缺了它纯用 API（不开界面）时积分读数永远陈旧：\
+             耗尽积分的账号仍被选中、尚有余额的账号被误判为零积分"
         );
     }
 }
