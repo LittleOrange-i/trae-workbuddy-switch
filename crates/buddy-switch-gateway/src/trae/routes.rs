@@ -36,6 +36,9 @@ use buddy_switch_core::modules::trae::account;
 use buddy_switch_core::modules::trae::region::TraeRegion;
 use buddy_switch_core::modules::trae::variant::TraeVariant;
 
+use crate::session_headers;
+use crate::sticky;
+
 use super::payload;
 use super::pool::{classify_http, classify_solo, PickedTraeAccount, TraeErrKind, TraePool};
 use super::sse::{self, TokenUsage};
@@ -222,6 +225,8 @@ pub async fn chat_completions(
     let max_rotate = config.max_rotate.max(1);
     let chat_id = format!("chatcmpl-{}", uuid_like());
 
+    let sticky_key = sticky_key_of(&parsed, variant, &model);
+
     if stream {
         stream_chat(
             &state,
@@ -231,6 +236,7 @@ pub async fn chat_completions(
             &chat_id,
             max_rotate,
             &config.preferred_uid,
+            sticky_key.as_deref(),
             started,
             variant,
         )
@@ -244,6 +250,7 @@ pub async fn chat_completions(
             &chat_id,
             max_rotate,
             &config.preferred_uid,
+            sticky_key.as_deref(),
             started,
             variant,
         )
@@ -265,6 +272,7 @@ async fn stream_chat(
     chat_id: &str,
     max_rotate: usize,
     preferred_uid: &str,
+    sticky_key: Option<&str>,
     started: Instant,
     variant: TraeVariant,
 ) -> Response {
@@ -272,7 +280,17 @@ async fn stream_chat(
     let mut last: Option<UpstreamFailure> = None;
 
     for _ in 0..max_rotate {
-        match attempt_once(state, body, default_model, &mut tried, preferred_uid, variant).await {
+        match attempt_once(
+            state,
+            body,
+            default_model,
+            &mut tried,
+            preferred_uid,
+            sticky_key,
+            variant,
+        )
+        .await
+        {
             None => break,
             Some(AttemptResult::Failed { failure, .. }) => last = Some(failure),
             Some(AttemptResult::Ok { account, response }) => {
@@ -323,6 +341,7 @@ async fn aggregate_chat(
     chat_id: &str,
     max_rotate: usize,
     preferred_uid: &str,
+    sticky_key: Option<&str>,
     started: Instant,
     variant: TraeVariant,
 ) -> Response {
@@ -330,9 +349,17 @@ async fn aggregate_chat(
     let mut last: Option<UpstreamFailure> = None;
 
     for _ in 0..max_rotate {
-        let (account, response) =
-            match attempt_once(state, body, default_model, &mut tried, preferred_uid, variant).await
-            {
+        let (account, response) = match attempt_once(
+            state,
+            body,
+            default_model,
+            &mut tried,
+            preferred_uid,
+            sticky_key,
+            variant,
+        )
+        .await
+        {
                 None => break,
                 Some(AttemptResult::Failed { failure, .. }) => {
                     last = Some(failure);
@@ -376,6 +403,41 @@ async fn aggregate_chat(
 // 选号与出站
 // ---------------------------------------------------------------------------
 
+/// 由请求体、产品线与模型派生**会话粘性键**；客户端未给会话 id 时返回 `None`。
+///
+/// ★ 返回 `None` 时调用方必须**整段跳过**粘性 —— 不得退化成轮级键：那会造出一个
+/// 永不命中的绑定，让「粘性会话数」看起来非 0 却毫无作用
+/// （见 [`sticky::sticky_key`] 的文档）。
+///
+/// 变体进键是必须的：两条产品线的账号库**分家**，粘到一起会指向另一条线的账号。
+fn sticky_key_of(parsed: &Value, variant: TraeVariant, model: &str) -> Option<String> {
+    session_headers::conversation_id_of(parsed)
+        // ★ 必须 trim：`conversation_id_of` 只排除**空串**，纯空白（`"   "`）会漏过来。
+        // 直接拿它当键的话，所有「填了空白」的客户端会**共用同一个绑定**
+        // （表现为不同对话互相串号），而且不报错。WorkBuddy 侧的 `sticky_key_of` 同样 trim。
+        .map(|conversation| conversation.trim().to_string())
+        .filter(|conversation| !conversation.is_empty())
+        .map(|conversation| sticky::sticky_key(variant.as_str(), model, &conversation))
+}
+
+/// 合并两个偏好来源，得到本次选号的偏好 uid。
+///
+/// 优先级：**显式指定 > 会话粘性**。
+///
+/// 为什么显式指定优先：粘性记录的是「上次成功的账号」，是一个**陈旧**的观察；
+/// 而 `preferred_uid` 是用户此刻的明确要求。若让粘性压过它，用户改完设置后会看到
+/// 「下一轮仍走旧账号」—— 表现为设置不生效。
+///
+/// ★ 本函数只决定「优先试谁」，**不保证一定用谁**：两者都不可用时由
+/// [`crate::pool::pick_with_preference`] 回落到自动择优。粘性是优化而非约束。
+fn resolve_preference<'a>(explicit_uid: &'a str, sticky_uid: Option<&'a str>) -> Option<&'a str> {
+    if explicit_uid.is_empty() {
+        sticky_uid
+    } else {
+        Some(explicit_uid)
+    }
+}
+
 /// 一次出站尝试的结果。
 enum AttemptResult {
     /// 上游返回 2xx（响应体尚未读取）。
@@ -394,25 +456,28 @@ enum AttemptResult {
 /// 选号 + 出站一次。`tried` 在内部累加，调用方反复调用即可自动换号。
 ///
 /// 返回 `None` 表示**已经挑不出新账号**（不是失败，是没得试了）。
+#[allow(clippy::too_many_arguments)]
 async fn attempt_once(
     state: &TraeGatewayState,
     body: &Bytes,
     default_model: &str,
     tried: &mut HashSet<String>,
     preferred_uid: &str,
+    sticky_key: Option<&str>,
     variant: TraeVariant,
 ) -> Option<AttemptResult> {
+    // 先读粘性（**不持 pools 锁**）：两把锁不嵌套 —— 既不延长池的持锁时间，
+    // 也避免日后有人以相反顺序取锁造成死锁。
+    let sticky_uid = state.sticky_uid(sticky_key).await;
+
     let picked = {
         let mut pools = state.pools.lock().await;
         let pool = pools.entry(variant).or_insert_with(|| TraePool::for_variant(variant));
         // 每次选号前重新同步：另一个入口（签到页 / 桌面端）可能刚写了冷却或刷新了积分。
         pool.sync_for(variant);
-        // 空串 = 不指定。偏好不可用时 `pick_with_preference` 会自行回落到自动择优。
-        let preferred = if preferred_uid.is_empty() {
-            None
-        } else {
-            Some(preferred_uid)
-        };
+        // 偏好优先级：**显式指定 > 会话粘性 > 自动择优**（见 [`resolve_preference`]）。
+        // 两者都不可用时 `pick_with_preference` 会自行回落到自动择优，绝不拒绝服务。
+        let preferred = resolve_preference(preferred_uid, sticky_uid.as_deref());
         pool.pick(now_secs(), tried, preferred)
     }?;
     tried.insert(picked.uid.clone());
@@ -426,10 +491,14 @@ async fn attempt_once(
     );
 
     match send_llm_chat(state, &picked, &converted).await {
-        Ok(response) => Some(AttemptResult::Ok {
-            account: picked,
-            response,
-        }),
+        Ok(response) => {
+            // 会话粘性：**只在成功之后**绑定，让下一轮优先复用这个账号。
+            state.bind_sticky(sticky_key, &picked.uid).await;
+            Some(AttemptResult::Ok {
+                account: picked,
+                response,
+            })
+        }
         Err((status, detail)) => {
             let kind = classify_http(status);
             let failure = UpstreamFailure {
@@ -455,6 +524,9 @@ async fn attempt_once(
                     .apply_error(&picked.uid, kind, &failure.message);
             }
             *state.last_error.write().await = Some(failure.message.clone());
+            // 会话粘性：这个账号刚失败 ⇒ 立刻**解绑**，下一轮换号重新绑。
+            // 粘性是优化而非约束，绝不能因为粘性而反复撞同一堵墙。
+            state.unbind_sticky(sticky_key).await;
             Some(AttemptResult::Failed {
                 account: picked,
                 failure,
@@ -787,6 +859,99 @@ fn describe_transport_error(error: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trae::TraeGatewayConfig;
+
+    /// ★ 粘性表的接线往返：绑定后能查到、解绑后查不到、`None` 键**整段跳过**。
+    ///
+    /// 这一层是 `StickyTable` 的**薄封装**，但封装自己也会错 —— 最典型的是
+    /// 「`None` 键被当成空串键写进表里」，那会让所有没有会话 id 的客户端
+    /// **共用同一个绑定**（表现为「不同对话互相串号」），而且不报错。
+    ///
+    /// （构造 `TraeGatewayState` 无磁盘副作用：`RequestLog::new` 只读、Key store 只存路径。）
+    #[tokio::test]
+    async fn sticky_bind_unbind_round_trip_and_none_key_is_inert() {
+        let state = TraeGatewayState::new(TraeGatewayConfig::default());
+        let key = Some("trae_work|deepseek-v4-flash|conv-1");
+
+        assert_eq!(state.sticky_uid(key).await, None, "未绑定时应查不到");
+
+        state.bind_sticky(key, "uid-a").await;
+        assert_eq!(state.sticky_uid(key).await.as_deref(), Some("uid-a"));
+
+        state.unbind_sticky(key).await;
+        assert_eq!(state.sticky_uid(key).await, None, "解绑后必须查不到");
+
+        // `None` 键（客户端没给会话 id）⇒ 不绑、不查、不报错。
+        assert_eq!(state.sticky_uid(None).await, None);
+        state.bind_sticky(None, "uid-a").await;
+        assert_eq!(state.sticky_uid(None).await, None, "None 键不得产生任何绑定");
+    }
+
+    /// ★ 会话粘性键必须带**产品线**与**模型**。
+    ///
+    /// - 产品线：两条线的账号库分家，同名会话粘到一起会指向另一条线的账号；
+    /// - 模型：同一会话切模型时应允许落到各自最合适的账号，否则「模型级限流只封锁该模型」
+    ///   的优势会被粘性抵消。
+    #[test]
+    fn sticky_key_carries_variant_and_model() {
+        let body = json!({"metadata": {"conversation_id": "conv-1"}});
+        let work = sticky_key_of(&body, TraeVariant::TraeWork, "deepseek-v4-flash").unwrap();
+        assert!(work.contains("conv-1"), "键里要带会话 id：{work}");
+
+        assert_ne!(
+            work,
+            sticky_key_of(&body, TraeVariant::Trae, "deepseek-v4-flash").unwrap(),
+            "不同产品线不得共享绑定"
+        );
+        assert_ne!(
+            work,
+            sticky_key_of(&body, TraeVariant::TraeWork, "glm-5.3").unwrap(),
+            "不同模型不得共享绑定"
+        );
+        // 同一输入必须稳定（否则绑定永远命中不了）。
+        assert_eq!(
+            work,
+            sticky_key_of(&body, TraeVariant::TraeWork, "deepseek-v4-flash").unwrap()
+        );
+    }
+
+    /// ★ 客户端没给会话 id ⇒ 必须返回 `None`，调用方据此**整段跳过**粘性。
+    ///
+    /// **不得**退化成轮级键 —— 那会造出一个永不命中的绑定，
+    /// 让「粘性会话数」看起来非 0 却毫无作用。
+    #[test]
+    fn sticky_key_is_none_without_a_conversation_id() {
+        assert_eq!(sticky_key_of(&json!({}), TraeVariant::TraeWork, "m"), None);
+        assert_eq!(
+            sticky_key_of(
+                &json!({"metadata": {"conversation_id": "   "}}),
+                TraeVariant::TraeWork,
+                "m"
+            ),
+            None,
+            "空白串不算会话 id"
+        );
+        assert_eq!(
+            sticky_key_of(&json!({"metadata": {}}), TraeVariant::TraeWork, "m"),
+            None
+        );
+    }
+
+    /// ★ 偏好优先级：**显式指定压过粘性**。
+    ///
+    /// 粘性记录的是「上次成功的账号」，是一个陈旧观察；`preferred_uid` 是用户此刻的
+    /// 明确要求。若让粘性压过它，用户改完设置后会看到「下一轮仍走旧账号」—— 设置不生效。
+    #[test]
+    fn explicit_preference_wins_over_sticky() {
+        assert_eq!(resolve_preference("", Some("sticky")), Some("sticky"));
+        assert_eq!(resolve_preference("", None), None, "两个来源都空 ⇒ 走自动择优");
+        assert_eq!(
+            resolve_preference("explicit", Some("sticky")),
+            Some("explicit"),
+            "显式指定必须压过粘性"
+        );
+        assert_eq!(resolve_preference("explicit", None), Some("explicit"));
+    }
 
     #[test]
     fn trace_id_has_the_length_the_header_slices_require() {

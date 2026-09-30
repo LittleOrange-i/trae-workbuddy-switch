@@ -119,6 +119,30 @@ pub fn resolve_conversation_request_id(
     new_hex_id()
 }
 
+/// 从请求体读取**客户端会话 id**（`metadata.conversation_id` / `metadata.conversationId`）。
+///
+/// ## 为什么放在共用层
+///
+/// 这是 OpenAI 请求体上的一处**非标准扩展**，但与产品线无关 —— WorkBuddy 与 Trae
+/// 两条网关面对的客户端（Cursor / Cline / Continue / Cherry Studio…）写法完全一样。
+/// 会话粘性依赖它区分「同一会话的不同轮次」，两处若各读一份，迟早漂移成
+/// 「一条线认得 `conversationId`、另一条不认」，而症状只是**粘性静默失效**。
+///
+/// ★ 缺失时返回 `None`，调用方必须**整段跳过**粘性 —— 不要退化成轮级标识，
+/// 那会制造一个永不命中的键（详见 [`crate::sticky::sticky_key`] 的文档）。
+pub fn conversation_id_of(body: &Value) -> Option<String> {
+    body.get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| {
+            metadata
+                .get("conversation_id")
+                .or_else(|| metadata.get("conversationId"))
+        })
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 /// 一轮请求的会话上下文。轮内**所有**重试必须复用同一实例。
 #[derive(Debug, Clone)]
 pub struct ConversationContext {
@@ -216,6 +240,39 @@ pub fn device_headers(uid: &str) -> HashMap<String, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 会话 id 提取的**两种拼法**都必须认（客户端写法不一）；空串、非字符串、
+    /// 缺失都视为「无会话 id」。
+    ///
+    /// 这条用例从 `routes/relay.rs` 迁来 —— 提取函数现在归本模块，两套网关共用同一份，
+    /// 因此它的行为是**两条产品线共同**的契约。
+    #[test]
+    fn conversation_id_reads_both_spellings() {
+        assert_eq!(
+            conversation_id_of(&json!({"metadata": {"conversation_id": "a"}})),
+            Some("a".to_string())
+        );
+        assert_eq!(
+            conversation_id_of(&json!({"metadata": {"conversationId": "b"}})),
+            Some("b".to_string())
+        );
+        assert_eq!(
+            conversation_id_of(&json!({"metadata": {"conversation_id": ""}})),
+            None,
+            "空串视为无会话 id"
+        );
+        assert_eq!(conversation_id_of(&json!({})), None, "缺 metadata");
+        assert_eq!(
+            conversation_id_of(&json!({"metadata": {"conversation_id": 123}})),
+            None,
+            "非字符串视为无会话 id"
+        );
+        assert_eq!(
+            conversation_id_of(&json!({"conversation_id": "x"})),
+            None,
+            "只认 metadata 内的键，不认顶层同名字段"
+        );
+    }
 
     #[test]
     fn new_hex_id_is_32_hex_and_unique() {

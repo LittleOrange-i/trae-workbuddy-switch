@@ -44,6 +44,8 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 
 use buddy_switch_core::modules::config as core_config;
 use buddy_switch_core::modules::trae::variant::TraeVariant;
+
+use crate::sticky::StickyTable;
 use buddy_switch_core::modules::trae::{paths, TRAE_DEFAULT_API_PORT};
 
 use crate::logging::RequestLog;
@@ -133,6 +135,13 @@ pub struct TraeGatewayConfig {
     /// 否则会出现「明明有别的号可用却一直失败」这种不报错的偶发故障。
     #[serde(alias = "preferredUid")]
     pub preferred_uid: String,
+    /// 会话粘性绑定的存活时长（毫秒；`<= 0` 由 [`StickyTable`] 归一为 30 分钟）。
+    ///
+    /// 同一会话（请求体 `metadata.conversation_id`）在 TTL 内**优先复用上次成功的账号**，
+    /// 避免多账号池下「对话突然失忆」与跨账号的缓存前缀命中率归零。
+    /// 与 WorkBuddy 网关的 `sticky_ttl_ms` 同默认值。
+    #[serde(alias = "stickyTtlMs")]
+    pub sticky_ttl_ms: i64,
 }
 
 impl Default for TraeGatewayConfig {
@@ -148,6 +157,7 @@ impl Default for TraeGatewayConfig {
             default_model: TRAE_DEFAULT_MODEL.to_string(),
             max_rotate: DEFAULT_MAX_ROTATE,
             preferred_uid: String::new(),
+            sticky_ttl_ms: 30 * 60 * 1000,
         }
     }
 }
@@ -212,6 +222,14 @@ pub struct TraeGatewayState {
     /// - 避免「同一 uid 在两条线是两个不同账号」被错误合并
     ///   （`core::modules::trae::account` 的 `find_for` 注释）。
     pub pools: Arc<Mutex<HashMap<TraeVariant, TraePool>>>,
+    /// **会话粘性绑定表**：同一会话优先复用上次成功的账号。
+    ///
+    /// 与 WorkBuddy 网关共用 [`StickyTable`] 实现。Trae 侧此前没有这一层 ——
+    /// 多账号池下同一对话被换到另一个账号，在上游表现为**对话失忆**。
+    ///
+    /// 绑定**按产品线分家**：键里带 variant，两条产品线的同名会话不会互相污染
+    /// （它们的账号库本就分家，粘到一起会指向另一条线的账号）。
+    pub sticky: Arc<Mutex<StickyTable>>,
     /// 请求日志（与 WorkBuddy 网关同一个 [`RequestLog`]，只是换了落盘路径）。
     pub log: Arc<RequestLog>,
     /// 多 API Key 存储（哈希 + 前缀 + **归属产品线**；含旧 `settings.apiKey` 兼容读）。
@@ -250,6 +268,7 @@ impl TraeGatewayState {
         Self {
             config: Arc::new(RwLock::new(config.clone())),
             pools: Arc::new(Mutex::new(HashMap::new())),
+            sticky: Arc::new(Mutex::new(StickyTable::new(config.sticky_ttl_ms))),
             log,
             key_store: Arc::new(apikey::TraeApiKeyStore::new(
                 paths::api_gateway_keys_file(),
@@ -266,6 +285,37 @@ impl TraeGatewayState {
     /// 读取配置快照。
     pub async fn config_snapshot(&self) -> TraeGatewayConfig {
         self.config.read().await.clone()
+    }
+
+    /// 查询会话粘性绑定（已过期视为无绑定）。
+    ///
+    /// `key` 为 `None`（客户端未给会话 id）时返回 `None` —— 调用方据此**整段跳过**粘性。
+    pub async fn sticky_uid(&self, key: Option<&str>) -> Option<String> {
+        let key = key?;
+        self.sticky
+            .lock()
+            .await
+            .get(key, core_config::now_ms())
+            .map(str::to_string)
+    }
+
+    /// 绑定会话粘性（**只在上游成功之后**调用）。
+    ///
+    /// `key` 为 `None` 时什么都不做 —— 绝不退化成轮级键（那会造出一个永不命中的绑定，
+    /// 让「粘性会话数」看起来非 0 却毫无作用，见 [`crate::sticky::sticky_key`]）。
+    pub async fn bind_sticky(&self, key: Option<&str>, uid: &str) {
+        if let Some(key) = key {
+            self.sticky.lock().await.bind(key, uid, core_config::now_ms());
+        }
+    }
+
+    /// 解绑会话粘性（该账号失败之后调用）。
+    ///
+    /// 粘性是优化而非约束：账号一失败就必须解绑，否则下一轮会先撞同一个死号。
+    pub async fn unbind_sticky(&self, key: Option<&str>) {
+        if let Some(key) = key {
+            self.sticky.lock().await.unbind(key);
+        }
     }
 
     /// 记一次请求（计数 + 日志 + 最近错误）。
@@ -579,6 +629,7 @@ mod tests {
             "default_model",
             "max_rotate",
             "preferred_uid",
+            "sticky_ttl_ms",
         ]
         .into_iter()
         .collect();
@@ -595,6 +646,9 @@ mod tests {
         // 端口必须与 WorkBuddy 网关（57891）错开，否则同时启用会互相抢端口。
         assert_ne!(config.port, 57891);
         assert_eq!(config.base_url(), format!("http://127.0.0.1:{TRAE_DEFAULT_API_PORT}"));
+        // 会话粘性默认 30 分钟，与 WorkBuddy 网关保持一致（同一管理面不该有两种默认）。
+        assert_eq!(config.sticky_ttl_ms, 30 * 60 * 1000);
+        assert!(config.preferred_uid.is_empty(), "默认不指定账号");
     }
 
     #[test]

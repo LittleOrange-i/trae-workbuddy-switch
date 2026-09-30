@@ -26,6 +26,10 @@ use crate::error::GatewayError;
 use crate::outbound::{self, DegradeGate, OutboundMeta};
 use crate::pool::{classify_event, RealmTag, UpstreamEvent};
 use crate::session_headers::{self, ConversationContext};
+
+/// 会话 id 提取已提到共用层（[`crate::session_headers`]）—— Trae 网关复用同一份实现。
+/// 这里 `pub use` 让既有调用点（`chat.rs` / `messages.rs`）与测试的路径保持不变。
+pub use crate::session_headers::conversation_id_of;
 use crate::state::GatewayState;
 use crate::sticky;
 use crate::timeutil;
@@ -410,20 +414,6 @@ pub async fn prepare_body(
     (prepared, request_id)
 }
 
-/// 从请求体读取会话 id（`metadata.conversation_id` / `metadata.conversationId`）。
-pub fn conversation_id_of(body: &Value) -> Option<String> {
-    body.get("metadata")
-        .and_then(Value::as_object)
-        .and_then(|metadata| {
-            metadata
-                .get("conversation_id")
-                .or_else(|| metadata.get("conversationId"))
-        })
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 /// 触发降级期（内容拦截时调用）。
 pub async fn trip_degrade(state: &GatewayState) -> bool {
     state.trip_degrade(timeutil::now_ms()).await
@@ -506,23 +496,6 @@ mod tests {
         // 负数被钳制，避免污染账本
         let negative = json!({"prompt_tokens": -5, "completion_tokens": 2});
         assert_eq!(usage_of(Some(&negative)), (0.0, 2));
-    }
-
-    #[test]
-    fn conversation_id_reads_both_spellings() {
-        assert_eq!(
-            conversation_id_of(&json!({"metadata": {"conversation_id": "a"}})),
-            Some("a".to_string())
-        );
-        assert_eq!(
-            conversation_id_of(&json!({"metadata": {"conversationId": "b"}})),
-            Some("b".to_string())
-        );
-        assert_eq!(
-            conversation_id_of(&json!({"metadata": {"conversation_id": ""}})),
-            None
-        );
-        assert_eq!(conversation_id_of(&json!({})), None);
     }
 
     #[test]

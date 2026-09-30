@@ -579,6 +579,8 @@ export interface TraeGatewayConfigRaw {
   max_rotate: number;
   /** 「指定账号」：优先消耗该 uid 的积分；空串 = 不指定（自动择优）。 */
   preferred_uid: string;
+  /** 会话粘性绑定存活时长（毫秒；`<= 0` 由后端归一为 30 分钟）。 */
+  sticky_ttl_ms: number;
 }
 
 /** 归一化后的网关配置（前端统一用 camelCase）。 */
@@ -594,6 +596,8 @@ export interface TraeGatewayConfig {
   maxRotate: number;
   /** 「指定账号」：优先消耗该 uid 的积分；空串 = 不指定（自动择优）。 */
   preferredUid: string;
+  /** 会话粘性绑定存活时长（毫秒）。 */
+  stickyTtlMs: number;
 }
 
 /** 账号池摘要（`pool` 字段）。 */

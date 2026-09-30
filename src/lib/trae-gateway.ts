@@ -33,6 +33,8 @@ export const DEFAULT_TRAE_GATEWAY_CONFIG: TraeGatewayConfig = {
   maxRotate: 3,
   // 空串 = 不指定账号（自动择优）。
   preferredUid: "",
+  // 会话粘性：与 WorkBuddy 网关同默认值（30 分钟）。
+  stickyTtlMs: 30 * 60 * 1000,
 };
 
 function asString(value: unknown): string | undefined {
@@ -80,6 +82,9 @@ export function normalizeTraeGatewayConfig(raw: unknown): TraeGatewayConfig {
     preferredUid:
       asString(read("preferredUid", "preferred_uid")) ??
       DEFAULT_TRAE_GATEWAY_CONFIG.preferredUid,
+    stickyTtlMs:
+      asNumber(read("stickyTtlMs", "sticky_ttl_ms")) ??
+      DEFAULT_TRAE_GATEWAY_CONFIG.stickyTtlMs,
   };
 }
 
@@ -101,6 +106,7 @@ export function toTraeGatewayConfigRaw(config: TraeGatewayConfig): TraeGatewayCo
     default_model: config.defaultModel,
     max_rotate: config.maxRotate,
     preferred_uid: config.preferredUid,
+    sticky_ttl_ms: config.stickyTtlMs,
   };
 }
 

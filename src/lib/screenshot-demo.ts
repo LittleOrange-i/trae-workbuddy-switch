@@ -1004,6 +1004,7 @@ function demoTraeGatewayConfig(): TraeGatewayConfigRaw {
     // （`demoTraeGatewayStatus` 的 uid 必须与这里对得上，否则选择器会显示
     // 「已指定的账号（当前不在池中）」，看起来像 bug）。
     preferred_uid: "7481920",
+    sticky_ttl_ms: 30 * 60 * 1000,
   };
 }
 
