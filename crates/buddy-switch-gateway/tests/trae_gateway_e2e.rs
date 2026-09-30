@@ -816,10 +816,17 @@ async fn anthropic_non_streaming_returns_a_message_object() {
 
     assert_eq!(value["type"], "message", "Anthropic 响应体：{text}");
     assert_eq!(value["role"], "assistant");
+    // ★ `msg_` 前缀只应出现**一次**。
+    //
+    // `message_from_accumulator` 会在上游 id 上**再包一层** `msg_`；若上游 id 自身
+    // 也带 `msg_`，就会得到 `msg_msg_xxx` —— 真实请求实测到过这个形态，
+    // 而只断言 `starts_with("msg_")` 是抓不住的（双重前缀同样满足）。
+    let id = value["id"].as_str().unwrap_or_default();
+    assert!(id.starts_with("msg_"), "id 应是 msg_ 前缀：{text}");
     assert_eq!(
-        value["id"].as_str().map(|id| id.starts_with("msg_")),
-        Some(true),
-        "id 应是 msg_ 前缀：{text}"
+        id.matches("msg_").count(),
+        1,
+        "msg_ 前缀不得重复（上游 chat id 不应自带 msg_）：{id}"
     );
     let content = value["content"].as_array().expect("content 应是数组");
     assert!(!content.is_empty(), "正文不能为空：{text}");
