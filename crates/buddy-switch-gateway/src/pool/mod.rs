@@ -596,7 +596,11 @@ impl Pool {
         true
     }
 
-    /// 选号（见 [`pick::pick`]）。
+    /// 选号；`preferred` 为**偏好 uid**（可用则优先，不可用则回落，绝不拒绝服务）。
+    ///
+    /// 偏好有两个来源，优先级见 `relay::select_account`：显式固定
+    /// （[`crate::AccountStrategy::Pinned`]）**高于**会话粘性。
+    /// 算法见 [`pick::pick_with_preference`]。
     pub fn pick_account(
         &mut self,
         now_ms: i64,
@@ -604,9 +608,10 @@ impl Pool {
         model: &str,
         tried: &HashSet<String>,
         seed: u64,
+        preferred: Option<&str>,
     ) -> Option<String> {
         let policy = self.policy();
-        pick(
+        pick_with_preference(
             &mut self.entries,
             &mut self.pick_seq,
             &policy,
@@ -615,6 +620,7 @@ impl Pool {
             model,
             tried,
             seed,
+            preferred,
         )
     }
 
@@ -1676,16 +1682,61 @@ mod tests {
 
         let mut tried = HashSet::new();
         let first = pool
-            .pick_account(NOW, Some(RealmTag::Cn), "", &tried, 1)
+            .pick_account(NOW, Some(RealmTag::Cn), "", &tried, 1, None)
             .expect("有候选");
         tried.insert(first.clone());
 
         // 失败的号进入冷却后，换号重试应拿到另一个
         pool.apply_upstream_error(&first, "", &UpstreamEvent::NotFound, NOW);
         let second = pool
-            .pick_account(NOW, Some(RealmTag::Cn), "", &tried, 2)
+            .pick_account(NOW, Some(RealmTag::Cn), "", &tried, 2, None)
             .expect("仍有候选");
         assert_ne!(first, second);
+    }
+
+    /// ★★ 护栏：`pick_account` 的**偏好**必须生效，且不可用时**回落**。
+    ///
+    /// 守的是「界面上写着『固定账号』、实际请求却走池选号」那类缺陷 ——
+    /// 偏好若没接进池选号，界面与行为不符且**不报错**。
+    ///
+    /// 三种不可用形态都要覆盖（已试过 / 不在池里 / 无偏好），且**任何一条都不得
+    /// 返回 `None`**：偏好是优化而非约束，绝不因为偏好不可用就拒绝服务。
+    #[test]
+    fn pick_account_honours_preferred_uid_and_falls_back() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("rich", Some(RealmTag::Cn), "");
+        pool.upsert("poor", Some(RealmTag::Cn), "");
+        pool.set_credits("rich", 1000, 0);
+        pool.set_credits("poor", 10, 0);
+
+        // ① 偏好可用 ⇒ 必须选它，即使积分远少于别人（这是「指定账号」的全部意义）。
+        let picked = pool
+            .pick_account(NOW, Some(RealmTag::Cn), "", &HashSet::new(), 1, Some("poor"))
+            .expect("有候选");
+        assert_eq!(picked, "poor", "偏好账号可用时必须优先选中");
+
+        // ② 偏好已被本请求试过 ⇒ 跳过它、回落自动择优（否则会在同一请求里重复撞）。
+        let tried: HashSet<String> = ["poor".to_string()].into_iter().collect();
+        let picked = pool
+            .pick_account(NOW, Some(RealmTag::Cn), "", &tried, 2, Some("poor"))
+            .expect("仍有候选");
+        assert_ne!(picked, "poor", "已试过的偏好必须被跳过");
+
+        // ③ 偏好不在池里 ⇒ 回落自动择优（绝不返回 None）。
+        let picked = pool
+            .pick_account(NOW, Some(RealmTag::Cn), "", &HashSet::new(), 3, Some("no-such"))
+            .expect("偏好不存在也必须回落到自动择优");
+        assert!(
+            ["rich", "poor"].contains(&picked.as_str()),
+            "回落结果必须来自池内：{picked}"
+        );
+
+        // ④ 无偏好 ⇒ 不引入任何行为变化（仍能选出账号）。
+        assert!(
+            pool.pick_account(NOW, Some(RealmTag::Cn), "", &HashSet::new(), 4, None)
+                .is_some(),
+            "无偏好时行为不变"
+        );
     }
 
     #[test]

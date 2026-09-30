@@ -21,7 +21,7 @@ use buddy_switch_core::modules::account;
 use buddy_switch_core::modules::region::Region;
 use buddy_switch_core::modules::upstream::UpstreamChatResult;
 
-use crate::account_strategy::AccountSelector;
+use crate::account_strategy::{AccountSelector, AccountStrategy};
 use crate::error::GatewayError;
 use crate::outbound::{self, DegradeGate, OutboundMeta};
 use crate::pool::{classify_event, RealmTag, UpstreamEvent};
@@ -259,25 +259,6 @@ fn sticky_key_of(request: &RelayRequest) -> Option<String> {
         .map(|value| sticky::sticky_key(request.region.as_str(), &request.model, value))
 }
 
-/// 是否采用粘性偏好账号：`Some(uid)` = 就用它，`None` = 放弃粘性、按原逻辑选号。
-///
-/// ★★ **本函数无法表达「失败」** —— 粘性是优化而非约束。只要有一条不满足
-/// （uid 为空 / 本请求已试过 / 此刻不可用），就必须放弃并落回正常选号。
-///
-/// 抽成纯函数就是为了让这条性质能被**直接**测到：漏判任何一条，粘性都会退化成
-/// 「把请求钉死在不可用账号上」—— 而那种缺陷**不报错**，只表现为偶发失败。
-///
-/// `usable` 由调用方传入 `Pool::is_usable_for`（与 `pick_account` **同源**的判据），
-/// 这样「粘性认为可用」与「选号认为可用」不会分家。
-fn sticky_choice(
-    preferred_uid: Option<&str>,
-    tried: &HashSet<String>,
-    usable: impl FnOnce(&str) -> bool,
-) -> Option<String> {
-    let uid = preferred_uid.filter(|uid| !uid.is_empty() && !tried.contains(*uid))?;
-    usable(uid).then(|| uid.to_string())
-}
-
 async fn select_account(
     state: &GatewayState,
     region: Region,
@@ -286,24 +267,23 @@ async fn select_account(
     tried: &HashSet<String>,
     now_ms: i64,
     attempt: usize,
-    preferred_uid: Option<&str>,
+    sticky_uid: Option<&str>,
 ) -> Option<Value> {
-    // ★ 会话粘性：优先复用上次成功的账号，**但只在它此刻确实可用时**（见 [`sticky_choice`]）。
-    let sticky_uid = match preferred_uid {
-        Some(_) => {
-            let pool = state.pool.read().await;
-            sticky_choice(preferred_uid, tried, |uid| {
-                pool.is_usable_for(uid, now_ms, model)
-            })
+    // 偏好优先级：**显式固定（Pinned）> 会话粘性**。
+    //
+    // ★ `Pinned` 必须在这里参与池选号，而不是只作「池给不出时的回落」：池只要有候选
+    // 就会出结果，若把 `Pinned` 放在池之后，它在**池非空时永远不会被用到** ——
+    // 界面明明写着「固定账号」，实际请求却走池选号，UI 与行为不符且**不报错**。
+    //
+    // 粘性同理：它此前靠 `sticky_choice` 单独判一次可用性再直接返回，现在统一交给
+    // `pick_with_preference`（判据与自动选号同源），两条偏好实现因此收敛成一条。
+    let strategy = state.strategy_for(region).await;
+    let preferred = match &strategy {
+        AccountStrategy::Pinned { account_id } if !account_id.is_empty() => {
+            Some(account_id.as_str())
         }
-        None => None,
+        _ => sticky_uid,
     };
-    if let Some(uid) = sticky_uid.as_deref() {
-        // 池里有但账号库已删除 ⇒ 该 uid 无凭据可用，落回策略选择。
-        if let Some(account_value) = account::find_account_for(region, uid) {
-            return Some(account_value);
-        }
-    }
 
     let picked_uid = {
         let mut pool = state.pool.write().await;
@@ -314,7 +294,8 @@ async fn select_account(
                 .wrapping_mul(31)
                 .wrapping_add(attempt as u64)
                 .wrapping_add(0x9E37_79B9_7F4A_7C15);
-            pool.pick_account(now_ms, Some(realm), model, tried, seed)
+            // 偏好不可用时由 `pick_with_preference` 自行回落到自动择优。
+            pool.pick_account(now_ms, Some(realm), model, tried, seed, preferred)
         }
     };
 
@@ -326,7 +307,9 @@ async fn select_account(
     }
 
     // 回落：策略模块（current / pinned / max_credits）。
-    let strategy = state.strategy_for(region).await;
+    //
+    // `strategy` 已在函数开头读过（`Pinned` 也已在池选号里作为偏好生效）。这里保留
+    // 完整回落，是为了覆盖「**池为空**」这条路径 —— 那时 `Pinned` 仍需生效。
     let selector = AccountSelector;
     match selector.select(region, &strategy).await {
         Ok(account_value) => {
@@ -575,44 +558,9 @@ mod tests {
         );
     }
 
-    /// ★★ **粘性绝不导致失败**：任何一条不满足都返回 `None`（= 落回正常选号）。
-    ///
-    /// 这是本次接线最需要守的性质。漏判任一条，粘性就会退化成
-    /// 「把请求钉死在不可用账号上」，而且**不报错**、只表现为偶发失败。
-    #[test]
-    fn sticky_choice_falls_back_instead_of_pinning_an_unusable_account() {
-        let empty: HashSet<String> = HashSet::new();
-
-        // 没有偏好 ⇒ 放弃（不引入任何行为变化）
-        assert_eq!(sticky_choice(None, &empty, |_| true), None);
-        // uid 为空 ⇒ 放弃
-        assert_eq!(sticky_choice(Some(""), &empty, |_| true), None);
-        // 本请求已试过 ⇒ 放弃（否则会在同一个请求里重复撞同一个账号）
-        let tried: HashSet<String> = ["u1".to_string()].into_iter().collect();
-        assert_eq!(sticky_choice(Some("u1"), &tried, |_| true), None);
-        // ★ 此刻不可用（冷却 / 在途占满 / 熔断）⇒ 放弃
-        assert_eq!(
-            sticky_choice(Some("u1"), &empty, |_| false),
-            None,
-            "账号不可用时必须放弃粘性，绝不能钉死"
-        );
-        // 唯一采用的情形：有偏好 + 未试过 + 可用
-        assert_eq!(
-            sticky_choice(Some("u1"), &empty, |_| true),
-            Some("u1".to_string())
-        );
-    }
-
-    /// 可用性判据只被问一次，且只问被选中的那个 uid（防止误传别人）。
-    #[test]
-    fn sticky_choice_probes_exactly_the_preferred_uid() {
-        let empty: HashSet<String> = HashSet::new();
-        let mut probed: Vec<String> = Vec::new();
-        let chosen = sticky_choice(Some("u7"), &empty, |uid| {
-            probed.push(uid.to_string());
-            true
-        });
-        assert_eq!(chosen, Some("u7".to_string()));
-        assert_eq!(probed, vec!["u7".to_string()]);
-    }
+    // ⚠️ 这里原本有两个用例守 `sticky_choice`（「粘性绝不导致失败」与「只探询被选中的
+    // uid」）。该函数已**删除** —— 偏好判定统一交给 `pool::pick_with_preference`
+    // （判据与自动选号同源，不再有第二套）。对应性质现在由 `pool/pick.rs` 的
+    // `pick_with_preference` 系列用例与 `pool::tests::pick_account_honours_preferred_uid_and_falls_back`
+    // 守住；Trae 侧另有 `trae::pool::preferred_uid_falls_back_when_unusable` 做行为级印证。
 }
