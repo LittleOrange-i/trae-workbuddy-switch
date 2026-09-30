@@ -213,7 +213,21 @@ pub fn map_stop_reason(finish_reason: Option<&str>) -> &'static str {
 
 /// 聚合上游 SSE 为 Anthropic `message` 对象（非流式请求）。
 pub fn aggregate_message(sse_text: &str, fallback_model: &str) -> Value {
-    let accumulator = CompletionAccumulator::from_sse(sse_text);
+    message_from_accumulator(&CompletionAccumulator::from_sse(sse_text), fallback_model)
+}
+
+/// 由**上游完整响应体**（OpenAI JSON）构造 Anthropic `message` 对象。
+///
+/// 与 [`aggregate_message`] 的差别只在输入形态：那个吃 SSE 文本，这个吃一次性 JSON
+/// （Trae 网关的上游聚合结果就是后者）。两条路径共用 [`message_from_accumulator`]，
+/// 因此 Anthropic 的字段映射（`stop_reason` 归一、`usage` 改名、tool_use 拆分）
+/// **只有一处实现** —— 否则两条路径迟早会在这类细节上分家。
+pub fn message_from_response(response: &Value, fallback_model: &str) -> Value {
+    message_from_accumulator(&CompletionAccumulator::from_response(response), fallback_model)
+}
+
+/// Anthropic `message` 对象的**唯一构造点**（见上面两个入口）。
+fn message_from_accumulator(accumulator: &CompletionAccumulator, fallback_model: &str) -> Value {
     let id = accumulator
         .id
         .clone()
@@ -563,6 +577,75 @@ mod tests {
             .iter()
             .map(|chunk| String::from_utf8_lossy(chunk).to_string())
             .collect()
+    }
+
+    /// ★★ 两条入口（流式聚合 / 一次性响应）必须产出**同一形状**的 `message`。
+    ///
+    /// 它们共用 [`message_from_accumulator`]，本用例是「共用」这个事实的护栏：
+    /// 若有人日后给其中一条单独加分支，两条路径的 Anthropic 字段映射就会分家，
+    /// 而症状只是「流式对了、非流式少了个字段」这种不报错的偏差。
+    #[test]
+    fn message_from_response_matches_aggregate_message() {
+        // 同一份内容：一份走 SSE（chunk + delta），一份走一次性响应（message）。
+        let sse = concat!(
+            "data: {\"id\":\"c1\",\"model\":\"m1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"},\"index\":0}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"世界\"},\"index\":0}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = json!({
+            "id": "c1",
+            "model": "m1",
+            "choices": [{
+                "message": {"role": "assistant", "content": "你好世界"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+        });
+
+        let from_sse = aggregate_message(sse, "fallback");
+        let from_json = message_from_response(&response, "fallback");
+
+        assert_eq!(from_sse["content"], from_json["content"], "正文必须一致");
+        assert_eq!(from_sse["stop_reason"], from_json["stop_reason"]);
+        assert_eq!(from_sse["usage"], from_json["usage"]);
+        assert_eq!(from_json["type"], "message");
+        assert_eq!(from_json["role"], "assistant");
+        assert_eq!(from_json["model"], "m1");
+    }
+
+    /// 一次性响应里的 `tool_calls`（**没有** `index`，不是增量分片）必须按数组顺序
+    /// 落位成 `tool_use`，且 `finish_reason=tool_calls` 映射成 `stop_reason=tool_use`。
+    #[test]
+    fn message_from_response_maps_tool_calls_in_order() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}},
+                        {"id": "call_2", "type": "function", "function": {"name": "write", "arguments": "{\"path\":\"b\"}"}},
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }],
+        });
+
+        let message = message_from_response(&response, "m");
+        let content = message["content"].as_array().expect("content 应是数组");
+        assert_eq!(content.len(), 2, "两个工具调用都要落位：{content:?}");
+        assert_eq!(content[0]["type"], "tool_use");
+        assert_eq!(content[0]["id"], "call_1");
+        assert_eq!(content[0]["name"], "read");
+        assert_eq!(content[0]["input"]["path"], "a");
+        assert_eq!(content[1]["id"], "call_2");
+        assert_eq!(content[1]["name"], "write");
+        assert_eq!(
+            message["stop_reason"], "tool_use",
+            "tool_calls 必须映射成 tool_use"
+        );
     }
 
     #[test]

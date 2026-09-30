@@ -232,6 +232,61 @@ impl CompletionAccumulator {
         accumulator
     }
 
+    /// 由**完整响应体**构造聚合器（非流式上游：`choices[0].message`）。
+    ///
+    /// 与 [`Self::from_sse`] 的分工：`from_sse` 吃**流式 chunk 序列**（`delta`，
+    /// 需按 `index` 归并分片），本函数吃**一次性响应**（`message`，各字段已是完整值）。
+    /// 两者产出**同一结构**，因此下游（Anthropic 转换、用量统计）只认聚合器，
+    /// 不关心上游是流式还是非流式 —— 这正是 `/v1/messages` 能复用同一套转换的前提。
+    pub fn from_response(response: &Value) -> Self {
+        let mut accumulator = Self::default();
+        // 顶层 `id` / `model` / `usage` 与 chunk 同形，直接复用现有解析。
+        accumulator.ingest_chunk(response);
+
+        let Some(choice) = response
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+        else {
+            return accumulator;
+        };
+        let Some(message) = choice.get("message") else {
+            return accumulator;
+        };
+
+        if accumulator.role.is_none() {
+            if let Some(role) = message.get("role").and_then(Value::as_str) {
+                accumulator.role = Some(role.to_string());
+            }
+        }
+        if let Some(content) = message.get("content").and_then(Value::as_str) {
+            accumulator.content.push_str(content);
+        }
+        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for tool_call in tool_calls {
+                let function = tool_call.get("function");
+                let text_of = |key: &str| {
+                    function
+                        .and_then(|f| f.get(key))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                // 完整响应没有 `index`（不是增量分片），按数组顺序落位。
+                accumulator.tool_calls.push(ToolCallAccum {
+                    id: tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: text_of("name"),
+                    arguments: text_of("arguments"),
+                });
+            }
+        }
+        accumulator
+    }
+
     /// 聚合为 OpenAI `chat.completion` 对象。
     pub fn to_openai_completion(&self, fallback_model: &str) -> Value {
         let id = self

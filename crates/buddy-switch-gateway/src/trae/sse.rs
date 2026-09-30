@@ -526,12 +526,22 @@ pub async fn aggregate(
     (Some(Value::Object(response)), None, usage)
 }
 
+/// 把接收端包装成**字节流**。
+///
+/// 与 [`body_from_receiver`] 是同一种构造 —— 抽出来是为了让 `/v1/messages` 的
+/// Anthropic 转换流能包同一份东西（`AnthropicSseStream` 要的是 `Stream`，
+/// 不是 axum 的 `Body`）。两处若各写一份 `unfold`，行为会随重构漂移。
+pub fn stream_from_receiver(
+    rx: mpsc::Receiver<Result<Bytes, io::Error>>,
+) -> impl futures_util::Stream<Item = Result<Bytes, io::Error>> {
+    futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+}
+
 /// 把接收端包装成 axum 响应体。
 pub fn body_from_receiver(rx: mpsc::Receiver<Result<Bytes, io::Error>>) -> Body {
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    });
-    Body::from_stream(stream)
+    Body::from_stream(stream_from_receiver(rx))
 }
 
 /// OpenAI 形态的错误响应体。

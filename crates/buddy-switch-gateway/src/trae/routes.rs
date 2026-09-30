@@ -23,7 +23,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{Extension, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
@@ -36,6 +36,7 @@ use buddy_switch_core::modules::trae::account;
 use buddy_switch_core::modules::trae::region::TraeRegion;
 use buddy_switch_core::modules::trae::variant::TraeVariant;
 
+use crate::protocol::anthropic;
 use crate::session_headers;
 use crate::sticky;
 
@@ -55,7 +56,18 @@ use super::{
 pub struct TraeKeyVariant(pub TraeVariant);
 
 /// 日志里的端点名（与 WorkBuddy 网关同名字符串，便于统一聚合）。
-const ENDPOINT: &str = "/v1/chat/completions";
+///
+/// ★ 两条入口各有一个常量，并且**同时**决定出站协议：`/v1/messages` 要额外做一次
+/// Anthropic 转换。把「协议」与「日志端点」合成同一个参数，是为了让它们**不可能**
+/// 对不上 —— 否则某天会出现「按 Anthropic 转换了、日志却记成 chat completions」
+/// 这种统计静默错位。
+const ENDPOINT_CHAT: &str = "/v1/chat/completions";
+const ENDPOINT_MESSAGES: &str = "/v1/messages";
+
+/// 该端点是否要 Anthropic 出站转换。
+fn is_anthropic_endpoint(endpoint: &str) -> bool {
+    endpoint == ENDPOINT_MESSAGES
+}
 
 /// 上游 UA。参考实现固定为 `TraeClient/TTNet`，改它没有好处。
 const TRAE_USER_AGENT: &str = "TraeClient/TTNet";
@@ -106,6 +118,22 @@ pub async fn bearer_auth(
         return next.run(request).await;
     }
 
+    // ★ 错误体形状按**端点**分派：Anthropic 客户端只认 `{"type":"error",...}`，
+    // 给它 OpenAI 形状的话，它报的是「响应格式错误」而不是「凭据无效」——
+    // 排查方向会被带偏。401 对应 Anthropic 的 `authentication_error`。
+    let anthropic = request.uri().path() == "/v1/messages";
+    let deny = move |message: &str| {
+        if anthropic {
+            anthropic_error(StatusCode::UNAUTHORIZED, "authentication_error", message)
+        } else {
+            openai_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_request_error",
+                message,
+            )
+        }
+    };
+
     let presented = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -120,11 +148,7 @@ pub async fn bearer_auth(
         .filter(|value| !value.is_empty());
 
     match presented {
-        None => openai_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_request_error",
-            "缺少凭据：请在 Authorization 头携带 `Bearer <API Key>`",
-        ),
+        None => deny("缺少凭据：请在 Authorization 头携带 `Bearer <API Key>`"),
         Some(key) => match state.key_store.verify(key) {
             Some(record) => {
                 // 归属产品线透传给 handler（决定用哪个账号池）。
@@ -134,11 +158,7 @@ pub async fn bearer_auth(
                 state.key_store.touch(&record.id);
                 next.run(request).await
             }
-            None => openai_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_request_error",
-                "API Key 无效：请到「API 服务」页创建或复制一把可用的 Key",
-            ),
+            None => deny("API Key 无效：请到「API 服务」页创建或复制一把可用的 Key"),
         },
     }
 }
@@ -237,6 +257,7 @@ pub async fn chat_completions(
             max_rotate,
             &config.preferred_uid,
             sticky_key.as_deref(),
+            ENDPOINT_CHAT,
             started,
             variant,
         )
@@ -258,6 +279,105 @@ pub async fn chat_completions(
     }
 }
 
+/// `POST /v1/messages`：Anthropic 协议入口。
+///
+/// ## 为什么能与 `/v1/chat/completions` 共用整条链路
+///
+/// 上游只认一种东西（Trae 私有的 `llm_utils_chat`），所以两条入口的差别**只在协议层**：
+/// 入站 Anthropic → OpenAI 形态（[`anthropic::to_upstream_request`]），
+/// 出站 OpenAI → Anthropic（[`anthropic::AnthropicSseStream`] /
+/// [`anthropic::message_from_response`]）。中间的中继（选号 / 换号 / 冷却 / 粘性 /
+/// 日志）**一行都不用改** —— 这正是把这两个转换放进共用 `protocol` 层
+/// （而不是 Trae 模块内）的价值。
+///
+/// ## 上游请求体是**重新序列化**的
+///
+/// `to_upstream_request` 产出 `Value`，要再序列化成 `Bytes` 才能喂给中继 ——
+/// 不能透传原始 `Bytes`：Anthropic 的 `system` / `max_tokens` 与 OpenAI 的
+/// `messages` / `max_completion_tokens` 不同形。
+pub async fn messages(
+    State(state): State<TraeGatewayState>,
+    Extension(key_variant): Extension<TraeKeyVariant>,
+    body: Bytes,
+) -> Response {
+    let started = Instant::now();
+    let variant = key_variant.0;
+
+    let config = state.config_snapshot().await;
+    let Ok(parsed) = serde_json::from_slice::<Value>(&body) else {
+        return anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "请求体不是合法 JSON",
+        );
+    };
+
+    let upstream = anthropic::to_upstream_request(&parsed);
+    let Ok(encoded) = serde_json::to_vec(&upstream) else {
+        return anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "请求体无法序列化",
+        );
+    };
+    let upstream_body = Bytes::from(encoded);
+
+    // 模型取**转换后**的请求体（那是真正发给上游的东西）；
+    // 流式开关见 [`anthropic_wants_stream`]（**必须**读原始请求体）。
+    let model = payload::model_of(&upstream, &config.default_model);
+    let stream = anthropic_wants_stream(&parsed);
+    let max_rotate = config.max_rotate.max(1);
+    let message_id = format!("msg_{}", uuid_like());
+
+    // 会话 id 取**原始** Anthropic 请求体：`to_upstream_request` 不保证把
+    // `metadata` 原样带过去，而客户端塞会话 id 的习惯位置就是那里
+    // （与 WorkBuddy 侧 `messages.rs` 同源）。拿不到 ⇒ 返回 `None` ⇒ 整段跳过粘性。
+    let sticky_key = sticky_key_of(&parsed, variant, &model);
+
+    if stream {
+        stream_chat(
+            &state,
+            &upstream_body,
+            &config.default_model,
+            &model,
+            &message_id,
+            max_rotate,
+            &config.preferred_uid,
+            sticky_key.as_deref(),
+            ENDPOINT_MESSAGES,
+            started,
+            variant,
+        )
+        .await
+    } else {
+        match aggregate_payload(
+            &state,
+            &upstream_body,
+            &config.default_model,
+            &model,
+            &message_id,
+            max_rotate,
+            &config.preferred_uid,
+            sticky_key.as_deref(),
+            ENDPOINT_MESSAGES,
+            started,
+            variant,
+        )
+        .await
+        {
+            Ok(payload) => json_response(
+                StatusCode::OK,
+                anthropic::message_from_response(&payload, &model),
+            ),
+            Err(failure) => anthropic_error(
+                StatusCode::from_u16(failure.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                &failure.code,
+                &failure.message,
+            ),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 流式
 // ---------------------------------------------------------------------------
@@ -273,6 +393,13 @@ async fn stream_chat(
     max_rotate: usize,
     preferred_uid: &str,
     sticky_key: Option<&str>,
+    // 入口端点：同时决定**出站协议**（`/v1/messages` 要额外做 Anthropic 转换）
+    // 与**日志端点名** —— 合成一个参数，两者就不可能对不上。
+    //
+    // 上游链路完全相同（SOLO SSE → OpenAI SSE），差别只在最后一层封装 ——
+    // 所以用参数而不是另写一个函数：另写一份会让换号 / 冷却 / 粘性 / 日志
+    // 全部再实现一遍，两处迟早分家。
+    endpoint: &'static str,
     started: Instant,
     variant: TraeVariant,
 ) -> Response {
@@ -308,18 +435,23 @@ async fn stream_chat(
                         started,
                         outcome.error,
                         outcome.usage,
+                        endpoint,
                         variant,
                     )
                     .await;
                 });
-                return sse_response(rx);
+                return if is_anthropic_endpoint(endpoint) {
+                    anthropic_sse_response(rx, model)
+                } else {
+                    sse_response(rx)
+                };
             }
         }
     }
 
     // 没拿到任何可用上游：这里**还没发过响应头**，可以正常返回 JSON 错误。
     let failure = last.unwrap_or_else(|| no_account_failure_sync(state, variant));
-    settle_failure(state, model, true, started, &failure, variant).await;
+    settle_failure(state, model, true, started, &failure, endpoint, variant).await;
     openai_error(
         StatusCode::from_u16(failure.status).unwrap_or(StatusCode::BAD_GATEWAY),
         &failure.code,
@@ -333,7 +465,8 @@ async fn stream_chat(
 
 /// 非流式路径：本地聚合。**流内错误也换号**——聚合完成前客户端一个字节都没收到。
 #[allow(clippy::too_many_arguments)]
-async fn aggregate_chat(
+#[allow(clippy::too_many_arguments)]
+async fn aggregate_payload(
     state: &TraeGatewayState,
     body: &Bytes,
     default_model: &str,
@@ -342,9 +475,10 @@ async fn aggregate_chat(
     max_rotate: usize,
     preferred_uid: &str,
     sticky_key: Option<&str>,
+    endpoint: &'static str,
     started: Instant,
     variant: TraeVariant,
-) -> Response {
+) -> Result<Value, UpstreamFailure> {
     let mut tried: HashSet<String> = HashSet::new();
     let mut last: Option<UpstreamFailure> = None;
 
@@ -372,8 +506,8 @@ async fn aggregate_chat(
 
         match (payload, error) {
             (Some(payload), None) => {
-                settle(state, &account, model, false, started, None, usage, variant).await;
-                return json_response(StatusCode::OK, payload);
+                settle(state, &account, model, false, started, None, usage, endpoint, variant).await;
+                return Ok(payload);
             }
             (_, Some((code, message))) => {
                 // 流内错误：冷却该账号 → 换下一个账号整轮重来（响应头还没发）。
@@ -391,17 +525,63 @@ async fn aggregate_chat(
     }
 
     let failure = last.unwrap_or_else(|| no_account_failure_sync(state, variant));
-    settle_failure(state, model, false, started, &failure, variant).await;
-    openai_error(
-        StatusCode::from_u16(failure.status).unwrap_or(StatusCode::BAD_GATEWAY),
-        &failure.code,
-        &failure.message,
+    settle_failure(state, model, false, started, &failure, endpoint, variant).await;
+    Err(failure)
+}
+
+/// 非流式 OpenAI 端点：把 [`aggregate_payload`] 的结果包成 OpenAI 形状。
+#[allow(clippy::too_many_arguments)]
+async fn aggregate_chat(
+    state: &TraeGatewayState,
+    body: &Bytes,
+    default_model: &str,
+    model: &str,
+    chat_id: &str,
+    max_rotate: usize,
+    preferred_uid: &str,
+    sticky_key: Option<&str>,
+    started: Instant,
+    variant: TraeVariant,
+) -> Response {
+    match aggregate_payload(
+        state,
+        body,
+        default_model,
+        model,
+        chat_id,
+        max_rotate,
+        preferred_uid,
+        sticky_key,
+        ENDPOINT_CHAT,
+        started,
+        variant,
     )
+    .await
+    {
+        Ok(payload) => json_response(StatusCode::OK, payload),
+        Err(failure) => openai_error(
+            StatusCode::from_u16(failure.status).unwrap_or(StatusCode::BAD_GATEWAY),
+            &failure.code,
+            &failure.message,
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // 选号与出站
 // ---------------------------------------------------------------------------
+
+/// Anthropic 请求是否要流式响应。
+///
+/// ★ 必须读**原始** Anthropic 请求体，不能读 [`anthropic::to_upstream_request`] 的产物：
+/// 后者会把 `stream` **强制为 `true`**（上游只接受流式）⇒ 拿它判断的话，
+/// 非流式客户端会被当成流式，收到一条事件流而不是 JSON。
+fn anthropic_wants_stream(parsed: &Value) -> bool {
+    parsed
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
 
 /// 由请求体、产品线与模型派生**会话粘性键**；客户端未给会话 id 时返回 `None`。
 ///
@@ -604,6 +784,7 @@ async fn send_llm_chat(
 
 /// 一次请求的收尾（流式与非流式共用）。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn settle(
     state: &TraeGatewayState,
     account: &PickedTraeAccount,
@@ -612,6 +793,7 @@ async fn settle(
     started: Instant,
     error: Option<(i64, String)>,
     usage: TokenUsage,
+    endpoint: &'static str,
     variant: TraeVariant,
 ) {
     let latency_ms = started.elapsed().as_millis() as i64;
@@ -650,7 +832,7 @@ async fn settle(
     // 状态码恒为 200：SSE 已经以 200 开头发出，错误只能体现在事件里。
     state
         .record_request(
-            ENDPOINT,
+            endpoint,
             model,
             200,
             &account.uid,
@@ -702,11 +884,12 @@ async fn settle_failure(
     stream: bool,
     started: Instant,
     failure: &UpstreamFailure,
+    endpoint: &'static str,
     variant: TraeVariant,
 ) {
     state
         .record_request(
-            ENDPOINT,
+            endpoint,
             model,
             failure.status,
             "",
@@ -810,6 +993,21 @@ fn openai_error(status: StatusCode, code: &str, message: &str) -> Response {
     json_response(status, sse::error_body(code, message))
 }
 
+/// Anthropic 端点错误响应：`{"type":"error","error":{"type","message"}}`。
+///
+/// 形状与 WorkBuddy 网关的 `GatewayError::anthropic_body` **刻意保持一致** ——
+/// 同一个 Anthropic 客户端连两条网关都要能读懂。Trae 模块不复用 `crate::routes`
+/// 的类型（见模块文档），所以按同一形状自己构造。
+fn anthropic_error(status: StatusCode, kind: &str, message: &str) -> Response {
+    json_response(
+        status,
+        json!({
+            "type": "error",
+            "error": { "type": kind, "message": message },
+        }),
+    )
+}
+
 /// SSE 响应。
 fn sse_response(rx: mpsc::Receiver<Result<Bytes, std::io::Error>>) -> Response {
     Response::builder()
@@ -818,6 +1016,28 @@ fn sse_response(rx: mpsc::Receiver<Result<Bytes, std::io::Error>>) -> Response {
         .header(header::CACHE_CONTROL, "no-cache")
         .header("X-Accel-Buffering", "no")
         .body(sse::body_from_receiver(rx))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Anthropic SSE 响应：把同一条 OpenAI SSE 逐事件转成 Anthropic 事件流。
+///
+/// `AnthropicSseStream` 要求内层 `S: Unpin`，而 `stream_from_receiver` 产出的是
+/// `unfold`（含 async block，**不是** `Unpin`）⇒ 必须 `Box::pin` 包一层。
+/// 少了这一步会得到一句与运行时毫无关系的 `Unpin` 约束报错。
+fn anthropic_sse_response(
+    rx: mpsc::Receiver<Result<Bytes, std::io::Error>>,
+    model: &str,
+) -> Response {
+    let inner = Box::pin(sse::stream_from_receiver(rx));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("X-Accel-Buffering", "no")
+        .body(Body::from_stream(anthropic::AnthropicSseStream::new(
+            inner,
+            model.to_string(),
+        )))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
@@ -937,8 +1157,33 @@ mod tests {
         );
     }
 
-    /// ★ 偏好优先级：**显式指定压过粘性**。
+    /// ★ 流式开关必须来自**原始** Anthropic 请求体。
     ///
+    /// 回归背景（本用例写下之前刚修掉）：`to_upstream_request` 会把 `stream` 强制为
+    /// `true`（上游只接受流式），若拿**转换后**的体判断，非流式客户端会收到事件流
+    /// 而不是 JSON —— 而且不报错。
+    ///
+    /// 末段把「两个体在这一字段上必然不同」这个**前提**也钉住：否则哪天上游支持了
+    /// 非流式，本用例会静默失去意义（仍绿，但已测不到东西）。
+    #[test]
+    fn anthropic_stream_flag_comes_from_the_raw_request() {
+        assert!(!anthropic_wants_stream(&json!({})), "缺 stream ⇒ 非流式");
+        assert!(!anthropic_wants_stream(&json!({"stream": false})));
+        assert!(anthropic_wants_stream(&json!({"stream": true})));
+        assert!(
+            !anthropic_wants_stream(&json!({"stream": "yes"})),
+            "非布尔值按非流式处理（不猜）"
+        );
+
+        let upstream = anthropic::to_upstream_request(&json!({"model": "m", "max_tokens": 1}));
+        assert_eq!(
+            upstream.get("stream"),
+            Some(&json!(true)),
+            "前提：上游请求体的 stream 被强制为 true —— 这正是不能拿它判断的原因"
+        );
+    }
+
+    /// ★ 偏好优先级：**显式指定压过粘性**。    ///
     /// 粘性记录的是「上次成功的账号」，是一个陈旧观察；`preferred_uid` 是用户此刻的
     /// 明确要求。若让粘性压过它，用户改完设置后会看到「下一轮仍走旧账号」—— 设置不生效。
     #[test]

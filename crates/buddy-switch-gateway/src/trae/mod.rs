@@ -548,6 +548,8 @@ pub fn router(state: TraeGatewayState) -> axum::Router {
         .route("/status", get(routes::status))
         .route("/v1/models", get(routes::models))
         .route("/v1/chat/completions", post(routes::chat_completions))
+        // Anthropic 协议入口：与上面那条共用整条中继，只在协议层做双向转换。
+        .route("/v1/messages", post(routes::messages))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             routes::bearer_auth,

@@ -740,3 +740,159 @@ async fn status_view_selects_the_variant_pool_without_new_keys() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// ---------------------------------------------------------------------------
+// Anthropic 协议入口（`/v1/messages`）
+// ---------------------------------------------------------------------------
+
+/// `/v1/messages` 请求构造。
+fn messages_request(key: Option<&str>, body: &str) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json");
+    if let Some(key) = key {
+        builder = builder.header("authorization", format!("Bearer {key}"));
+    }
+    builder.body(Body::from(body.to_string())).expect("构造请求")
+}
+
+/// ★ `/v1/messages` **必须**走鉴权。
+///
+/// 它是新加的路由 —— 若 `router()` 忘了把 layer 挂在它上面，端口一开就是
+/// **任何人可白嫖额度**，而这类「零护栏接线」单测抓不到（见本文件头的说明）。
+#[tokio::test]
+async fn anthropic_endpoint_requires_authorization() {
+    let _guard = guard();
+    let home = isolated_home("anthropic-auth", &[("uid-a", "jwt-a")]);
+    let (state, _key) = gateway_for(Behavior::Normal).await;
+    let app = router(state);
+
+    let body = serde_json::json!({"model": "m", "max_tokens": 1, "messages": []}).to_string();
+    let response = app
+        .oneshot(messages_request(None, &body))
+        .await
+        .expect("请求应完成");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // 错误体必须是 **Anthropic 形状** —— 同一个 Anthropic 客户端要能读懂。
+    let text = body_text(response).await;
+    let value: serde_json::Value = serde_json::from_str(&text).expect("错误体应是 JSON");
+    assert_eq!(value["type"], "error", "错误体形状：{text}");
+    assert!(value["error"]["message"].is_string(), "错误体形状：{text}");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// ★★ 非流式：客户端要 JSON，就必须给 JSON（**不是**事件流）。
+///
+/// 回归背景（本用例写下之前刚修掉）：`to_upstream_request` 会把上游的 `stream`
+/// 强制为 `true`，若拿**转换后**的体判断流式开关，这里会收到 SSE ——
+/// 而客户端在等 JSON，且不会报错、只会解析失败。
+#[tokio::test]
+async fn anthropic_non_streaming_returns_a_message_object() {
+    let _guard = guard();
+    let home = isolated_home("anthropic-json", &[("uid-a", "jwt-a")]);
+    let (state, key) = gateway_for(Behavior::Normal).await;
+    let app = router(state);
+
+    // 刻意**不带** `stream`：Anthropic 的默认就是非流式。
+    let body = serde_json::json!({
+        "model": "m",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    .to_string();
+
+    let response = app
+        .oneshot(messages_request(Some(&key), &body))
+        .await
+        .expect("请求应完成");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = body_text(response).await;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| panic!("非流式必须返回 JSON，实际：{text}"));
+
+    assert_eq!(value["type"], "message", "Anthropic 响应体：{text}");
+    assert_eq!(value["role"], "assistant");
+    assert_eq!(
+        value["id"].as_str().map(|id| id.starts_with("msg_")),
+        Some(true),
+        "id 应是 msg_ 前缀：{text}"
+    );
+    let content = value["content"].as_array().expect("content 应是数组");
+    assert!(!content.is_empty(), "正文不能为空：{text}");
+    assert_eq!(content[0]["type"], "text");
+    // mock 上游回显 jwt ⇒ 正文非空，证明**整条链路**真的通了（不只是形状对）。
+    assert!(
+        content[0]["text"].as_str().is_some_and(|t| !t.is_empty()),
+        "正文应有内容：{text}"
+    );
+    assert_eq!(value["usage"]["input_tokens"], 11);
+    assert_eq!(value["usage"]["output_tokens"], 22);
+
+    // ★ 日志端点必须记成 `/v1/messages`：否则「Token 统计」页会把 Anthropic 流量
+    // 算进 OpenAI 端点 —— 用户看到的分布是错的，而且**不报错**。
+    let log_path = home
+        .join(".buddy-switch")
+        .join("trae")
+        .join("api_gateway_logs.json");
+    let log_text = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        log_text.contains("/v1/messages"),
+        "日志应记录 Anthropic 端点名，实际：{log_text}"
+    );
+    assert!(
+        !log_text.contains("/v1/chat/completions"),
+        "Anthropic 请求不得被记成 chat completions：{log_text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// ★★ 流式：必须产出 **Anthropic 事件序列**（不是 OpenAI 的 data-only 形态）。
+#[tokio::test]
+async fn anthropic_streaming_emits_anthropic_events() {
+    let _guard = guard();
+    let home = isolated_home("anthropic-sse", &[("uid-a", "jwt-a")]);
+    let (state, key) = gateway_for(Behavior::Normal).await;
+    let app = router(state);
+
+    let body = serde_json::json!({
+        "model": "m",
+        "max_tokens": 100,
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    .to_string();
+
+    let response = app
+        .oneshot(messages_request(Some(&key), &body))
+        .await
+        .expect("请求应完成");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+
+    let text = body_text(response).await;
+    // 首尾事件必须齐：缺 `message_start` 客户端根本无法开始解析。
+    for event in ["message_start", "content_block_delta", "message_stop"] {
+        assert!(
+            text.contains(&format!("event: {event}")),
+            "缺 Anthropic 事件 `{event}`：{text}"
+        );
+    }
+    // 反向断言：绝不能漏出 OpenAI chunk 形态（那说明转换层没接上）。
+    assert!(
+        !text.contains("chat.completion.chunk"),
+        "不应出现 OpenAI chunk（转换层没接上）：{text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
