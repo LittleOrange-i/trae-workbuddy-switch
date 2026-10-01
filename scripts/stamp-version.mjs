@@ -13,16 +13,21 @@
  *
  * ## 版本形态 `<YYYY>.<M>.<DHHMM>`
  *
- * 例：2026-09-20 18:45 → `2026.9.201845`
+ * 例：2026-09-20 18:45 → `2026.9.201845`；2026-10-01 10:19 → `2026.10.11019`
  *
  *   - **必须 3 段数字**：Cargo 严格 semver，`2026.9.20.1845` 会被直接拒绝
  *     （`error: unexpected character '.' after patch version number`）。
  *     本脚本**前置拦下**，免得编了十几分钟才在 cargo 那里报一句难读的错。
  *   - 第三段 `DHHMM` 让**同一天多次打包版本号不同**。只写日期（`2026.9.20`）时，
  *     自动更新会把当天的新包误判成「已是最新」→ 修复推不出去，NSIS 产物还会同名覆盖。
- *   - 月/日不补零（沿用仓库既有 CalVer 观感；`update::version_tuple()` 按 `.` 切分取整数，
- *     补不补零都一样）；但**日与时必须补零**，否则跨月比较会错乱。
- *   - 与 `update::version_tuple()` 严格单调递增语义兼容：同日内 DHHMM 递增，
+ *   - **★ 年 / 月 / 日一律不补零，时 / 分必须补零**（两个方向都不能反）：
+ *     第三段是 semver 的 **patch**，而 patch **禁止前导零** —— 日补零会让每月 1–9 号
+ *     生成 `2026.10.011019`，cargo / npm / tauri 三家全部拒收。2026-10-01 真踩到：
+ *     四个平台的 CI 全在 `Build server binary` 挂掉，只报一句
+ *     `error: invalid leading zero in patch version number`。
+ *     反过来 **HH/MM 必须补零**，第三段的数值才等于 `日 × 10000 + 时 × 100 + 分`，
+ *     跨日比较才单调（不补零时 `1`+`0`+`19` = `1019` < 前一天的 `11019`）。
+ *   - 与 `update::version_tuple()` 严格单调递增语义兼容：同日内第三段递增，
  *     跨日/跨月因前两段递增而递增。
  *
  * ## 用法
@@ -62,11 +67,16 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
-/** 从系统时间推导 `<YYYY>.<M>.<DHHMM>`。 */
+/**
+ * 从系统时间推导 `<YYYY>.<M>.<DHHMM>`。
+ *
+ * ⚠️ **日不补零**（补了会让每月 1–9 号生成 `…011019`，patch 段前导零 ⇒ semver 拒收，
+ * 见文件头「版本形态」一节）；**时 / 分必须补零**（否则第三段的数值语义垮掉、跨日不单调）。
+ */
 function versionFromClock(now = new Date()) {
   const y = now.getFullYear();
   const m = now.getMonth() + 1; // 不补零
-  const dd = String(now.getDate()).padStart(2, '0');
+  const dd = String(now.getDate()); // ★ 不补零（patch 段最高位）
   const hh = String(now.getHours()).padStart(2, '0');
   const mi = String(now.getMinutes()).padStart(2, '0');
   return `${y}.${m}.${dd}${hh}${mi}`;
@@ -77,6 +87,20 @@ const version = explicit ? explicit.replace(/^v/, '') : versionFromClock();
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
   console.error(
     `[stamp-version] 版本号必须是 3 段数字 <YYYY>.<M>.<DHHMM>（Cargo 拒绝 4 段 semver），收到: ${version}`,
+  );
+  process.exit(2);
+}
+
+// ★ 段内不得有前导零。与上一条是**两类**不同的错：段数错是本脚本自己拼错，
+//   前导零是**日期取值**触发的（每月 1–9 号必踩，2026-10-01 CI 四平台全红就是它）。
+//   放在这里而不是只在 `versionFromClock` 里改，是因为 `--tag` 是**外部输入**
+//   （CI 传 `GITHUB_REF_NAME`）—— 打错 tag 也要在本地就被拦下。
+const leadingZero = version
+  .split('.')
+  .find((segment) => segment.length > 1 && segment.startsWith('0'));
+if (leadingZero !== undefined) {
+  console.error(
+    `[stamp-version] 版本号不允许前导零段（semver 禁止）：段 "${leadingZero}" 以 0 开头，收到: ${version}`,
   );
   process.exit(2);
 }
