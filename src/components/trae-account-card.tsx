@@ -1,8 +1,9 @@
-import { ArrowRight, Check, CircleCheck, CircleSlash, Clock3, Coins, Ellipsis, KeyRound, Loader2, Plug, Save, Sparkles, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { ArrowRight, Check, CircleCheck, CircleSlash, Clock3, Coins, Ellipsis, KeyRound, Loader2, Pencil, Plug, Save, Sparkles, StickyNote, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { DemoAction } from "@/components/demo-action";
 import {
   Dialog,
@@ -15,6 +16,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { avatarTone } from "@/components/account-card";
 import { TraeMark, TraeVariantMark } from "@/components/product-marks";
+import { displayText } from "@/lib/display-text";
 import { useT, type Translate } from "@/lib/i18n";
 import type { TranslationKey } from "@/locales/zh";
 import { cn } from "@/lib/utils";
@@ -155,6 +157,14 @@ interface Props {
   onRefreshJwt: (account: TraeAccount) => void;
   onClearCooldown: (account: TraeAccount) => void;
   onDelete: (account: TraeAccount) => void;
+  /**
+   * 保存备注；返回 `true` 表示已写回（编辑器才会收起）。
+   *
+   * 与 WorkBuddy 卡片同名同义：由页面提供而不由卡片自己调 `api` —— 写回后要
+   * 刷新整个账号列表，而卡片手里没有列表状态。返回布尔值而不是抛异常，
+   * 是为了失败时**保持编辑态**让用户能改完重试，而不是把半截输入丢掉。
+   */
+  onSaveRemark?: (account: TraeAccount, remark: string) => Promise<boolean>;
 }
 
 /**
@@ -186,6 +196,7 @@ export function TraeAccountCard({
   onRefreshJwt,
   onClearCooldown,
   onDelete,
+  onSaveRemark,
 }: Props) {
   const t = useT();
   const name = account.name || `UID · ${account.userId}`;
@@ -203,6 +214,76 @@ export function TraeAccountCard({
   const deleting = busy === `delete-${account.userId}`;
   const hasCredits = account.remainingCredits !== null;
   const [detailOpen, setDetailOpen] = useState(false);
+  const [remarkEditing, setRemarkEditing] = useState(false);
+  const [remarkDraft, setRemarkDraft] = useState("");
+  const [remarkSaving, setRemarkSaving] = useState(false);
+  const remarkInputRef = useRef<HTMLInputElement | null>(null);
+  /**
+   * 取消编辑时置位，用来抵掉紧随其后的那次 blur。
+   *
+   * 编辑态结束时输入框会被卸载，浏览器/React 可能仍补发一次 blur；
+   * 不拦的话「按 Esc 取消」会被那次 blur 反向提交成一次保存。
+   */
+  const skipCommitRef = useRef(false);
+  /**
+   * 从「更多操作」菜单进入备注编辑时置位，用来**取消这一次菜单关闭的焦点归还**。
+   *
+   * Radix 菜单关闭时会把焦点还给触发按钮（发生在关闭动画之后，实测约 150ms），
+   * 而编辑框那时**已经拿到焦点** —— 焦点被顶掉会补发一次 `onBlur`，被当成
+   * 「用户点了别处」提交一次，表现为**编辑框闪一下就没了**。
+   *
+   * 只在「本次关闭确实是为了进入编辑态」时拦截；其他菜单项仍按 Radix 默认行为
+   * 把焦点还给触发按钮。（与 `account-card.tsx` 同款处理，两边必须一致。）
+   */
+  const keepRemarkFocusRef = useRef(false);
+  /**
+   * 兜底归一（副闸）。
+   *
+   * 后端 `account_view` 透出的就是我们自己账号库里的值，正常是 `string | null`；
+   * 但账号库是**用户可见、可手改**的文件，而 `remark` 会被直接当 React 子节点渲染
+   * —— 一个对象就能让 React 卸载整棵树 ⇒ 窗口一片白（issue #2）。
+   * 宁可显示成「没有备注」，也不能崩。
+   */
+  const remark = displayText(account.remark)?.trim() || "";
+
+  useEffect(() => {
+    if (!remarkEditing) return;
+    // 等 DOM 提交后再聚焦；从菜单进入时那次焦点归还已由 `onCloseAutoFocus` 拦掉。
+    const timer = window.setTimeout(() => remarkInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [remarkEditing]);
+
+  /** 进入备注编辑态；返回 `true` 表示确实进入了（调用方据此决定要不要拦焦点）。 */
+  function beginRemarkEdit(): boolean {
+    if (featuresDisabled || !onSaveRemark || remarkSaving) return false;
+    skipCommitRef.current = false;
+    setRemarkDraft(remark);
+    setRemarkEditing(true);
+    return true;
+  }
+
+  function cancelRemarkEdit() {
+    // 取消即丢弃草稿：下次进入编辑态重新从已保存值起算，不留半截输入。
+    skipCommitRef.current = true;
+    setRemarkEditing(false);
+    setRemarkDraft("");
+  }
+
+  async function commitRemark() {
+    if (skipCommitRef.current) {
+      skipCommitRef.current = false;
+      return;
+    }
+    if (!onSaveRemark || remarkSaving) return;
+    if (remarkDraft.trim() === remark) {
+      cancelRemarkEdit();
+      return;
+    }
+    setRemarkSaving(true);
+    const saved = await onSaveRemark(account, remarkDraft);
+    setRemarkSaving(false);
+    if (saved) setRemarkEditing(false);
+  }
 
   /**
    * 正文行列表。
@@ -408,7 +489,16 @@ export function TraeAccountCard({
           <Ellipsis />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-44">
+      <DropdownMenuContent
+        align="end"
+        className="w-44"
+        onCloseAutoFocus={(event) => {
+          if (!keepRemarkFocusRef.current) return;
+          keepRemarkFocusRef.current = false;
+          // 焦点留给刚渲染出来的备注输入框，别还给触发按钮（见 keepRemarkFocusRef）。
+          event.preventDefault();
+        }}
+      >
         <DropdownMenuItem disabled={featuresDisabled || saving || !canSaveLogin} onSelect={() => onSaveLogin(account)}>
           <Save />{t("trae.comp.card.menu.save")}
         </DropdownMenuItem>
@@ -430,6 +520,15 @@ export function TraeAccountCard({
             <CircleSlash />{t("trae.comp.card.menu.thaw")}
           </DropdownMenuItem>
         )}
+        <DropdownMenuItem
+          disabled={featuresDisabled || !onSaveRemark}
+          onSelect={() => {
+            // 见 keepRemarkFocusRef：这一次菜单关闭不要把焦点抢回去。
+            keepRemarkFocusRef.current = beginRemarkEdit();
+          }}
+        >
+          <StickyNote />{t("trae.comp.card.menu.remark")}
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
           className="text-destructive focus:bg-destructive/5 focus:text-destructive"
@@ -498,6 +597,60 @@ export function TraeAccountCard({
         </header>
 
         <section className={cn("flex min-w-0 flex-1 flex-col", compact ? "px-3.5 pb-3 pt-3" : "px-5 pb-4 pt-4")}>
+          {/* 备注就地编辑 —— 与 WorkBuddy 卡片逐段同形（`account-card.tsx`）：
+              紧凑模式**只在有备注或正在编辑时**渲染这一行（那里本来就是为了多塞几张卡，
+              给每张卡都加一条空占位行等于白送纵向空间）；普通模式的空态常显（弱化色）
+              而不是藏进 hover —— 备注的价值就在于「我记得要看它」。 */}
+          {remarkEditing ? (
+            <Input
+              ref={remarkInputRef}
+              value={remarkDraft}
+              disabled={remarkSaving}
+              onChange={(event) => setRemarkDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void commitRemark();
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancelRemarkEdit();
+                }
+              }}
+              onBlur={() => void commitRemark()}
+              maxLength={80}
+              placeholder={t("trae.comp.card.remark.placeholder")}
+              spellCheck={false}
+              autoComplete="off"
+              aria-label={t("trae.comp.card.remark.aria", { name })}
+              className={cn("mb-3 h-7 w-full text-xs", compact && "mb-2")}
+            />
+          ) : remark ? (
+            <button
+              type="button"
+              onClick={beginRemarkEdit}
+              disabled={featuresDisabled || !onSaveRemark}
+              title={remark}
+              aria-label={t("trae.comp.card.remark.editAria", { name })}
+              className={cn(
+                "-mx-1 mb-3 flex w-[calc(100%+0.5rem)] min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-[11px] leading-4 text-foreground/80 transition-colors hover:bg-foreground/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                compact && "mb-2",
+              )}
+            >
+              <StickyNote className="size-3.5 shrink-0 stroke-[1.75] text-muted-foreground" aria-hidden="true" />
+              <span className="min-w-0 flex-1 truncate">{remark}</span>
+            </button>
+          ) : compact ? null : (
+            <button
+              type="button"
+              onClick={beginRemarkEdit}
+              disabled={featuresDisabled || !onSaveRemark}
+              className="-mx-1 mb-3 flex w-[calc(100%+0.5rem)] items-center gap-1.5 rounded-md px-1 text-left text-[11px] leading-4 text-muted-foreground/70 transition-colors hover:bg-foreground/[0.04] hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            >
+              <Pencil className="size-3 shrink-0" aria-hidden="true" />
+              {t("trae.comp.card.remark.add")}
+            </button>
+          )}
+
           {/* 大数字行：与 WorkBuddy 卡片同一位置、同一字号层级与图标用法。 */}
           <div className="flex items-baseline gap-x-3 gap-y-1">
             <span className="flex items-center gap-1.5">

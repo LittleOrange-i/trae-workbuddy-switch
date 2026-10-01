@@ -145,6 +145,18 @@ fn merge_import_record(accounts: &mut Vec<RawAccount>, item: &Value) -> MergeOut
             if replaced.added_at.is_none() {
                 replaced.added_at = existing.added_at.clone();
             }
+            // `updated_at` 与 `added_at` 同款：导入文件不带它时**不能**把本地的
+            // 已知值抹成 `null` —— 卡片页脚的「最近更新」会因此变成「未记录更新时间」，
+            // 而用户刚刚并没有更新过任何东西（2026-10-01 实测复现）。
+            if replaced.updated_at.is_none() {
+                replaced.updated_at = existing.updated_at.clone();
+            }
+            // 备注是**纯本地用户输入**：参考实现产出的文件、或旧版本导出的文件里
+            // 根本没有这个键。`*existing = replaced` 会把它整条抹掉 —— 那是用户
+            // 自己写的东西，丢了不会有任何提示。与 `added_at` 同一条规则。
+            if replaced.remark.is_none() {
+                replaced.remark = existing.remark.clone();
+            }
             *existing = replaced;
             return MergeOutcome::Overwritten;
         }
@@ -310,6 +322,7 @@ mod tests {
             refresh_token: None,
             added_at: Some("2026-09-01T00:00:00Z".to_string()),
             updated_at: None,
+            remark: None,
         }
     }
 
@@ -364,6 +377,65 @@ mod tests {
         assert_eq!(accounts[0].name, "覆盖名");
         assert_eq!(accounts[0].jwt, "newer-jwt");
         assert_eq!(accounts[0].user_id.as_deref(), Some("u1"));
+    }
+
+    /// 备注是**纯本地用户输入**，导入文件通常不带它 —— 不能被 `*existing = replaced` 抹掉。
+    ///
+    /// 反面现场（WorkBuddy 侧同款实现踩过）：用户写好的备注在「导入账号」之后
+    /// 无声消失，且没有任何提示。这条就是那个缺陷的护栏。
+    #[test]
+    fn merge_keeps_local_remark_when_import_record_lacks_it() {
+        let mut local = raw("u1", "本地名", "old-jwt");
+        local.remark = Some("本地备注".into());
+        let mut accounts = vec![local];
+
+        // ① 导入文件不带 remark（参考实现 / 旧版本导出的文件就是这样）⇒ 保留本地值。
+        let text = r#"[{ "UserID": "u1", "name": "导入名", "jwt": "new-jwt" }]"#;
+        let result = merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(result.overwritten, 1);
+        assert_eq!(accounts[0].name, "导入名", "其余字段照常被覆盖");
+        assert_eq!(
+            accounts[0].remark.as_deref(),
+            Some("本地备注"),
+            "导入记录缺 remark 时不得抹掉本地备注"
+        );
+
+        // ② 导入文件**带** remark ⇒ 以导入值为准（换机器搬账号时备注要跟着走）。
+        let text = r#"[{ "UserID": "u1", "jwt": "newer-jwt", "remark": "导入备注" }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(accounts[0].remark.as_deref(), Some("导入备注"));
+    }
+
+    /// 导入文件不带时间戳时，本地的**已知值**不得被抹成 `null`。
+    ///
+    /// 现场（2026-10-01 真机实测）：导入一份没有 `updated_at` 的文件后，卡片页脚的
+    /// 「最近更新」变成「未记录更新时间」—— 用户刚导入完，自己什么都没更新。
+    /// 与 `added_at` / `remark` 同属「缺乏 ≠ 应当清空」。
+    #[test]
+    fn merge_keeps_local_timestamps_when_import_record_lacks_them() {
+        let mut local = raw("u1", "本地名", "old-jwt");
+        local.updated_at = Some("2026-09-30T10:00:00Z".into());
+        let mut accounts = vec![local];
+
+        // ① 缺 `updated_at` ⇒ 保留本地值（`added_at` 早已如此，见上一条规则）。
+        let text = r#"[{ "UserID": "u1", "name": "导入名", "jwt": "new-jwt" }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(accounts[0].name, "导入名", "其余字段照常被覆盖");
+        assert_eq!(
+            accounts[0].updated_at.as_deref(),
+            Some("2026-09-30T10:00:00Z"),
+            "导入记录缺 updated_at 时不得抹掉本地值"
+        );
+        assert_eq!(accounts[0].added_at.as_deref(), Some("2026-09-01T00:00:00Z"));
+
+        // ② 带 `updated_at` ⇒ 以导入值为准（换机器搬账号时时间线要跟着走）。
+        let text =
+            r#"[{ "UserID": "u1", "jwt": "newer-jwt", "updated_at": "2026-10-01T00:00:00Z" }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(
+            accounts[0].updated_at.as_deref(),
+            Some("2026-10-01T00:00:00Z")
+        );
     }
 
     #[test]

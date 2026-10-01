@@ -298,6 +298,15 @@ export interface TraeAccount {
   jwtAutoRefresh: boolean;
   addedAt: string | null;
   updatedAt: string | null;
+  /**
+   * 用户自填备注（例如「DS4.1 额度 · 10/03 解禁」）；未设置时 `null`。
+   *
+   * 与 WorkBuddy 账号卡片的 `remark` 同义：**就地编辑**，空串即清空。
+   * ⚠️ 它会被**直接当 React 子节点**渲染，所以卡片侧仍过一遍 `displayText`
+   * （后端是我们自己的账号库，正常不会出现脏值；但账号库是用户可见的文件，
+   * 手改出一段 JSON 对象就能让整棵树崩掉 —— 见 `display-text.ts` 的 issue #2）。
+   */
+  remark: string | null;
 }
 
 /** 分组视图（含成员数）。 */

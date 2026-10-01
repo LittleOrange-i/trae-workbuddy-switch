@@ -232,6 +232,21 @@ pub fn update_account_for(
     Ok(json!({ "accounts": account::list_account_views_for(variant) }))
 }
 
+/// 设置账号备注（字段级更新；按变体分家）。
+///
+/// 与 [`update_account_for`] 分开：那条的 `name` 是「空串＝不动」，
+/// 而备注必须支持「清空」——两种语义挤在一个参数位上迟早静默错一边。
+/// 语义细节见 [`account::set_remark_for`]。
+pub fn set_remark_for(
+    variant: TraeVariant,
+    user_id: &str,
+    remark: Option<&str>,
+) -> Result<Value, String> {
+    account::set_remark_for(variant, user_id, remark)?;
+    // 与增删改同形：回全量账号视图，省掉前端再拉一次列表。
+    Ok(json!({ "accounts": account::list_account_views_for(variant) }))
+}
+
 /// 删除账号（默认变体，兼容壳）。
 pub fn delete_account(user_id: &str, delete_profile: bool) -> Result<Value, String> {
     delete_account_for(TraeVariant::default(), user_id, delete_profile)

@@ -239,6 +239,7 @@ const ROUTES: Record<string, Route> = {
   save_trae_settings: { method: "POST", path: "/api/trae/settings" },
   trae_add_account: { method: "POST", path: "/api/trae/accounts/add" },
   trae_update_account: { method: "POST", path: "/api/trae/accounts/update" },
+  trae_set_account_remark: { method: "POST", path: "/api/trae/accounts/remark" },
   trae_delete_account: { method: "POST", path: "/api/trae/accounts/delete" },
   // 账号迁移：与 WorkBuddy 的 import_local / export_accounts* / import* 同构。
   // 命令名不与 WorkBuddy 侧重名（多 `trae_` 前缀），因此 ROUTES 里必须逐条列出。
@@ -1198,6 +1199,21 @@ export function traeUpdateAccount(
     jwt: patch.jwt ?? null,
     variant: variant ?? null,
   });
+}
+
+/**
+ * 设置账号备注（**字段级**更新）。
+ *
+ * 传空串即清空备注（后端会删掉账号库里的 `remark` 键，而不是写一个空串）。
+ * 与 {@link traeUpdateAccount} 分开：那条的 `name` 是「空串＝不动」，
+ * 而备注必须支持「清空」—— 两种语义挤进同一个参数位迟早静默错一边。
+ */
+export function traeSetAccountRemark(
+  userId: string,
+  remark: string,
+  variant?: TraeVariantId | null,
+): Promise<{ accounts: TraeAccount[] }> {
+  return call("trae_set_account_remark", { userId, remark, variant: variant ?? null });
 }
 
 /** 删除账号（可选一并删除登录态快照）。 */

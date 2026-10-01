@@ -96,6 +96,7 @@ export const en = {
   "shared.demo.pool.creditsUnknown": "unknown",
   // ---- Trae: fake account names / group / packages / cooldown ----
   "shared.demo.trae.name.main": "Primary",
+  "shared.demo.trae.remark.main": "Primary: keep for check-in credits, not long tasks",
   "shared.demo.trae.name.altA": "Alt A",
   "shared.demo.trae.name.altB": "Alt B",
   "shared.demo.trae.group.spare": "Spare",

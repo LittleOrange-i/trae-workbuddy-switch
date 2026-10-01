@@ -700,6 +700,9 @@ function traeDemoAccounts(): TraeAccount[] {
       deviceIdMasked: "a1b2…9f", cooldownType: null, cooldownUntil: null, cooldownReason: null,
       hasRefreshToken: true, jwtAutoRefresh: true,
       addedAt: "2026-09-10T02:11:00Z", updatedAt: "2026-09-17T01:54:00Z",
+      // 主号带一条备注：演示站与截图要能看见「备注」这一行（另两条留空，
+      // 顺带覆盖「没有备注」的形态）。
+      remark: t("shared.demo.trae.remark.main"),
     },
     {
       userId: "7481999", name: t("shared.demo.trae.name.altA"), groupId: "g1", jwt: "", jwtExpHours: 6.2,
@@ -713,6 +716,7 @@ function traeDemoAccounts(): TraeAccount[] {
       cooldownReason: t("shared.demo.trae.cooldown.rateLimited"),
       hasRefreshToken: false, jwtAutoRefresh: false,
       addedAt: "2026-09-12T08:00:00Z", updatedAt: "2026-09-16T22:10:00Z",
+      remark: null,
     },
     {
       userId: "7482044", name: t("shared.demo.trae.name.altB"), groupId: "g1", jwt: "", jwtExpHours: -3,
@@ -725,6 +729,7 @@ function traeDemoAccounts(): TraeAccount[] {
       cooldownReason: t("shared.demo.trae.cooldown.sessionDead"),
       hasRefreshToken: true, jwtAutoRefresh: false,
       addedAt: "2026-09-14T09:30:00Z", updatedAt: "2026-09-17T00:40:00Z",
+      remark: null,
     },
   ];
 }

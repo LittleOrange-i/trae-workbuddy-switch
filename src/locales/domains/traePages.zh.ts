@@ -31,6 +31,11 @@ export const zh = {
   "trae.page.accounts.actionClearCooldown": "清除冷却",
   "trae.page.accounts.actionThaw": "解除冷却",
   "trae.page.accounts.actionDelete": "删除账号",
+  // 备注单独一套提示（不走 actionDone）：保存与清空是两件不同的事，
+  // 统一成「编辑备注完成」会让「我到底是删掉了还是写上了」看不出来。
+  "trae.page.accounts.remarkSaved": "备注已保存",
+  "trae.page.accounts.remarkCleared": "备注已清除",
+  "trae.page.accounts.remarkSaveFailed": "备注保存失败",
 
   // ---- 合并旧产品线账号库 ----
   "trae.page.accounts.mergeDone": "已合并旧产品线账号库",

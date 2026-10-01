@@ -1440,6 +1440,20 @@ pub fn trae_update_account(
     trae::handlers::update_account_for(variant, &user_id, name.as_deref(), jwt.as_deref())
 }
 
+/// POST /api/trae/accounts/remark —— 设置账号备注（字段级更新）。
+///
+/// `remark` 是**字符串**而不是 `Option`：空串（或全空白）就是「清空备注」，
+/// 后端据此删掉账号库里的 `remark` 键。语义细节见 `account::set_remark_for`。
+#[tauri::command(rename_all = "camelCase")]
+pub fn trae_set_account_remark(
+    user_id: String,
+    remark: String,
+    variant: Option<String>,
+) -> Result<Value, String> {
+    let variant = parse_trae_variant(variant.as_deref());
+    trae::handlers::set_remark_for(variant, &user_id, Some(remark.as_str()))
+}
+
 /// POST /api/trae/accounts/delete —— 删除账号（可选一并删除登录态快照）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn trae_delete_account(

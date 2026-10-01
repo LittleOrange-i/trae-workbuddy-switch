@@ -78,7 +78,12 @@ export const zh = {
   "trae.comp.card.menu.refreshJwt": "刷新 JWT",
   "trae.comp.card.menu.checkin": "手动签到",
   "trae.comp.card.menu.thaw": "解除冷却",
+  "trae.comp.card.menu.remark": "编辑备注",
   "trae.comp.card.menu.delete": "删除账号",
+  "trae.comp.card.remark.placeholder": "例如：DS4.1 额度 · 10/03 解禁",
+  "trae.comp.card.remark.aria": "{name} 的备注",
+  "trae.comp.card.remark.editAria": "编辑 {name} 的备注",
+  "trae.comp.card.remark.add": "添加备注",
 
   // ---- 积分区 ----
   "trae.comp.card.credits.remaining": "剩余积分",

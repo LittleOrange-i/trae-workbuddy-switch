@@ -69,7 +69,12 @@ export const en = {
   "trae.comp.card.menu.refreshJwt": "Refresh JWT",
   "trae.comp.card.menu.checkin": "Check in manually",
   "trae.comp.card.menu.thaw": "Clear cooldown",
+  "trae.comp.card.menu.remark": "Edit remark",
   "trae.comp.card.menu.delete": "Delete account",
+  "trae.comp.card.remark.placeholder": "e.g. DS4.1 quota · unlocks 10/03",
+  "trae.comp.card.remark.aria": "{name}'s remark",
+  "trae.comp.card.remark.editAria": "Edit {name}'s remark",
+  "trae.comp.card.remark.add": "Add remark",
 
   // ---- Credits section ----
   "trae.comp.card.credits.remaining": "Credits left",

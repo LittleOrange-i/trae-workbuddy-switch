@@ -410,6 +410,32 @@ export default function TraeAccountsPage() {
   }
 
   /**
+   * 保存账号备注（与 WorkBuddy 账号页的同名函数同形）。
+   *
+   * 成功后**重新拉取账号列表**而不是就地改 state：备注是唯一由用户手改的字段，
+   * 后端会把全空白备注归一成「没有备注」（删键）—— 前端就地改就会留下一个空串，
+   * 卡片上表现为「备注还在，只是看不见」。
+   *
+   * 返回布尔值而不是抛异常：卡片据此决定要不要收起编辑器。失败时保持编辑态，
+   * 用户能改完重试，不会把半截输入丢掉。
+   */
+  async function saveRemark(account: TraeAccount, remark: string): Promise<boolean> {
+    try {
+      await api.traeSetAccountRemark(account.userId, remark, variant);
+      await loadAll();
+      toast.success(
+        remark.trim()
+          ? t("trae.page.accounts.remarkSaved")
+          : t("trae.page.accounts.remarkCleared"),
+      );
+      return true;
+    } catch (e) {
+      toast.error(t("trae.page.accounts.remarkSaveFailed"), { description: api.asError(e) });
+      return false;
+    }
+  }
+
+  /**
    * 「自动签到」开关 —— **排程层**的开关（到点由后台调度器签一轮、应用启动时补一轮）。
    *
    * 与 WorkBuddy 工具栏的同名开关**同位同义**（都读写 `schedule_config.json` 里各自那一类
@@ -1127,6 +1153,7 @@ export default function TraeAccountsPage() {
                       void run(`thaw-${target.userId}`, "trae.page.accounts.actionThaw", () => api.traeClearCooldown(target.userId, variant))
                     }
                     onDelete={(target) => setPendingDelete(target)}
+                    onSaveRemark={saveRemark}
                   />
                 ))}
               </div>

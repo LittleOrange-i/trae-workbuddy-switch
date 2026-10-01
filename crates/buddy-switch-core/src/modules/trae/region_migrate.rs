@@ -312,6 +312,7 @@ mod tests {
             refresh_token: Some(format!("rt-{uid}")),
             added_at: Some("2026-09-01T00:00:00Z".into()),
             updated_at: None,
+            remark: None,
         }
     }
 
@@ -398,6 +399,7 @@ mod tests {
                 refresh_token: Some("rt-new".into()),
                 added_at: Some("2026-09-20T00:00:00Z".into()),
                 updated_at: None,
+                remark: None,
             }],
             device_bindings: HashMap::new(),
         };

@@ -169,6 +169,10 @@ fn api_routes() -> Router {
         .route("/api/trae/accounts", get(api_trae_accounts))
         .route("/api/trae/accounts/add", post(api_trae_add_account))
         .route("/api/trae/accounts/update", post(api_trae_update_account))
+        .route(
+            "/api/trae/accounts/remark",
+            post(api_trae_set_account_remark),
+        )
         .route("/api/trae/accounts/delete", post(api_trae_delete_account))
         // ---- 账号迁移（与 WorkBuddy 的 /api/import-local、/api/export-accounts* 同构）----
         .route("/api/trae/accounts/import-local", post(api_trae_import_local))
@@ -1399,6 +1403,29 @@ async fn api_trae_update_account(Json(body): Json<Value>) -> Response {
     let jwt_value = body.get("jwt").and_then(Value::as_str);
     let variant = parse_trae_variant(body.get("variant").and_then(Value::as_str));
     match trae::handlers::update_account_for(variant, user_id, name, jwt_value) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/trae/accounts/remark —— 设置账号备注（字段级更新）。
+///
+/// `remark` 是字符串：空串（或全空白）＝清空备注（后端删掉账号库里的 `remark` 键）。
+/// 与 `accounts/update` 分开，因为那条的 `name` 是「空串＝不动」——
+/// 两种语义挤进同一个参数位，迟早在某条路径上静默错一边。
+async fn api_trae_set_account_remark(Json(body): Json<Value>) -> Response {
+    let user_id = body.get("userId").and_then(Value::as_str).unwrap_or("");
+    if user_id.is_empty() {
+        return json_err("缺少 userId".to_string(), StatusCode::BAD_REQUEST);
+    }
+    // 缺 `remark` 键按空串处理：与「清空」同义，而不是报 400。
+    let remark = body
+        .get("remark")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let variant = parse_trae_variant(body.get("variant").and_then(Value::as_str));
+    match trae::handlers::set_remark_for(variant, user_id, Some(remark.as_str())) {
         Ok(value) => json_ok(value),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }

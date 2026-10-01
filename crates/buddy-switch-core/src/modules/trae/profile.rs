@@ -3386,6 +3386,7 @@ mod tests {
             refresh_token: None,
             added_at: None,
             updated_at: None,
+            remark: None,
         });
         account::save_accounts_for(variant, &file).unwrap();
 

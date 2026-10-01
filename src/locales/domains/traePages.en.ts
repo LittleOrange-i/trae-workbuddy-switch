@@ -23,6 +23,9 @@ export const en = {
   "trae.page.accounts.actionClearCooldown": "Clear cooldown",
   "trae.page.accounts.actionThaw": "Clear cooldown",
   "trae.page.accounts.actionDelete": "Delete account",
+  "trae.page.accounts.remarkSaved": "Remark saved",
+  "trae.page.accounts.remarkCleared": "Remark cleared",
+  "trae.page.accounts.remarkSaveFailed": "Failed to save remark",
 
   // ---- Merging the legacy product-line account store ----
   "trae.page.accounts.mergeDone": "Legacy product-line account store merged",

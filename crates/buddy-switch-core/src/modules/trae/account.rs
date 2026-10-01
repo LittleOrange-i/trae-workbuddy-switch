@@ -49,6 +49,16 @@ pub struct RawAccount {
     /// 最近更新（改名 / 换 JWT / 刷新令牌）时间。
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// 用户自填备注（例如「DS4.1 额度 · 10/03 解禁」）。
+    ///
+    /// 与 WorkBuddy 账号库的 `remark` 同义，但**不参与** `updated_at`：
+    /// 那个字段的语义是「改名 / 换 JWT / 刷新令牌」，改备注不是账号本身变了。
+    ///
+    /// `skip_serializing_if`：没有备注就**不写出这个键**。账号库是与参考实现
+    /// `device_proxy.py` 及用户既有备份**跨工具共享**的文件（见模块头注释），
+    /// 不给没写备注的账号平白多出一个键 —— 空表时序列化结果与改造前逐字一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remark: Option<String>,
 }
 
 /// 账号库文件（**G-b**：设备绑定放「文件容器」，不放账号记录）。
@@ -299,6 +309,7 @@ pub fn display_name(user_id: &str) -> Option<String> {
 /// - `remainingCredits` / `creditsExpireAt`：剩余积分缓存
 /// - `cooldownType` / `cooldownUntil` / `cooldownReason`：冷却状态（仅未到期时暴露）
 /// - `checkedToday`：今日签到摘要
+/// - `remark`：用户自填备注（未设置时 `null`）
 #[allow(clippy::too_many_arguments)]
 pub fn account_view(
     account: &RawAccount,
@@ -351,6 +362,9 @@ pub fn account_view(
         "jwtAutoRefresh": needs_refresh,
         "addedAt": account.added_at,
         "updatedAt": account.updated_at,
+        // 用户自填备注：未设置时是 JSON `null`（不是缺键）—— 前端类型是
+        // `string | null`，两种形态都会渲染成「没有备注」。
+        "remark": account.remark,
     })
 }
 
@@ -513,6 +527,7 @@ pub fn add_manual_for(
         refresh_token: None,
         added_at: Some(now.clone()),
         updated_at: Some(now),
+        remark: None,
     });
     save_accounts_for(variant, &accounts)?;
 
@@ -577,6 +592,7 @@ pub fn import_local_for(variant: TraeVariant) -> Result<RawAccount, String> {
                 refresh_token: None,
                 added_at: Some(now.clone()),
                 updated_at: Some(now),
+                remark: None,
             };
             accounts.accounts.push(record.clone());
             record
@@ -687,6 +703,44 @@ pub fn update_for(
     if next_uid != previous_uid {
         accounts.device_bindings.remove(&previous_uid);
     }
+    save_accounts_for(variant, &accounts)
+}
+
+/// 设置账号备注（**字段级**更新，按 uid 定位；按变体分家）。
+///
+/// ## 为什么不并进 [`update_for`]
+///
+/// `update_for` 的 `name` 语义是「空串＝不动」（`Some("")` 被静默忽略）。
+/// 备注必须支持**清空**，而清空就是空串 —— 两种语义挤进同一个参数位，
+/// 迟早在某条调用路径上静默错一边（用户按了删除，界面收起，备注却还在）。
+///
+/// ## 空备注 = 删键，而不是写空串
+///
+/// 账号库是**用户可见**、且与参考实现跨工具共享的文件：没有备注就不该多出一个键。
+///
+/// ## 保留其余一切
+///
+/// 整份 `AccountsFile` 读改写（含 `device_bindings`），只动目标记录的一个键 ——
+/// 与 [`update_for`] 同一条路径，因此 JWT / refresh token / 设备绑定都不会被抹掉。
+///
+/// `updated_at` **刻意不动**：它的语义是「改名 / 换 JWT / 刷新令牌」（见
+/// [`RawAccount::updated_at`]），改备注不是账号本身变了。卡片页脚的「最近更新」
+/// 因此保持原意，不会因为随手写了一句备注而跳。
+pub fn set_remark_for(
+    variant: TraeVariant,
+    user_id: &str,
+    remark: Option<&str>,
+) -> Result<(), String> {
+    let mut accounts = load_accounts_for(variant);
+    let account = accounts
+        .accounts
+        .iter_mut()
+        .find(|account| resolve_user_id(account) == user_id)
+        .ok_or("账号不存在")?;
+    account.remark = remark
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
     save_accounts_for(variant, &accounts)
 }
 
@@ -1423,6 +1477,7 @@ pub fn login_with_exchanged_tokens_for(
                 refresh_token,
                 added_at: Some(now.clone()),
                 updated_at: Some(now),
+                remark: None,
             };
             accounts.accounts.push(record.clone());
             record
@@ -1581,6 +1636,7 @@ mod tests {
             refresh_token: None,
             added_at: None,
             updated_at: None,
+            remark: None,
         };
         assert_eq!(resolve_user_id(&stored), "stored-uid");
 
@@ -1615,6 +1671,7 @@ mod tests {
             refresh_token: None,
             added_at: None,
             updated_at: None,
+            remark: None,
         });
         file.accounts.push(RawAccount {
             name: "   ".into(),
@@ -1623,6 +1680,7 @@ mod tests {
             refresh_token: None,
             added_at: None,
             updated_at: None,
+            remark: None,
         });
         save_accounts_for(TraeVariant::Trae, &file).unwrap();
 
@@ -1727,6 +1785,7 @@ mod tests {
             refresh_token: Some("rt".into()),
             added_at: Some("2026-01-01T00:00:00".into()),
             updated_at: None,
+            remark: None,
         };
         let file = AccountsFile {
             accounts: vec![account],
@@ -1749,10 +1808,16 @@ mod tests {
             !text.contains("device_bindings"),
             "无绑定时不得写出 device_bindings 键，实际: {text}"
         );
+        // 备注同理：没写过备注的账号不该多出一个 `remark: null`。
+        assert!(
+            !text.contains("remark"),
+            "无备注时不得写出 remark 键，实际: {text}"
+        );
         // 且能再次读回
         let back: AccountsFile = serde_json::from_str(&text).expect("回读");
         assert_eq!(back.accounts[0].user_id, file.accounts[0].user_id);
         assert!(back.device_bindings.is_empty());
+        assert!(back.accounts[0].remark.is_none());
     }
 
     /// 空账号库与缺 `accounts` 键的账号库都必须解析成功并给出空列表。
@@ -1777,6 +1842,7 @@ mod tests {
             refresh_token: Some("rt".into()),
             added_at: Some("2026-01-01T00:00:00".into()),
             updated_at: None,
+            remark: Some("DS4.1 · 10/03 解禁".into()),
         };
         let view = account_view(
             &account,
@@ -1804,6 +1870,7 @@ mod tests {
             "jwtAutoRefresh",
             "addedAt",
             "updatedAt",
+            "remark",
         ] {
             assert!(view.get(key).is_some(), "缺少线上字段 {key}");
         }
@@ -1813,8 +1880,80 @@ mod tests {
         assert_eq!(view.get("checkedToday").unwrap().as_bool(), Some(true));
         assert_eq!(view.get("remainingCredits").unwrap().as_f64(), Some(12.5));
         assert_eq!(view.get("deviceIdMasked").unwrap().as_str(), Some("1234…2345"));
+        // 备注按原样透出（前端 `TraeAccount.remark` 直接渲染它）。
+        assert_eq!(
+            view.get("remark").unwrap().as_str(),
+            Some("DS4.1 · 10/03 解禁")
+        );
         // 无 JWT 时必须给出 unknown 而不是崩溃
         assert_eq!(view.get("jwtStatus").unwrap().as_str(), Some("unknown"));
+    }
+
+    /// 备注必须**可写、可清、可留白**，且不许碰到凭据与设备绑定。
+    ///
+    /// 三条断言各自对应一种会真实出错的实现：
+    /// 1. 「清空」被当成「不动」⇒ 用户删了备注、界面收起，重进还在；
+    /// 2. 首尾空白没去掉 ⇒ 卡片上出现一条看不见的备注，`remark ? …` 判定恒真；
+    /// 3. 用脱敏 meta 读改写 ⇒ JWT / refresh token 被抹掉，账号当场失效**且不报错**
+    ///    （WorkBuddy 侧同款实现踩过，见 `modules::account::set_remark_in_path` 的说明）。
+    #[test]
+    fn set_remark_writes_trims_and_clears_without_touching_credentials() {
+        with_temp_home(|| {
+            let variant = TraeVariant::TraeWork;
+            let mut file = load_accounts_for(variant);
+            file.accounts.push(RawAccount {
+                name: "n".into(),
+                user_id: Some("u-1".into()),
+                jwt: "Cloud-IDE-JWT jwt-value".into(),
+                refresh_token: Some("rt-value".into()),
+                added_at: None,
+                updated_at: None,
+                remark: None,
+            });
+            file.device_bindings.insert("u-1".into(), "dev-1".into());
+            save_accounts_for(variant, &file).expect("写账号库");
+
+            // ① 写入：首尾空白必须去掉。
+            set_remark_for(variant, "u-1", Some("  DS4.1 · 10/03 解禁  ")).expect("写备注");
+            let stored = find_for(variant, "u-1").expect("账号还在");
+            assert_eq!(stored.remark.as_deref(), Some("DS4.1 · 10/03 解禁"));
+            assert_eq!(stored.jwt, "Cloud-IDE-JWT jwt-value", "备注不得碰到 JWT");
+            assert_eq!(
+                stored.refresh_token.as_deref(),
+                Some("rt-value"),
+                "备注不得碰到 refresh token"
+            );
+            assert_eq!(
+                load_accounts_for(variant)
+                    .device_bindings
+                    .get("u-1")
+                    .map(String::as_str),
+                Some("dev-1"),
+                "备注不得碰到设备绑定"
+            );
+            // 视图是唯一转换点：它不带出去，界面就永远拿不到。
+            assert_eq!(
+                list_account_views_for(variant)[0]
+                    .get("remark")
+                    .and_then(Value::as_str),
+                Some("DS4.1 · 10/03 解禁")
+            );
+
+            // ② 清空：空串与全空白都必须**删键**，而不是写一个空串。
+            set_remark_for(variant, "u-1", Some("   ")).expect("清空备注");
+            assert!(find_for(variant, "u-1").expect("账号还在").remark.is_none());
+            // ⚠️ 必须连引号一起匹配：uid 里出现 `remark` 子串（例如 "u-remark"）时，
+            // 只匹配裸词会让这条断言**恒真、永不报警**。
+            let raw =
+                std::fs::read_to_string(paths::accounts_file_for(variant)).expect("读回账号库");
+            assert!(
+                !raw.contains("\"remark\""),
+                "清空后账号库不该再有 remark 键: {raw}"
+            );
+
+            // ③ 账号不存在要报错，而不是静默成功。
+            assert!(set_remark_for(variant, "nope", Some("x")).is_err());
+        });
     }
 
     /// ★ 回归：`checkedToday` 必须取自**当日台账**，不能取自「最近一次签到摘要」。
@@ -1907,6 +2046,7 @@ mod tests {
             refresh_token: None,
             added_at: None,
             updated_at: None,
+            remark: None,
         };
         let expired = crate::modules::trae::credits::CooldownEntry {
             error_type: "Server".into(),
@@ -1940,6 +2080,7 @@ mod tests {
             refresh_token: None,
             added_at: None,
             updated_at: None,
+            remark: None,
         };
         // 没有 refresh_token：即便 JWT 无法解析也不该提示「可自动刷新」
         let view = account_view(&account, "u", None, None, None, None, None, false, None);
@@ -1998,6 +2139,7 @@ mod tests {
             refresh_token: None,
             added_at: None,
             updated_at: None,
+            remark: None,
         });
         save_accounts_for(work, &work_file).expect("写 TraeWork 账号库");
 
@@ -2009,6 +2151,7 @@ mod tests {
             refresh_token: None,
             added_at: None,
             updated_at: None,
+            remark: None,
         });
         save_accounts_for(cn, &cn_file).expect("写 Trae 账号库");
 
@@ -2061,6 +2204,7 @@ mod tests {
                     refresh_token: None,
                     added_at: None,
                     updated_at: None,
+                    remark: None,
                 }],
                 device_bindings: HashMap::new(),
             },
@@ -2076,6 +2220,7 @@ mod tests {
                     refresh_token: None,
                     added_at: None,
                     updated_at: None,
+                    remark: None,
                 }],
                 device_bindings: HashMap::new(),
             },
@@ -2774,6 +2919,7 @@ hLkrYGiVNhsErnjKIgS7/EIHdsihRANCAARznG0WLhenNiMW5jA3SwFpTNyet2zw\n\
             refresh_token: None,
             added_at: None,
             updated_at: None,
+            remark: None,
         }
     }
 

@@ -113,6 +113,7 @@ export const zh = {
   "shared.demo.pool.creditsUnknown": "未知",
 
   "shared.demo.trae.name.main": "主号",
+  "shared.demo.trae.remark.main": "主号：签到攒额度，别用来跑长任务",
   "shared.demo.trae.name.altA": "小号 A",
   "shared.demo.trae.name.altB": "小号 B",
   "shared.demo.trae.group.spare": "备用",

@@ -327,6 +327,7 @@ pub fn run() {
             commands::save_trae_settings,
             commands::trae_add_account,
             commands::trae_update_account,
+            commands::trae_set_account_remark,
             commands::trae_delete_account,
             commands::trae_import_local_account,
             commands::trae_oauth_start,
