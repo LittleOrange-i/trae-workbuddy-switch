@@ -746,7 +746,8 @@ fn round2(value: f64) -> f64 {
 /// 计算规则（与参考实现一致）：
 /// - 只统计 `entitlement_base_info.quota.credits_limit` 存在的资源包；
 /// - 每包剩余 = `credits_limit - usage.credits_amount`（无 usage 视为已用 0），**下限为 0**；
-/// - 「最早过期」只在 `expire_time > now` 的包里取（已过期的包不影响紧迫度排序）；
+/// - 「最早过期」由 [`earliest_live_expire`] 计算：只在**还有剩余**、且 `expire_time > now`
+///   的包里取（已过期、已用完的包都不影响紧迫度排序）；
 /// - 「今日购买获得」只计 `start_time` 落在**北京时区**今日、且 `charge_amount > 0` 的包
 ///   ——签到获得的包 `charge_amount = 0`，因此天然不会被误计为购买；
 /// - 逐包明细（第 4 个返回值）由 [`parse_credit_packages`] 统一解析，供账号卡进度条。
@@ -777,7 +778,6 @@ pub async fn calc_remaining_credits(
     let today_end = today_start + 86_400;
 
     let mut total = 0.0_f64;
-    let mut earliest_expire: Option<i64> = None;
     let mut purchased_today = 0.0_f64;
 
     for pack in packs {
@@ -798,15 +798,6 @@ pub async fn calc_remaining_credits(
             .unwrap_or(0.0);
         total += (limit - used).max(0.0);
 
-        if let Some(expire) = pack.get("expire_time").and_then(|value| value.as_i64()) {
-            if expire > now_ts {
-                earliest_expire = Some(match earliest_expire {
-                    Some(current) => current.min(expire),
-                    None => expire,
-                });
-            }
-        }
-
         let charge_amount = base
             .and_then(|info| info.get("charge_amount"))
             .and_then(|value| value.as_i64())
@@ -825,10 +816,57 @@ pub async fn calc_remaining_credits(
 
     Ok((
         round2(total),
-        earliest_expire,
+        earliest_live_expire(packs, now_ts),
         round2(purchased_today),
         parse_credit_packages(packs, now_ts),
     ))
+}
+
+/// 「最早到期」：只在**还有剩余**、且 `expire_time > now` 的包里取（纯函数，便于单测）。
+///
+/// ## ★ 为什么必须要求「还有剩余」
+///
+/// 已经用完的包（剩余 0）只要 `expire_time` 还没到，就仍然带着一个「到期时刻」。
+/// 若把它算进去，这个账号会被**伪装成快过期**：徽标显示它的到期日、选号据
+/// [`expiry_urgency`](crate::modules::trae) 把它排到最前 —— 而它真正还有余额的积分
+/// 可能几十天后才到期，真正快过期的账号反而永远轮不到（issue #7）。
+///
+/// 判据在两侧本就不该分家：WorkBuddy 的快过期口径是「把快过期包的**剩余**加总」
+/// （见 `buddy-switch-gateway` 的 `credits_refresh`），空包天然贡献 0；Trae 侧只看
+/// 到期时刻，必须自己排除空包，否则同一条语义在两条产品线上行为相反。
+///
+/// 已过期的包同样不参与：它们的额度已经作废，不构成紧迫度。
+pub fn earliest_live_expire(packs: &[Value], now_ts: i64) -> Option<i64> {
+    let mut earliest: Option<i64> = None;
+    for pack in packs {
+        let limit = pack
+            .get("entitlement_base_info")
+            .and_then(|info| info.get("quota"))
+            .and_then(|quota| quota.get("credits_limit"))
+            .and_then(Value::as_f64);
+        // 无额度上限的包不参与（与聚合口径一致）。
+        let Some(limit) = limit else {
+            continue;
+        };
+        let used = pack
+            .get("usage")
+            .and_then(|usage| usage.get("credits_amount"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        // ★ 已用完的包不得参与「最早到期」。
+        if (limit - used).max(0.0) <= 0.0 {
+            continue;
+        }
+        if let Some(expire) = pack.get("expire_time").and_then(Value::as_i64) {
+            if expire > now_ts {
+                earliest = Some(match earliest {
+                    Some(current) => current.min(expire),
+                    None => expire,
+                });
+            }
+        }
+    }
+    earliest
 }
 
 /// 由 JWT 解析 uid 并取（必要时创建）设备标识（默认变体，兼容壳）。
@@ -1127,6 +1165,88 @@ mod tests {
         assert_eq!(packages[1].remaining, 0.0);
         assert!(packages[1].expired);
         assert!(!packages[1].expiring_soon);
+    }
+
+    /// ★★ 护栏（issue #7）：「最早到期」**不得**由已用完的包决定。
+    ///
+    /// 现场：某账号真正还有余额的包 10/30 才到期，但它有一条**已用尽**的包
+    /// 09/30 到期（徽标因此显示「09/30 到期」，而卡片列表里第一条是 10/30 ——
+    /// 列表只显示还有剩余的包）。旧口径把这条空包算进「最早到期」，于是该账号的
+    /// 到期紧迫度被顶到 ≈1.0，恒压过真正今天到期的账号 ⇒「老是消耗那个几十天后
+    /// 才到期的账号」（issue #7）。
+    #[test]
+    fn earliest_live_expire_ignores_fully_consumed_pack() {
+        let now = 1_000_000_i64;
+        let dead_but_soon = serde_json::json!({
+            "entitlement_base_info": { "quota": { "credits_limit": 500.0 } },
+            "usage": { "credits_amount": 500.0 }, // 剩余 0
+            "expire_time": now + 100,             // 但到期时刻很近
+        });
+        let live_but_late = serde_json::json!({
+            "entitlement_base_info": { "quota": { "credits_limit": 4_000.0 } },
+            "usage": { "credits_amount": 6.21 },
+            "expire_time": now + 30 * 86_400,
+        });
+
+        let packs = vec![dead_but_soon, live_but_late];
+        assert_eq!(
+            earliest_live_expire(&packs, now),
+            Some(now + 30 * 86_400),
+            "空包（剩余 0）不得把账号伪装成快过期"
+        );
+    }
+
+    /// 已过期的包不参与：额度已作废，不构成紧迫度（既有语义，一并钉住）。
+    #[test]
+    fn earliest_live_expire_ignores_expired_pack() {
+        let now = 1_000_000_i64;
+        let expired = serde_json::json!({
+            "entitlement_base_info": { "quota": { "credits_limit": 100.0 } },
+            "usage": { "credits_amount": 0.0 },
+            "expire_time": now - 1,
+        });
+        let live = serde_json::json!({
+            "entitlement_base_info": { "quota": { "credits_limit": 100.0 } },
+            "usage": { "credits_amount": 0.0 },
+            "expire_time": now + 5_000,
+        });
+        assert_eq!(
+            earliest_live_expire(&[expired, live], now),
+            Some(now + 5_000),
+            "已过期的包不得参与"
+        );
+    }
+
+    /// 多个活包取最早；无额度上限 / 无到期时间 / 全空包的组合返回 `None`
+    /// （`None` 在选号里对应紧迫度 0，即「无到期信息」——中性降级，不是惩罚）。
+    #[test]
+    fn earliest_live_expire_takes_min_among_live_and_none_when_no_evidence() {
+        let now = 1_000_000_i64;
+        let pack = |limit: f64, used: f64, expire: Option<i64>| {
+            let mut value = serde_json::json!({
+                "entitlement_base_info": { "quota": { "credits_limit": limit } },
+                "usage": { "credits_amount": used },
+            });
+            if let Some(expire) = expire {
+                value["expire_time"] = serde_json::json!(expire);
+            }
+            value
+        };
+
+        let live = vec![
+            pack(100.0, 0.0, Some(now + 9_000)),
+            pack(100.0, 0.0, Some(now + 3_000)),
+            pack(100.0, 0.0, None),
+        ];
+        assert_eq!(earliest_live_expire(&live, now), Some(now + 3_000));
+
+        // 无额度上限的包（可能是无限制资源）不参与统计。
+        let unlimited = vec![serde_json::json!({ "entitlement_base_info": { "quota": {} } })];
+        assert_eq!(earliest_live_expire(&unlimited, now), None);
+
+        // 全部用完 ⇒ 无紧迫度证据。
+        let all_dead = vec![pack(100.0, 100.0, Some(now + 100))];
+        assert_eq!(earliest_live_expire(&all_dead, now), None);
     }
 
     #[test]
