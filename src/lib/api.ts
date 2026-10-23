@@ -352,6 +352,8 @@ const ROUTES: Record<string, Route> = {
   runtime_logs: { method: "GET", path: "/api/logs/runtime" },
   clear_runtime_logs: { method: "POST", path: "/api/logs/runtime/clear" },
   open_runtime_logs_dir: { method: "POST", path: "/api/logs/open-dir" },
+  // issue #80：前端 invoke 计时超阈值时的诊断上报（慢命令进运行日志）。
+  report_slow_call: { method: "POST", path: "/api/logs/runtime/slow-call" },
   get_auto_backup_config: { method: "GET", path: "/api/backup/auto/config" },
   save_auto_backup_config: { method: "POST", path: "/api/backup/auto/config" },
   switch_account: { method: "POST", path: "/api/switch" },
@@ -730,8 +732,32 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     if (!DEMO_READ_COMMANDS.has(cmd)) throw new Error(demoUnavailableMessage());
     return localizeCodedStrings(screenshotDemoResponse(cmd, args)) as T;
   }
-  if (!isWebui()) return localizeCodedStrings(await invoke<T>(cmd, args)) as T;
+  if (!isWebui()) {
+    // ★ issue #80：给每次 IPC 往返计时。桌面端「界面卡死」类报障，唯一能自证的
+    // 信息就是「哪个命令耗时长」—— 而运行日志此前只记服务端事件，IPC 耗时零记录，
+    // 于是用户按请求带上来的日志总是「很干净」，反而判断不了根因。
+    // 超过 `SLOW_CALL_MS` 阈值就地把 `{cmd, ms}` 报进运行日志（fire-and-forget，
+    // 绝不 await、绝不影响本次调用结果）。
+    const startedAt = Date.now();
+    try {
+      return localizeCodedStrings(await invoke<T>(cmd, args)) as T;
+    } finally {
+      const elapsed = Date.now() - startedAt;
+      // 排除上报命令自身：否则慢上报会触发新一轮上报（递归）。
+      if (cmd !== "report_slow_call" && elapsed >= SLOW_CALL_MS) {
+        void reportSlowCall(cmd, elapsed).catch(() => {});
+      }
+    }
+  }
   return httpCall<T>(cmd, args);
+}
+
+/** 慢命令上报阈值（ms）：管理面正常命令都远低于此；超了的按「疑似占住主线程」记一条 Warn。 */
+const SLOW_CALL_MS = 3000;
+
+/** 上报一次慢命令（best-effort；失败静默 —— 诊断通道永不阻断业务）。 */
+export function reportSlowCall(cmd: string, ms: number): Promise<{ ok: boolean }> {
+  return call("report_slow_call", { cmd, ms });
 }
 
 // ---------------------------------------------------------------------------

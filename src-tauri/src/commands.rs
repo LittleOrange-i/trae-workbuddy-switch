@@ -2231,6 +2231,32 @@ pub async fn open_runtime_logs_dir() -> Result<Value, String> {
         .map_err(|error| format!("打开日志目录失败: {error}"))?
 }
 
+/// POST /api/logs/runtime/slow-call —— 前端上报「慢 IPC 命令」（best-effort 诊断，issue #80）。
+///
+/// 背景：桌面端「界面卡死」类报障，日志里唯一能定位问题的信息是「哪个命令耗时过长」，
+/// 但运行日志此前只记服务端事件 —— IPC 往返 + 命令执行的耗时**没有任何记录** ⇒
+/// 用户按请求带上来的日志总是「很干净」，反而判断不了是不是慢命令占住了主线程
+/// （issue #80 复现时正是如此：日志零条目，但窗口点不动）。
+///
+/// 前端 `call()` 现在给每次 `invoke` 计时，超过阈值就地把 `{cmd, ms}` 报到这里。
+/// 只记 Warn 一条；写失败静默（诊断通道永不阻断业务），命令名是代码标识符、
+/// 不含用户数据，故不需要额外脱敏。
+#[tauri::command]
+pub async fn report_slow_call(cmd: String, ms: u64) -> Value {
+    let cmd = cmd.trim().to_string();
+    if cmd.is_empty() || ms == 0 {
+        return json!({ "ok": false });
+    }
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        runtime_log::warn(
+            "ipc-slow",
+            format!("命令 {cmd} 耗时 {ms}ms（超过前端计时阈值）"),
+        );
+    })
+    .await;
+    json!({ "ok": true })
+}
+
 // ---------------------------------------------------------------------------
 // 开机自启（仅桌面端；webui 不提供同名接口）
 // ---------------------------------------------------------------------------
@@ -2457,9 +2483,17 @@ pub fn set_launch_at_login_enabled(_app: tauri::AppHandle, enabled: bool) -> Res
 // ---------------------------------------------------------------------------
 
 /// GET /api/gateway/config —— 网关配置。
+///
+/// `async` + `spawn_blocking`：读盘。同步执行时这段文件 IO 压在 IPC 主线程上
+/// （Linux 上即 GTK / WebKitGTK 事件循环所在线程），网关页挂载即触发，
+/// 磁盘一慢整窗发灰（issue #48 / #80 同根因类）。
 #[tauri::command]
-pub fn get_gateway_config() -> Value {
-    serde_json::to_value(GatewayConfig::load()).unwrap_or(Value::Null)
+pub async fn get_gateway_config() -> Value {
+    tauri::async_runtime::spawn_blocking(|| {
+        serde_json::to_value(GatewayConfig::load()).unwrap_or(Value::Null)
+    })
+    .await
+    .unwrap_or(Value::Null)
 }
 
 /// POST /api/gateway/config —— 保存配置并应用（启动/重启独立监听）。
@@ -2528,35 +2562,38 @@ pub fn proxy_disable() -> Result<Value, String> {
 ///
 /// **E3.1**：统一复用 [`GatewayStatusView`]（**snake_case**，与 server 的
 /// `/api/gateway/status` 契约一致），不再手工拼 camelCase。
+///
+/// `async`：本命令在**网关页挂载时**就会打（`loadAll` 的第一步），而
+/// `GatewayConfig::load` 是文件 IO、`sync_pool_with_accounts` 要读账号库 ——
+/// 同步执行等于把这些 IO 全压在 IPC 主线程上（Linux 上即 GTK / WebKitGTK
+/// 事件循环所在线程），表现为「进网关页窗口发灰、任何地方点不动」
+/// （issue #48 同款，#80 同根因类）。结构上与 server 侧
+/// `api_gateway_status` 对齐：文件 IO 走 `spawn_blocking`，锁走 `async` 拿满
+/// （取代原先的 `try_write` —— 拿不到锁就静默丢池字段，比等一等更糟）。
 #[tauri::command]
-pub fn gateway_status(app: tauri::AppHandle) -> Value {
-    let config = GatewayConfig::load();
+pub async fn gateway_status(app: tauri::AppHandle) -> Value {
+    // 读配置是文件 IO ⇒ 放 blocking 线程。
+    let config = tauri::async_runtime::spawn_blocking(GatewayConfig::load)
+        .await
+        .unwrap_or_default();
     let runtime = app.state::<gateway::GatewayRuntime>();
     let mut view = GatewayStatusView::from(&config);
     view.running = runtime.is_running();
     view.addr = runtime.addr();
     view.version = update::APP_VERSION.to_string();
     // 账号池视图（与 server 侧 `/api/gateway/status` 逐字一致）。
-    // 本命令是**同步**的，只能用 `try_write`：拿不到锁就只缺池字段，
-    // 绝不能为此阻塞 UI 线程。
     let state = gateway::shared_state();
-    if let Ok(mut pool) = state.pool.try_write() {
+    {
+        let mut pool = state.pool.write().await;
         // 先与账号库对齐（否则「刚导入、还没发过请求」的账号不在池里 ⇒ 页面显示空池）。
         buddy_switch_gateway::sync_pool_with_accounts(&mut pool);
         view.fill_pool(&pool, buddy_switch_gateway::timeutil::now_ms());
     }
-    view.last_error = state
-        .last_error
-        .try_read()
-        .ok()
-        .and_then(|guard| guard.clone());
+    view.last_error = state.last_error.read().await.clone();
 
     // ★ 顺手触发一次余额刷新（**不阻塞本命令**）——与 server 侧同一理由：
     // 账号刚在本命令里同步进池、多半「从未取过余额」，而周期循环下一轮要等满一个间隔，
     // 用户会看到「刚导入账号，积分一直是『—』」。刷新器自带 `needs_refresh` 节流。
-    //
-    // ⚠️ 本命令是**同步**的，没有 tokio 上下文 ⇒ 必须用 tauri 的 async runtime spawn，
-    // 直接 `tokio::spawn` 会 panic（no reactor running）。
     {
         let state = state.clone();
         tauri::async_runtime::spawn(async move {
@@ -2747,9 +2784,18 @@ pub async fn key_usage(id: String) -> Result<Value, String> {
 ///
 /// `inStore=false` 表示该 uid 已不在账号库里（排除项**故意保留** ——
 /// 用户意图针对「这个号」，重新导入同一 uid 仍应继续排除）。
+///
+/// `async` + `spawn_blocking`：`view` 要读排除清单文件。同步执行时这段 IO
+/// 压在 IPC 主线程上（Linux 上即 GTK / WebKitGTK 事件循环所在线程），
+/// 账号池分区挂载即触发（issue #48 / #80 同根因类）。
 #[tauri::command]
-pub fn gateway_pool_exclusions(region: Option<String>) -> Value {
-    buddy_switch_gateway::routes::pool_admin::view(parse_region(region.as_deref()))
+pub async fn gateway_pool_exclusions(region: Option<String>) -> Value {
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || {
+        buddy_switch_gateway::routes::pool_admin::view(region)
+    })
+    .await
+    .unwrap_or(Value::Null)
 }
 
 /// POST /api/gateway/pool/exclusions —— 设置 / 取消排除（幂等）。
@@ -2985,18 +3031,28 @@ pub async fn set_model_disabled(
 }
 
 /// GET /api/gateway/logs —— 最近 N 条请求日志（元数据）。
+///
+/// `async` + `spawn_blocking`：`list` 要读进程内日志环（大日志时还有序列化）。
+/// 同步执行时压在 IPC 主线程上（Linux 上即 GTK / WebKitGTK 事件循环所在线程），
+/// 网关页挂载即触发（issue #48 / #80 同根因类）。
 #[tauri::command]
-pub fn get_gateway_logs() -> Value {
+pub async fn get_gateway_logs() -> Value {
     let state = gateway::shared_state();
-    json!({ "logs": state.log.list() })
+    tauri::async_runtime::spawn_blocking(move || json!({ "logs": state.log.list() }))
+        .await
+        .unwrap_or_else(|_| json!({ "logs": [] }))
 }
 
 /// POST /api/gateway/logs/clear —— 清空日志。
 #[tauri::command]
-pub fn clear_gateway_logs() -> Value {
+pub async fn clear_gateway_logs() -> Value {
     let state = gateway::shared_state();
-    state.log.clear();
-    json!({ "ok": true })
+    tauri::async_runtime::spawn_blocking(move || {
+        state.log.clear();
+        json!({ "ok": true })
+    })
+    .await
+    .unwrap_or_else(|_| json!({ "ok": false }))
 }
 
 /// POST /api/gateway/probe/start —— 启动一轮「账号 × 模型」限流探测（异步作业）。
@@ -3036,17 +3092,25 @@ pub async fn probe_start(
 ///
 /// `scope` 为**必填**（fail-closed）：作业槽是进程级全局，快照本身与作用域无关，但命令面
 /// 统一带 `scope`，未知 / 拼错的作用域一律拒绝（不静默接受）。
+///
+/// `async` + `spawn_blocking`：探测进行中前端每 `PROBE_POLL_MS` 轮询一次，
+/// 同步执行等于周期性占住 IPC 主线程（Linux 上即 GTK / WebKitGTK 事件循环
+/// 所在线程）—— issue #48 / #80 同根因类。
 #[tauri::command]
-pub fn probe_status(scope: String) -> Result<Value, String> {
+pub async fn probe_status(scope: String) -> Result<Value, String> {
     resolve_scope_param(Some(&scope))?;
-    Ok(buddy_switch_gateway::model_probe::status())
+    tauri::async_runtime::spawn_blocking(|| buddy_switch_gateway::model_probe::status())
+        .await
+        .map_err(|error| format!("读取探测状态失败: {error}"))
 }
 
 /// POST /api/gateway/probe/cancel —— 请求取消（逐格检查；已探到的格保留）。
 #[tauri::command]
-pub fn probe_cancel(scope: String) -> Result<Value, String> {
+pub async fn probe_cancel(scope: String) -> Result<Value, String> {
     resolve_scope_param(Some(&scope))?;
-    Ok(buddy_switch_gateway::model_probe::cancel())
+    tauri::async_runtime::spawn_blocking(|| buddy_switch_gateway::model_probe::cancel())
+        .await
+        .map_err(|error| format!("取消探测失败: {error}"))
 }
 
 /// GET /api/gateway/probe/ledger —— 某作用域的**实测台账**（跨重启累积）。
@@ -3055,10 +3119,18 @@ pub fn probe_cancel(scope: String) -> Result<Value, String> {
 /// **最近一次**的实判（落盘 `probe_results.json`，按作用域隔离）。
 ///
 /// ★ 账号页「客户端限流」重启后仍要看到实测结论 ⇒ 必须读它，而不是只读进程内 `probeCells`。
+///
+/// `async` + `spawn_blocking`：读盘（台账文件）。同步执行时这段 IO 压在
+/// IPC 主线程上（Linux 上即 GTK / WebKitGTK 事件循环所在线程）——
+/// issue #48 / #80 同根因类。
 #[tauri::command]
-pub fn probe_ledger(scope: String) -> Result<Value, String> {
+pub async fn probe_ledger(scope: String) -> Result<Value, String> {
     resolve_scope_param(Some(&scope))?;
-    Ok(buddy_switch_gateway::model_probe::ledger_snapshot(&scope))
+    tauri::async_runtime::spawn_blocking(move || {
+        buddy_switch_gateway::model_probe::ledger_snapshot(&scope)
+    })
+    .await
+    .map_err(|error| format!("读取探测台账失败: {error}"))
 }
 
 // ===========================================================================
@@ -3570,10 +3642,18 @@ pub async fn trae_reset_device(variant: Option<String>) -> Result<Value, String>
 // create_response}` 唯一产出（`MEMORY.md §二`：两条通道不得各自拼装）。
 
 /// GET /api/trae/gateway/config —— Trae 网关配置。
+///
+/// `async` + `spawn_blocking`：读盘。同步执行时这段文件 IO 压在 IPC 主线程上
+/// （Linux 上即 GTK / WebKitGTK 事件循环所在线程），Trae 网关页挂载即触发
+/// （issue #48 / #80 同根因类）。
 #[tauri::command]
-pub fn get_trae_gateway_config() -> Value {
-    serde_json::to_value(buddy_switch_gateway::trae::TraeGatewayConfig::load())
-        .unwrap_or(Value::Null)
+pub async fn get_trae_gateway_config() -> Value {
+    tauri::async_runtime::spawn_blocking(|| {
+        serde_json::to_value(buddy_switch_gateway::trae::TraeGatewayConfig::load())
+            .unwrap_or(Value::Null)
+    })
+    .await
+    .unwrap_or(Value::Null)
 }
 
 /// POST /api/trae/gateway/config —— 保存配置并应用（启动/重启独立监听）。
@@ -3878,18 +3958,28 @@ pub async fn trae_launch_client(variant: Option<String>) -> Result<Value, String
 }
 
 /// GET /api/trae/gateway/logs —— 最近 N 条请求日志（元数据）。
+///
+/// `async` + `spawn_blocking`：Trae 网关页挂载即触发；同步执行时这段 IO
+/// 压在 IPC 主线程上（Linux 上即 GTK / WebKitGTK 事件循环所在线程）——
+/// issue #48 / #80 同根因类。
 #[tauri::command]
-pub fn get_trae_gateway_logs() -> Value {
+pub async fn get_trae_gateway_logs() -> Value {
     let state = trae_gateway::shared_state();
-    json!({ "logs": state.log.list() })
+    tauri::async_runtime::spawn_blocking(move || json!({ "logs": state.log.list() }))
+        .await
+        .unwrap_or_else(|_| json!({ "logs": [] }))
 }
 
 /// POST /api/trae/gateway/logs/clear —— 清空日志。
 #[tauri::command]
-pub fn clear_trae_gateway_logs() -> Value {
+pub async fn clear_trae_gateway_logs() -> Value {
     let state = trae_gateway::shared_state();
-    state.log.clear();
-    json!({ "ok": true })
+    tauri::async_runtime::spawn_blocking(move || {
+        state.log.clear();
+        json!({ "ok": true })
+    })
+    .await
+    .unwrap_or_else(|_| json!({ "ok": false }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4969,10 +5059,18 @@ pub async fn qoder_usage(scope: String, days: Option<u32>) -> Result<Value, Stri
 // 唯一产出（`MEMORY.md §二`：两条通道不得各自拼装）。
 
 /// GET /api/qoder/gateway/config —— Qoder 网关配置（**全局唯一**，不分区域）。
+///
+/// `async` + `spawn_blocking`：读盘。同步执行时这段文件 IO 压在 IPC 主线程上
+/// （Linux 上即 GTK / WebKitGTK 事件循环所在线程），Qoder 网关页挂载即触发
+/// （issue #48 / #80 同根因类）。
 #[tauri::command]
-pub fn get_qoder_gateway_config() -> Value {
-    serde_json::to_value(buddy_switch_gateway::qoder::QoderGatewayConfig::load())
-        .unwrap_or(Value::Null)
+pub async fn get_qoder_gateway_config() -> Value {
+    tauri::async_runtime::spawn_blocking(|| {
+        serde_json::to_value(buddy_switch_gateway::qoder::QoderGatewayConfig::load())
+            .unwrap_or(Value::Null)
+    })
+    .await
+    .unwrap_or(Value::Null)
 }
 
 /// POST /api/qoder/gateway/config —— 保存配置并应用（启动 / 重启独立监听）。
@@ -5226,16 +5324,26 @@ pub async fn delete_qoder_api_key(id: String) -> Result<Value, String> {
 }
 
 /// GET /api/qoder/gateway/logs —— 最近 N 条请求日志（元数据；含 `region` 归属）。
+///
+/// `async` + `spawn_blocking`：Qoder 网关页挂载即触发；同步执行时这段 IO
+/// 压在 IPC 主线程上（Linux 上即 GTK / WebKitGTK 事件循环所在线程）——
+/// issue #48 / #80 同根因类。
 #[tauri::command]
-pub fn get_qoder_gateway_logs() -> Value {
+pub async fn get_qoder_gateway_logs() -> Value {
     let state = qoder_gateway::shared_state();
-    json!({ "logs": state.log.list() })
+    tauri::async_runtime::spawn_blocking(move || json!({ "logs": state.log.list() }))
+        .await
+        .unwrap_or_else(|_| json!({ "logs": [] }))
 }
 
 /// POST /api/qoder/gateway/logs/clear —— 清空日志。
 #[tauri::command]
-pub fn clear_qoder_gateway_logs() -> Value {
+pub async fn clear_qoder_gateway_logs() -> Value {
     let state = qoder_gateway::shared_state();
-    state.log.clear();
-    json!({ "ok": true })
+    tauri::async_runtime::spawn_blocking(move || {
+        state.log.clear();
+        json!({ "ok": true })
+    })
+    .await
+    .unwrap_or_else(|_| json!({ "ok": false }))
 }

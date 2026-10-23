@@ -226,6 +226,7 @@ fn api_routes() -> Router {
         // ⚠️ 与 `src-tauri/src/commands.rs` 的三条同名命令**一一对应**（刻意不去重）。
         .route("/api/logs/runtime", get(api_runtime_logs))
         .route("/api/logs/runtime/clear", post(api_clear_runtime_logs))
+        .route("/api/logs/runtime/slow-call", post(api_report_slow_call))
         .route("/api/logs/open-dir", post(api_open_logs_dir))
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
@@ -1981,6 +1982,28 @@ async fn api_open_logs_dir() -> Response {
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
     }
+}
+
+/// POST /api/logs/runtime/slow-call —— 前端上报「慢 IPC 命令」（issue #80 诊断通道）。
+///
+/// 与桌面端 `commands::report_slow_call` 同形：webui 走 HTTP，慢的是整条请求链路
+/// （fetch 往返 + handler），同样值得留一条。命令名是代码标识符、不含用户数据。
+async fn api_report_slow_call(Json(body): Json<Value>) -> Response {
+    let cmd = body
+        .get("cmd")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let ms = body.get("ms").and_then(Value::as_u64).unwrap_or(0);
+    if cmd.is_empty() || ms == 0 {
+        return json_err("参数不完整（cmd / ms）".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let _ = tokio::task::spawn_blocking(move || {
+        runtime_log::warn("ipc-slow", format!("命令 {cmd} 耗时 {ms}ms（超过前端计时阈值）"));
+    })
+    .await;
+    json_ok(json!({ "ok": true }))
 }
 
 /// GET /api/backup/auto/list —— 列出自动备份 / 导入前快照（最新在前）。

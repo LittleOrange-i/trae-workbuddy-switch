@@ -545,10 +545,12 @@ pub fn run() {
             commands::relaunch_app,
             commands::get_app_prefs,
             commands::set_app_prefs,
-            // 运行日志（本工具自身，排查问题用）：读取 / 清空 / 打开目录。
+            // 运行日志（本工具自身，排查问题用）：读取 / 清空 / 打开目录 / 慢命令上报。
             commands::runtime_logs,
             commands::clear_runtime_logs,
             commands::open_runtime_logs_dir,
+            // 前端 invoke 计时超阈值时的诊断上报（issue #80：卡死类报障需要「哪个命令慢」）。
+            commands::report_slow_call,
             commands::get_launch_at_login_enabled,
             commands::set_launch_at_login_enabled,
             commands::get_gateway_config,
