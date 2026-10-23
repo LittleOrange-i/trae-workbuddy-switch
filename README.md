@@ -18,13 +18,7 @@
 
 <p align="center">
   <a href="README.cn.md">简体中文</a> ·
-  <strong>English</strong> ·
-  <a href="README.ja.md">日本語</a> ·
-  <a href="README.ko.md">한국어</a> ·
-  <a href="README.ru.md">Русский</a> ·
-  <a href="README.fr.md">Français</a> ·
-  <a href="README.es.md">Español</a> ·
-  <a href="README.pt.md">Português</a>
+  <strong>English</strong>
 </p>
 
 # Buddy Switch
@@ -433,22 +427,6 @@ The full index lives in [docs/README.md](docs/README.md) — split by lifecycle:
 
 Full guide (what to work on, PR checklist, code conventions): **[CONTRIBUTING.en.md](CONTRIBUTING.en.md)** ([简体中文](CONTRIBUTING.md)).
 
-## Support the project
-
-- ☕ **Buy the author a drink** (entirely optional, no feature is gated behind it, and it grants no commercial licence)
-
-<table>
-  <thead>
-    <tr><th>WeChat Pay</th><th>Alipay</th></tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><img src="docs/images/donate-wechat.png" alt="WeChat Pay QR" width="240" /></td>
-      <td><img src="docs/images/donate-alipay.jpg" alt="Alipay QR" width="240" /></td>
-    </tr>
-  </tbody>
-</table>
-
 ## Acknowledgements
 
 - [changexbc/workbuddy-switch](https://github.com/changexbc/workbuddy-switch) — for the WorkBuddy account data format and the multi-account switching approach.
@@ -458,7 +436,7 @@ Each project follows its own license. This project is an independent implementat
 
 ## Disclaimer
 
-Full text in **[docs/policies/DISCLAIMER.en.md](docs/policies/DISCLAIMER.en.md)** ([简体中文](docs/policies/DISCLAIMER.md)), seven sections: unofficial third-party tool; terms of service and compliance; data writes and backups; risks of automated behaviour; API gateway exposure; provided "as is"; restrictions on use (no commercial use, no circumventing billing). Using the project means you have read and agree to them; if not, stop using it and uninstall.
+Full text in **[docs/policies/DISCLAIMER.en.md](docs/policies/DISCLAIMER.en.md)** ([简体中文](docs/policies/DISCLAIMER.md)), seven sections: unofficial third-party tool; terms of service and compliance; data writes and backups; risks of automated behaviour; API gateway exposure; provided "as is"; restrictions on use (no commercial use, no resale or sharing of quota). Using the project means you have read and agree to them; if not, stop using it and uninstall.
 
 ## License
 

@@ -18,13 +18,7 @@
 
 <p align="center">
   <strong>简体中文</strong> ·
-  <a href="README.md">English</a> ·
-  <a href="README.ja.md">日本語</a> ·
-  <a href="README.ko.md">한국어</a> ·
-  <a href="README.ru.md">Русский</a> ·
-  <a href="README.fr.md">Français</a> ·
-  <a href="README.es.md">Español</a> ·
-  <a href="README.pt.md">Português</a>
+  <a href="README.md">English</a>
 </p>
 
 一个**本地运行**的多账号工作台：把 **WorkBuddy / CodeBuddy / TraeWork / Qoder** 四条产品线、**6 个作用域**的账号收在一处——扫码登录、一键切号、签到与积分、用量统计、会话副本同步，并把模型额度以 OpenAI / Anthropic 兼容接口开放给本机其它 AI 工具。所有数据只放在你自己的机器上。
@@ -425,27 +419,11 @@ npm/                     # npm 包（尚未发布）
 | --- | --- |
 | 🐞 **报 Bug**（附版本 + 日志截图） | [新建 Issue](https://github.com/NextAgentX/qoder-trae-workbuddy-switch/issues/new) |
 | 🧩 **接新平台**（Galaxy / 其它 IDE） | 平台差异只在 `src/lib/platforms/registry.ts` 与 core 的 `product.rs` 各声明一次，页面组件不用改 |
-| 🌍 **修翻译 / 补语言** | 界面文案在 `src/locales/domains/*.zh.ts` ↔ `*.en.ts` 一一对应；README 八语种也欢迎校订 |
+| 🌍 **修翻译 / 补语言** | 界面文案在 `src/locales/domains/*.zh.ts` ↔ `*.en.ts` 一一对应；README 中英两版也欢迎校订 |
 | 📸 **更新截图** | `scripts/gen-readme-shots.mjs` 一条命令重拍全部浅/深色图（见文件头注释） |
 | 🧪 **补测试** | 仓里大量护栏测试都是贡献者补的；先读 `docs/guides/DEVELOPMENT.md` 的门禁清单 |
 
 完整指引（能做什么、PR 自检清单、代码约定）见 **[CONTRIBUTING.md](CONTRIBUTING.md)**（[English](CONTRIBUTING.en.md)）。
-
-## 支持这个项目
-
-- ☕ **请作者喝杯饮料**（完全自愿，不影响任何功能，也不构成商业授权）
-
-<table>
-  <thead>
-    <tr><th>微信支付</th><th>支付宝</th></tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><img src="docs/images/donate-wechat.png" alt="微信支付收款码" width="240" /></td>
-      <td><img src="docs/images/donate-alipay.jpg" alt="支付宝收款码" width="240" /></td>
-    </tr>
-  </tbody>
-</table>
 
 ## 致谢
 
@@ -456,7 +434,7 @@ npm/                     # npm 包（尚未发布）
 
 ## 免责声明
 
-完整条款见 **[docs/policies/DISCLAIMER.md](docs/policies/DISCLAIMER.md)**（[English](docs/policies/DISCLAIMER.en.md)），共 7 条：非官方第三方工具、服务条款与合规自理、数据写入与备份、自动化行为风险、API 网关暴露风险、按「原样」提供、用途限制（不得商用、不得规避计费）。使用即表示已阅读并同意；如不同意，请立即停止使用并卸载。
+完整条款见 **[docs/policies/DISCLAIMER.md](docs/policies/DISCLAIMER.md)**（[English](docs/policies/DISCLAIMER.en.md)），共 7 条：非官方第三方工具、服务条款与合规自理、数据写入与备份、自动化行为风险、API 网关暴露风险、按「原样」提供、用途限制（不得商用、不得转售或共享额度）。使用即表示已阅读并同意；如不同意，请立即停止使用并卸载。
 
 ## 许可
 
