@@ -275,7 +275,7 @@ Identical item for item across all three platforms: **Overview · Accounts · Us
 | Account store / sign-in / local import | ✅ QR + import | ✅ Web login + JWT | ✅ Device code + PAT |
 | Program slots | ✅ 5 (4 switchable + 1 read-only probe) | ✅ 1 (merged client) | ✅ 2 (desktop / CLI) |
 | Check-in / credits | ✅ incl. auto-travel, auto-rotation | ✅ | ✅ daily check-in + plan / quota |
-| Usage analytics | ✅ tokens + credits | ✅ tokens + credits | ⏳ data source pending |
+| Usage analytics | ✅ tokens + credits | ✅ tokens + credits | ✅ credits only — the client stores token counts as 0 |
 | Session replica sync | ✅ content fingerprint + additive | — | — |
 | Quota gateway | ✅ `:57891` | ✅ `:57894` | ✅ `:57895` |
 
@@ -322,7 +322,7 @@ The **unified gateway** solves "the same model name overwriting itself across pl
 | Bare model name (no prefix) | **400** with the list of valid prefixes (no guessing a default and silently hitting the wrong pool) |
 | Namespace parsing | **Whole-segment exact match only** (`trae` / `traework` / `traecode` are prefixes of one another) |
 | One key, many platforms | A single `sk-uni-` key can authorize several platforms at once |
-| `/v1/responses` on `trae-*` | **501** — never a silent downgrade to chat |
+| `/v1/responses` | Served for every namespace (Trae joined on 2026-10-22; Qoder translates to chat internally) |
 | Default state | **Off**; enable it in the Gateway page's "Unified gateway" type |
 
 > Architecture: [UNIFIED-GATEWAY-ARCH.md](docs/specs/UNIFIED-GATEWAY-ARCH.md) · Client snippets: [guides/GATEWAY-CLIENT-INTEGRATION.md](docs/guides/GATEWAY-CLIENT-INTEGRATION.md)
@@ -335,6 +335,9 @@ Schedules support **minute-level** times (e.g. `09:37`), multiple times per task
 | --- | --- |
 | WorkBuddy (6) | Check-in · cat travel · activity map · token keepalive · back-to-school · night owl |
 | Trae (2) | Check-in · automatic JWT renewal |
+| Qoder (2) | Check-in · token keepalive |
+
+Auto-rotation (WorkBuddy only) is a separate background loop, not a schedule entry — see below.
 
 <details>
 <summary><b>Auto-rotation policy (WorkBuddy, prevents credit expiry)</b></summary>
@@ -364,6 +367,7 @@ A background loop sets the account used by **subsequent CodeBuddy CLI launches**
 | Client settings hosting | Reads and writes the upstream client's own `settings.json`: six-slot spec table, format fingerprint, minimal byte-level patch, backup / restore / diff |
 | Session overlay (desktop only) | A small always-on-top window with cross-source task states; read-only, click to focus the original session |
 | Client session watching (off by default) | Installs a hook into WorkBuddy's `settings.json` and streams task states into the overlay (receiver `127.0.0.1:57893`) |
+| Runtime log | This tool's **own** log (`~/.buddy-switch/logs/runtime-YYYY-MM-DD.log`), readable in Settings → logs with level / date / keyword filters, copy, open-folder and clear. Kept 7 days, capped at 4 MiB per part and 4 parts per day; credentials are redacted before writing. Set `BUDDY_SWITCH_LOG_LEVEL=debug` (then restart) for per-request detail |
 
 </details>
 
@@ -373,6 +377,7 @@ A background loop sets the account used by **subsequent CodeBuddy CLI launches**
 - Account stores are per scope (e.g. `accounts.json` / `accounts.global.json`, `trae/checkin_accounts*.json`).
 - Exported backups contain **no tokens by default**; plaintext tokens require an explicit checkbox plus a second confirmation, with a warning that the file can be used to sign in directly.
 - Gateway keys store only a hash and a prefix; **local data is never committed**, and token patterns are scanned before release.
+- The runtime log stays on this machine and **redacts credentials before writing** (token parameters, `Bearer` values and JWTs). Local paths are kept as-is, since that is what makes a bug report actionable.
 
 ## Development
 

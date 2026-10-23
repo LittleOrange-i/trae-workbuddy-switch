@@ -273,7 +273,7 @@ buddy-switch version      # 版本号
 | 账号库 / 登录 / 本机导入 | ✅ 扫码 + 导入 | ✅ 网页登录 + JWT | ✅ 设备码 + PAT |
 | 一键切程序位 | ✅ 5 个（4 可切换 + 1 只读探测） | ✅ 1 个（合并客户端） | ✅ 2 个（桌面版 / CLI） |
 | 签到 / 积分 | ✅ 含自动旅行、自动轮换 | ✅ | ✅ 每日活动领取（campaigns）+ 套餐 / 额度 |
-| 用量统计 | ✅ Token + 积分 | ✅ Token + 积分 | ⏳ 数据源待接入 |
+| 用量统计 | ✅ Token + 积分 | ✅ Token + 积分 | ✅ 仅积分（客户端本地把 token 计数恒记为 0） |
 | 会话副本同步 | ✅ 内容指纹 + 加法同步 | — | — |
 | 模型额度网关 | ✅ `:57891` | ✅ `:57894` | ✅ `:57895` |
 
@@ -320,7 +320,7 @@ flowchart LR
 | 裸模型名（不带前缀） | **一律 400**，并列出可用前缀（不猜默认值，避免静默走错账号池） |
 | 命名空间解析 | **只做整段精确匹配**（`trae` / `traework` / `traecode` 互为前缀） |
 | 一把 Key 跨平台 | 同一个 `sk-uni-` Key 可同时授权多个平台 |
-| `trae-*` 的 `/v1/responses` | 返回 **501**，不静默降级到 chat |
+| `/v1/responses` | 所有命名空间都可用（Trae 于 2026-10-22 补齐；Qoder 内部翻译成 chat） |
 | 默认状态 | **默认关**，需在网关页「统一网关」分区手动启用 |
 
 > 架构与决策：[UNIFIED-GATEWAY-ARCH.md](docs/specs/UNIFIED-GATEWAY-ARCH.md) · 接入片段：[guides/GATEWAY-CLIENT-INTEGRATION.md](docs/guides/GATEWAY-CLIENT-INTEGRATION.md)
@@ -334,6 +334,8 @@ flowchart LR
 | WorkBuddy（6 类） | 签到 · 猫猫旅行 · 活跃地图 · Token 保活 · 开学季 · 夜猫子 |
 | Trae（2 类） | 签到 · JWT 自动续期 |
 | Qoder（2 类） | 签到 · 令牌保活 |
+
+自动轮换（仅 WorkBuddy）是**独立的后台循环**，不是排程表里的一项——见下。
 
 <details>
 <summary><b>自动轮换策略（WorkBuddy，防积分过期）</b></summary>
@@ -363,6 +365,7 @@ flowchart LR
 | 客户端设置托管 | 统一读写上游客户端自己的 `settings.json`：6 槽位规格表 + 格式指纹 + 字节级最小补丁 + 备份 / 恢复 / 差异对比 |
 | 会话悬浮窗（仅桌面端） | 独立小窗展示跨来源的任务状态，只读、可点回原会话 |
 | 客户端会话监听（默认关） | 在 WorkBuddy `settings.json` 装 hook，把任务状态实时送进悬浮窗（接收端 `127.0.0.1:57893`） |
+| 运行日志 | 本工具**自己**的日志（`~/.buddy-switch/logs/runtime-YYYY-MM-DD.log`），在「设置 → 日志」里按级别 / 日期 / 关键字筛选、复制、打开目录、清空。保留 7 天，单文件 4 MiB、每天最多 4 个分片；写盘前脱敏凭据。`BUDDY_SWITCH_LOG_LEVEL=debug` 后重启可看逐请求明细 |
 
 </details>
 
@@ -372,6 +375,7 @@ flowchart LR
 - 账号库按作用域分家（如 `accounts.json` / `accounts.global.json`、`trae/checkin_accounts*.json`）。
 - 导出备份**默认不含 token**；显式勾选并二次确认后才会写明文，页面同步警告该文件可直接用于登录。
 - 网关 Key 只存哈希与前缀；**仓库不提交本地数据**，发布前会扫描 token 模式。
+- 运行日志留在本机，且**写盘前脱敏凭据**（token 参数、`Bearer` 值、JWT）。本机路径照原样保留——那正是让一份反馈可定位的关键。
 
 ## 开发
 

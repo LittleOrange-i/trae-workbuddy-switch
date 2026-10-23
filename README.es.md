@@ -275,7 +275,7 @@ Idénticos punto por punto en las tres plataformas: **Resumen · Cuentas · Uso 
 | Almacén de cuentas / inicio / importación | ✅ QR + importación | ✅ inicio web + JWT | ✅ código de dispositivo + PAT |
 | Ranuras de programa | ✅ 5 (4 conmutables + 1 solo lectura) | ✅ 1 (cliente fusionado) | ✅ 2 (escritorio / CLI) |
 | Registros / créditos | ✅ con viaje automático y rotación | ✅ | ✅ registro diario + plan / cuota |
-| Analítica de uso | ✅ tokens + créditos | ✅ tokens + créditos | ⏳ origen de datos pendiente |
+| Analítica de uso | ✅ tokens + créditos | ✅ tokens + créditos | ✅ solo créditos (el cliente siempre guarda 0 tokens) |
 | Sincronización de copias | ✅ huella de contenido + aditiva | — | — |
 | Pasarela de cuota | ✅ `:57891` | ✅ `:57894` | ✅ `:57895` |
 
@@ -322,7 +322,7 @@ La **pasarela unificada** resuelve el problema de modelos homónimos que se pisa
 | Nombre de modelo sin prefijo | **Siempre 400** con la lista de prefijos válidos (sin adivinar un valor por defecto y acabar en el pool equivocado) |
 | Análisis del espacio de nombres | **Solo coincidencia exacta del segmento completo** (`trae` / `traework` / `traecode` son prefijos entre sí) |
 | Una clave, varias plataformas | Una misma clave `sk-uni-` puede autorizar varias plataformas |
-| `/v1/responses` en `trae-*` | **501**, nunca una degradación silenciosa a chat |
+| `/v1/responses` | Disponible para todos los espacios de nombres (Trae desde 2026-10-22; Qoder lo traduce a chat) |
 | Estado por defecto | **Apagada**; se activa en la sección «Pasarela unificada» de la página de pasarela |
 
 > Arquitectura: [UNIFIED-GATEWAY-ARCH.md](docs/specs/UNIFIED-GATEWAY-ARCH.md) · Fragmentos de configuración: [guides/GATEWAY-CLIENT-INTEGRATION.md](docs/guides/GATEWAY-CLIENT-INTEGRATION.md)
@@ -335,6 +335,9 @@ Las programaciones admiten hora **con precisión de minuto** (p. ej. `09:37`), v
 | --- | --- |
 | WorkBuddy (6) | Registro · viaje del gato · mapa de actividad · keepalive del token · vuelta al cole · ave nocturna |
 | Trae (2) | Registro · renovación automática de JWT |
+| Qoder (2) | Registro · mantenimiento del token |
+
+La rotación automática (solo WorkBuddy) es un **bucle de fondo independiente**, no una entrada de la programación; ver abajo.
 
 <details>
 <summary><b>Política de rotación automática (WorkBuddy, evita caducar créditos)</b></summary>
@@ -364,6 +367,7 @@ Un bucle en segundo plano fija la cuenta por defecto de **los siguientes arranqu
 | Alojamiento de ajustes del cliente | Lee y escribe el `settings.json` del cliente de origen: tabla de seis ranuras, huella de formato, parche mínimo a nivel de byte, copia / restauración / diferencias |
 | Ventana de sesiones (solo escritorio) | Ventana pequeña con estados de tareas de varias fuentes; solo lectura, clic para volver a la sesión original |
 | Vigilancia de sesiones del cliente (apagada por defecto) | Instala un hook en el `settings.json` de WorkBuddy y envía los estados a la ventana (receptor `127.0.0.1:57893`) |
+| Registro de ejecución | El registro **propio** de esta herramienta (`~/.buddy-switch/logs/runtime-YYYY-MM-DD.log`): en «Ajustes → Registro» se filtra por nivel / fecha / palabra clave, se copia, se abre la carpeta y se borra. Se conserva 7 días, 4 MiB por archivo y 4 partes al día; las credenciales se enmascaran antes de escribir. `BUDDY_SWITCH_LOG_LEVEL=debug` y reiniciar para el detalle por petición |
 
 </details>
 

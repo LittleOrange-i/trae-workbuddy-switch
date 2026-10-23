@@ -275,7 +275,7 @@ Identiques point par point sur les trois plateformes : **Vue d'ensemble · Compt
 | Store de comptes / connexion / import | ✅ QR + import | ✅ connexion web + JWT | ✅ code d'appareil + PAT |
 | Emplacements de programme | ✅ 5 (4 commutables + 1 lecture seule) | ✅ 1 (client fusionné) | ✅ 2 (desktop / CLI) |
 | Pointages / crédits | ✅ dont voyage auto et rotation auto | ✅ | ✅ pointage quotidien + offre / quota |
-| Analyse d'usage | ✅ jetons + crédits | ✅ jetons + crédits | ⏳ source de données à brancher |
+| Analyse d'usage | ✅ jetons + crédits | ✅ jetons + crédits | ✅ crédits uniquement (le client enregistre toujours 0 jeton) |
 | Synchronisation des copies | ✅ empreinte de contenu + additive | — | — |
 | Passerelle de quota | ✅ `:57891` | ✅ `:57894` | ✅ `:57895` |
 
@@ -322,7 +322,7 @@ La **passerelle unifiée** résout le problème des modèles homonymes qui s'éc
 | Nom de modèle sans préfixe | **400 systématique** avec la liste des préfixes valides (aucune valeur par défaut devinée, donc aucun basculement silencieux vers un mauvais pool) |
 | Analyse de l'espace de noms | **Correspondance exacte du segment entier** (`trae` / `traework` / `traecode` sont préfixes l'un de l'autre) |
 | Une clé, plusieurs plateformes | Une même clé `sk-uni-` peut autoriser plusieurs plateformes |
-| `/v1/responses` sur `trae-*` | **501**, jamais de repli silencieux vers chat |
+| `/v1/responses` | Disponible pour tous les espaces de noms (Trae depuis le 2026-10-22 ; Qoder traduit en chat) |
 | État par défaut | **Désactivée** ; à activer dans la section « Passerelle unifiée » de la page Passerelle |
 
 > Architecture : [UNIFIED-GATEWAY-ARCH.md](docs/specs/UNIFIED-GATEWAY-ARCH.md) · Extraits de configuration : [guides/GATEWAY-CLIENT-INTEGRATION.md](docs/guides/GATEWAY-CLIENT-INTEGRATION.md)
@@ -335,6 +335,9 @@ Les planifications acceptent une heure **à la minute près** (ex. `09:37`), plu
 | --- | --- |
 | WorkBuddy (6) | Pointage · voyage du chat · carte d'activité · keepalive du jeton · rentrée · oiseau de nuit |
 | Trae (2) | Pointage · renouvellement automatique du JWT |
+| Qoder (2) | Pointage · maintien du jeton |
+
+La rotation automatique (WorkBuddy uniquement) est une **boucle d'arrière-plan distincte**, pas une entrée du planning — voir ci-dessous.
 
 <details>
 <summary><b>Politique de rotation automatique (WorkBuddy, anti-expiration des crédits)</b></summary>
@@ -364,6 +367,7 @@ Une boucle d'arrière-plan définit le compte par défaut des **prochains lancem
 | Hébergement des réglages client | Lit et écrit le `settings.json` du client amont : table de six emplacements, empreinte de format, patch minimal octet par octet, sauvegarde / restauration / comparaison |
 | Fenêtre de sessions (bureau uniquement) | Petite fenêtre toujours visible avec les états de tâches multi-sources ; lecture seule, clic pour revenir à la session d'origine |
 | Surveillance des sessions client (désactivée par défaut) | Installe un hook dans le `settings.json` de WorkBuddy et pousse les états de tâches vers la fenêtre (récepteur `127.0.0.1:57893`) |
+| Journal d'exécution | Le journal **propre** à cet outil (`~/.buddy-switch/logs/runtime-YYYY-MM-DD.log`) : dans « Réglages → Journal », filtrage par niveau / date / mot-clé, copie, ouverture du dossier et effacement. Conservé 7 jours, 4 MiB par fichier et 4 parties par jour ; les identifiants sont masqués avant écriture. `BUDDY_SWITCH_LOG_LEVEL=debug` puis redémarrage pour le détail par requête |
 
 </details>
 

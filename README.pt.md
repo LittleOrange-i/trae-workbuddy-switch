@@ -275,7 +275,7 @@ Idênticos ponto a ponto nas três plataformas: **Visão geral · Contas · Uso 
 | Base de contas / login / importação | ✅ QR + importação | ✅ login web + JWT | ✅ código de dispositivo + PAT |
 | Slots de programa | ✅ 5 (4 alternáveis + 1 somente leitura) | ✅ 1 (cliente fundido) | ✅ 2 (desktop / CLI) |
 | Check-in / créditos | ✅ com viagem automática e rotação | ✅ | ✅ check-in diário + plano / cota |
-| Análise de uso | ✅ tokens + créditos | ✅ tokens + créditos | ⏳ fonte de dados pendente |
+| Análise de uso | ✅ tokens + créditos | ✅ tokens + créditos | ✅ apenas créditos (o cliente sempre grava 0 tokens) |
 | Sincronização de cópias | ✅ impressão de conteúdo + aditiva | — | — |
 | Gateway de cota | ✅ `:57891` | ✅ `:57894` | ✅ `:57895` |
 
@@ -322,7 +322,7 @@ O **gateway unificado** resolve o problema de modelos homônimos se sobrescreven
 | Nome de modelo sem prefixo | **Sempre 400** com a lista de prefixos válidos (sem adivinhar um padrão e cair no pool errado em silêncio) |
 | Análise do namespace | **Somente correspondência exata do segmento inteiro** (`trae` / `traework` / `traecode` são prefixos entre si) |
 | Uma chave, várias plataformas | A mesma chave `sk-uni-` pode autorizar várias plataformas |
-| `/v1/responses` em `trae-*` | **501**, nunca rebaixamento silencioso para chat |
+| `/v1/responses` | Disponível para todos os namespaces (Trae desde 2026-10-22; Qoder traduz para chat) |
 | Estado padrão | **Desligado**; ative na seção «Gateway unificado» da página de gateway |
 
 > Arquitetura: [UNIFIED-GATEWAY-ARCH.md](docs/specs/UNIFIED-GATEWAY-ARCH.md) · Trechos de configuração: [guides/GATEWAY-CLIENT-INTEGRATION.md](docs/guides/GATEWAY-CLIENT-INTEGRATION.md)
@@ -335,6 +335,9 @@ Os agendamentos aceitam horário **com precisão de minuto** (ex.: `09:37`), vá
 | --- | --- |
 | WorkBuddy (6) | Check-in · viagem do gato · mapa de atividade · keepalive do token · volta às aulas · coruja noturna |
 | Trae (2) | Check-in · renovação automática de JWT |
+| Qoder (2) | Check-in · manutenção do token |
+
+A rotação automática (apenas WorkBuddy) é um **laço em segundo plano independente**, não uma entrada do agendamento — veja abaixo.
 
 <details>
 <summary><b>Política de rotação automática (WorkBuddy, evita expirar créditos)</b></summary>
@@ -364,6 +367,7 @@ Um laço em segundo plano define a conta padrão das **próximas inicializaçõe
 | Hospedagem de configurações do cliente | Lê e grava o `settings.json` do cliente de origem: tabela de seis slots, impressão de formato, patch mínimo em bytes, backup / restauração / diferenças |
 | Janela de sessões (somente desktop) | Pequena janela sempre visível com estados de tarefas de várias origens; somente leitura, clique para voltar à sessão original |
 | Monitoramento de sessões do cliente (desligado por padrão) | Instala um hook no `settings.json` do WorkBuddy e envia estados de tarefas para a janela (receptor `127.0.0.1:57893`) |
+| Log de execução | O log **da própria** ferramenta (`~/.buddy-switch/logs/runtime-YYYY-MM-DD.log`): em «Configurações → Log» há filtro por nível / data / palavra-chave, cópia, abrir pasta e limpar. Guardado 7 dias, 4 MiB por arquivo e 4 partes por dia; as credenciais são mascaradas antes da gravação. `BUDDY_SWITCH_LOG_LEVEL=debug` e reiniciar para o detalhe por requisição |
 
 </details>
 
