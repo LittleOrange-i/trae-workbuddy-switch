@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use buddy_switch_core::modules::{
     account, app_prefs, auth_file, backup, cache, capability, checkin, client_limits,
     client_settings, config, credit_usage, credits, diagnostics, export_import, migrate, oauth,
-    process, programs, qoder, refresh, region::Region, region::RegionFilter, rotate, session,
-    skill, switch, token_daily, token_stats, trae, travel, update, vscode_session,
+    process, programs, qoder, refresh, region::Region, region::RegionFilter, rotate, runtime_log,
+    session, skill, switch, token_daily, token_stats, trae, travel, update, vscode_session,
 };
 use tauri::{Emitter, Manager};
 // P5 §2.5 第 (2) 条：capability **默认拒绝**。表数据只在 core（`product_spec`），本文件只查表。
@@ -2181,6 +2181,54 @@ pub fn get_app_prefs() -> Value {
 #[tauri::command]
 pub fn set_app_prefs(prefs: Value) -> Result<Value, String> {
     app_prefs::save_app_prefs(&prefs).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// 运行日志（仅桌面端命令面；webui 有同名路由，见 server api.rs）
+// ---------------------------------------------------------------------------
+
+/// GET /api/logs/runtime —— 读取本工具**自身**的运行日志。
+///
+/// `level` 是最低级别（`error` / `warn` / `info` / `debug`）；`date` 为 `YYYY-MM-DD`；
+/// `keyword` 大小写不敏感；`limit` 缺省 500、上限 2000。
+///
+/// `async` + `spawn_blocking`：要读若干个日志文件并逐行解析，同步执行会卡住窗口
+/// （与 [`get_trae_logs`] 同款纪律）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn runtime_logs(
+    level: Option<String>,
+    date: Option<String>,
+    keyword: Option<String>,
+    limit: Option<u64>,
+) -> Result<Value, String> {
+    let args = json!({
+        "level": level,
+        "date": date,
+        "keyword": keyword,
+        "limit": limit,
+    });
+    tauri::async_runtime::spawn_blocking(move || runtime_log::read(&args))
+        .await
+        .map_err(|error| format!("读取运行日志失败: {error}"))
+}
+
+/// POST /api/logs/runtime/clear —— 清空全部运行日志（**不可逆**）。
+///
+/// 只删本工具自己写的 `runtime-*.log`；同目录的其它文件一律不碰（见 core 的
+/// `parse_log_name` 判据）。
+#[tauri::command]
+pub async fn clear_runtime_logs() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(runtime_log::clear)
+        .await
+        .map_err(|error| format!("清空运行日志失败: {error}"))?
+}
+
+/// POST /api/logs/open-dir —— 在文件管理器中打开日志目录（不存在则先创建）。
+#[tauri::command]
+pub async fn open_runtime_logs_dir() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(runtime_log::open_logs_dir)
+        .await
+        .map_err(|error| format!("打开日志目录失败: {error}"))?
 }
 
 // ---------------------------------------------------------------------------

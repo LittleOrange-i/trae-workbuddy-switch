@@ -59,6 +59,9 @@ import type {
   RegionFilter,
   RotateLog,
   RotateStatus,
+  RuntimeLogClearResult,
+  RuntimeLogQuery,
+  RuntimeLogsResponse,
   ScheduleConfig,
   ScheduleRunResult,
   Session,
@@ -233,6 +236,10 @@ const DEMO_READ_COMMANDS = new Set([
   // 限额护栏视图（只读；逐账号当日用量 + 拦截原因）。
   "qoder_gateway_quota",
   "list_qoder_api_keys", "get_qoder_gateway_logs",
+  // 运行日志（**只读**）：演示站需返回虚构数据，否则 build:demo 报错。
+  // ⚠️ clear_runtime_logs（删文件）/ open_runtime_logs_dir（起 GUI 进程）是**动作**，
+  //    一律不进这里 —— 演示环境绝不能真的删本机日志或弹文件管理器。
+  "runtime_logs",
 ]);
 
 export function isDemoMode(): boolean {
@@ -341,6 +348,10 @@ const ROUTES: Record<string, Route> = {
   restore_auto_backup: { method: "POST", path: "/api/backup/auto/restore" },
   // Q1 · 诊断包导出（只读；凭据闸门在 core，命中即拒绝发出）。
   export_diagnostic: { method: "POST", path: "/api/diagnostics/export" },
+  // 运行日志（本工具自身，排查问题用）：读 / 清 / 开目录。
+  runtime_logs: { method: "GET", path: "/api/logs/runtime" },
+  clear_runtime_logs: { method: "POST", path: "/api/logs/runtime/clear" },
+  open_runtime_logs_dir: { method: "POST", path: "/api/logs/open-dir" },
   get_auto_backup_config: { method: "GET", path: "/api/backup/auto/config" },
   save_auto_backup_config: { method: "POST", path: "/api/backup/auto/config" },
   switch_account: { method: "POST", path: "/api/switch" },
@@ -1112,6 +1123,38 @@ export function listAutoBackups(): Promise<{ backups: AutoBackupEntry[] }> {
  */
 export function exportDiagnostic(): Promise<{ name: string; text: string }> {
   return call<{ name: string; text: string }>("export_diagnostic");
+}
+
+/**
+ * 读取本工具**自身**的运行日志（设置页「日志」分区）。
+ *
+ * 与 `getTraeLogs` 的区别：那个读的是 **Trae 客户端**的日志；本函数读的是
+ * **本工具**写的 `~/.buddy-switch/logs/runtime-*.log`。两者数据源互不相干。
+ *
+ * 文件不存在时返回空列表（不是错误）——新装用户还没产生任何日志。
+ */
+export function runtimeLogs(query?: RuntimeLogQuery): Promise<RuntimeLogsResponse> {
+  const args: Record<string, unknown> = {};
+  if (query?.level) args.level = query.level;
+  if (query?.date) args.date = query.date;
+  if (query?.keyword) args.keyword = query.keyword;
+  if (query?.limit) args.limit = query.limit;
+  return call("runtime_logs", Object.keys(args).length > 0 ? args : undefined);
+}
+
+/**
+ * 清空运行日志（**不可逆**）。
+ *
+ * 只删本工具自己写的 `runtime-*.log`；同目录其它文件一律不碰（后端按文件名判据筛）。
+ * ⚠️ 调用前必须让用户二次确认 —— 这是删数据，不是隐藏。
+ */
+export function clearRuntimeLogs(): Promise<RuntimeLogClearResult> {
+  return call("clear_runtime_logs");
+}
+
+/** 在文件管理器中打开日志目录（不存在则先创建）。 */
+export function openRuntimeLogsDir(): Promise<{ ok: boolean; path: string }> {
+  return call("open_runtime_logs_dir");
 }
 
 /** P7 T02：从自动备份 / 导入前快照**恢复**（覆盖策略；恢复本身也可撤销）。 */

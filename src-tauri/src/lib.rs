@@ -17,8 +17,25 @@ mod unified_gateway;
 use buddy_switch_core::modules;
 use buddy_switch_core::modules::background::{TaskKind, TaskSpec, TASKS};
 use buddy_switch_core::modules::product::Product;
+use buddy_switch_core::modules::runtime_log;
 use std::time::Duration;
 use tauri::Manager;
+
+/// 宿主诊断输出的**唯一出口**：写运行日志，并在 **debug** 构建同时打 stderr。
+///
+/// ## 为什么不能直接 `eprintln!`
+///
+/// 本宿主是 `windows_subsystem = "windows"` 的 release GUI（见 `main.rs`）：**没有控制台**，
+/// `eprintln!` 在用户机器上写进虚无。于是「网关起不来」「切号失败」这类问题只有一句界面
+/// toast，用户拿不到任何可粘贴给维护者的东西。改走运行日志后，设置页「日志」分区直接可读。
+///
+/// debug 构建仍打 stderr：`tauri dev` 下开发者在终端就能看到，不必去翻文件。
+fn host_log(level: runtime_log::Level, scope: &str, message: impl AsRef<str>) {
+    let message = message.as_ref();
+    runtime_log::log(level, scope, message);
+    #[cfg(debug_assertions)]
+    eprintln!("[{scope}] {message}");
+}
 
 const SCREENSHOT_DEMO_ENV: &str = "BUDDY_SWITCH_SCREENSHOT_DEMO";
 
@@ -152,9 +169,11 @@ fn spawn_background_task(spec: TaskSpec) {
             ⚠️ 与 server 侧同款：core 的 `TASKS` 表里没有任何 Qoder 任务 ⇒ 本分支当前
             不可达；一旦登记了，这行警告会出现在日志里，而不是悄悄空转。 */
             Product::Qoder => {
-                eprintln!(
-                    "[background] Qoder 的 CreditsRefresh 已登记但**尚无实现** —— \
-                     请补刷新循环，或从 core 的 TASKS 表里移除该条目。"
+                host_log(
+                    runtime_log::Level::Warn,
+                    "background",
+                    "Qoder 的 CreditsRefresh 已登记但**尚无实现** —— \
+                     请补刷新循环，或从 core 的 TASKS 表里移除该条目。",
                 );
             }
         },
@@ -286,6 +305,10 @@ pub fn run() {
 
     let app = builder
         .setup(|app| {
+            // ★ 运行日志：装 panic hook + 写启动横幅（版本 / 平台 / 数据目录 / 级别）。
+            //   放在最前面 —— 它要成为日志文件里的**第一条**记录，之后所有诊断都排在它后面；
+            //   晚一步调用就会丢掉「tray 初始化阶段」可能出现的错误。
+            runtime_log::init("Buddy Switch 桌面端");
             #[cfg(desktop)]
             {
                 tray::setup(app)?;
@@ -314,7 +337,7 @@ pub fn run() {
                 //   宿主照常可用；用户从哪里看得到？——设置页的监听开关会显示连接不上。
                 tauri::async_runtime::spawn(async {
                     if let Err(error) = buddy_switch_core::modules::agent_hook_rx::serve().await {
-                        eprintln!("[agent-hook] {error}");
+                        host_log(runtime_log::Level::Error, "agent-hook", error.to_string());
                     }
                 });
                 // 按配置启动 API 网关独立监听（默认关闭；默认 127.0.0.1:57891）。
@@ -322,9 +345,17 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let runtime = handle.state::<gateway::GatewayRuntime>();
                     match runtime.apply().await {
-                        Ok(Some(addr)) => eprintln!("[gateway] 已启动: http://{addr}"),
+                        Ok(Some(addr)) => host_log(
+                            runtime_log::Level::Info,
+                            "gateway",
+                            format!("已启动: http://{addr}"),
+                        ),
                         Ok(None) => {}
-                        Err(error) => eprintln!("[gateway] 启动失败: {error}"),
+                        Err(error) => host_log(
+                            runtime_log::Level::Error,
+                            "gateway",
+                            format!("启动失败: {error}"),
+                        ),
                     }
                 });
                 // 按配置启动 Trae 网关独立监听（默认关闭；默认 127.0.0.1:57894）。
@@ -332,9 +363,17 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let runtime = handle.state::<trae_gateway::TraeGatewayRuntime>();
                     match runtime.apply().await {
-                        Ok(Some(addr)) => eprintln!("[trae-gateway] 已启动: http://{addr}"),
+                        Ok(Some(addr)) => host_log(
+                            runtime_log::Level::Info,
+                            "trae-gateway",
+                            format!("已启动: http://{addr}"),
+                        ),
                         Ok(None) => {}
-                        Err(error) => eprintln!("[trae-gateway] 启动失败: {error}"),
+                        Err(error) => host_log(
+                            runtime_log::Level::Error,
+                            "trae-gateway",
+                            format!("启动失败: {error}"),
+                        ),
                     }
                 });
                 // 按配置启动 Qoder 网关独立监听（默认关闭；默认 127.0.0.1:57895）。
@@ -343,9 +382,17 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let runtime = handle.state::<qoder_gateway::QoderGatewayRuntime>();
                     match runtime.apply().await {
-                        Ok(Some(addr)) => eprintln!("[qoder-gateway] 已启动: http://{addr}"),
+                        Ok(Some(addr)) => host_log(
+                            runtime_log::Level::Info,
+                            "qoder-gateway",
+                            format!("已启动: http://{addr}"),
+                        ),
                         Ok(None) => {}
-                        Err(error) => eprintln!("[qoder-gateway] 启动失败: {error}"),
+                        Err(error) => host_log(
+                            runtime_log::Level::Error,
+                            "qoder-gateway",
+                            format!("启动失败: {error}"),
+                        ),
                     }
                 });
                 // 按配置启动**统一网关**独立监听（默认关闭；默认 127.0.0.1:57892）。
@@ -357,9 +404,17 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let runtime = handle.state::<unified_gateway::UnifiedGatewayRuntime>();
                     match runtime.apply().await {
-                        Ok(Some(addr)) => eprintln!("[unified-gateway] 已启动: http://{addr}"),
+                        Ok(Some(addr)) => host_log(
+                            runtime_log::Level::Info,
+                            "unified-gateway",
+                            format!("已启动: http://{addr}"),
+                        ),
                         Ok(None) => {}
-                        Err(error) => eprintln!("[unified-gateway] 启动失败: {error}"),
+                        Err(error) => host_log(
+                            runtime_log::Level::Error,
+                            "unified-gateway",
+                            format!("启动失败: {error}"),
+                        ),
                     }
                 });
             }
@@ -490,6 +545,10 @@ pub fn run() {
             commands::relaunch_app,
             commands::get_app_prefs,
             commands::set_app_prefs,
+            // 运行日志（本工具自身，排查问题用）：读取 / 清空 / 打开目录。
+            commands::runtime_logs,
+            commands::clear_runtime_logs,
+            commands::open_runtime_logs_dir,
             commands::get_launch_at_login_enabled,
             commands::set_launch_at_login_enabled,
             commands::get_gateway_config,

@@ -2186,3 +2186,66 @@ export interface ProxyStatus {
   };
 }
 
+// ---------------------------------------------------------------------------
+// 运行日志（本工具**自身**的日志；排查问题用）
+// ---------------------------------------------------------------------------
+
+/** 日志级别（与 core `runtime_log::Level::as_str()` 逐字一致）。 */
+export type RuntimeLogLevel = "error" | "warn" | "info" | "debug";
+
+/** 一条运行日志。 */
+export interface RuntimeLogEntry {
+  /** 毫秒时间戳；时间解析失败的行走 `0`（仍保留，不丢行）。 */
+  ts: number;
+  /** `YYYY-MM-DD HH:MM:SS.mmm`（原样展示，不二次格式化）。 */
+  time: string;
+  level: RuntimeLogLevel;
+  /** 来源标签：`gateway` / `switch` / `trae` / `panic` …；可能为空串。 */
+  scope: string;
+  message: string;
+}
+
+/** 运行日志的查询参数（全部可选；与 `get_trae_logs` 同形，前端复用同一套筛选器）。 */
+export interface RuntimeLogQuery {
+  /** 最低级别（含本级及更严重）。 */
+  level?: RuntimeLogLevel;
+  /** `YYYY-MM-DD`；`undefined` = 全部保留日期。 */
+  date?: string;
+  /** 大小写不敏感，匹配 `scope` 与 `message`。 */
+  keyword?: string;
+  /** 返回条数上限（后端缺省 500、上限 2000）。 */
+  limit?: number;
+}
+
+/**
+ * 运行日志响应（`runtime_logs`）。
+ *
+ * ⚠️ `counts` 统计的是**过滤前**各级别条数：它回答「一共有多少」，而 `entries` 是
+ * 「筛完剩下多少」—— 两者不同，界面要分开表述（否则「筛了 error 还显示 30 条」）。
+ */
+export interface RuntimeLogsResponse {
+  /** 按时间**降序**（最新在前）。 */
+  entries: RuntimeLogEntry[];
+  /** 过滤后的总条数（可能大于 `entries.length`，因为被 `limit` 截断）。 */
+  total: number;
+  truncated: boolean;
+  limit: number;
+  /** 可选日期，倒序（最新在前）。 */
+  dates: string[];
+  counts: Record<RuntimeLogLevel, number>;
+  /** 当前进程生效的日志级别（来自 `BUDDY_SWITCH_LOG_LEVEL`，缺省 `info`）。 */
+  level: RuntimeLogLevel;
+  /** 日志目录（本机路径；用户自己机器上，用于「打开目录」）。
+   *  ⚠️ 与诊断包不同：诊断包要发给别人，故不含路径；这里只在本机展示。 */
+  logDir: string;
+  keepDays: number;
+  maxPartBytes: number;
+  maxPartsPerDay: number;
+}
+
+/** 清空运行日志的结果。 */
+export interface RuntimeLogClearResult {
+  ok: boolean;
+  /** 实际删除的文件数。 */
+  removed: number;
+}
