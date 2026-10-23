@@ -306,8 +306,7 @@ fn redact_secret_params(input: &str) -> String {
         // 值到分隔符为止（& 空格 " ' , ; } ] 换行）。
         let value_end = input[keep_end..]
             .find(|c: char| {
-                c.is_whitespace()
-                    || matches!(c, '&' | '"' | '\'' | ',' | ';' | '}' | ']' | ')')
+                c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ',' | ';' | '}' | ']' | ')')
             })
             .map(|offset| keep_end + offset)
             .unwrap_or(input.len());
@@ -855,7 +854,9 @@ mod tests {
         assert_eq!(resolve_level(None), Level::Info);
         assert_eq!(resolve_level(Some("nope")), Level::Info);
         assert_eq!(resolve_level(Some("debug")), Level::Debug);
-        assert!(Level::Debug > Level::Info && Level::Info > Level::Warn && Level::Warn > Level::Error);
+        assert!(
+            Level::Debug > Level::Info && Level::Info > Level::Warn && Level::Warn > Level::Error
+        );
     }
 
     /// 行解析：标准行、无 scope 行、坏行。
@@ -941,7 +942,10 @@ mod tests {
         std::fs::write(dir.join("runtime-2026-10-23.log"), "y\n").unwrap();
         let result = clear().expect("清空应成功");
         assert_eq!(result["removed"], json!(1));
-        assert!(dir.join("keep-me.txt").exists(), "clear 不得删除非本模块文件");
+        assert!(
+            dir.join("keep-me.txt").exists(),
+            "clear 不得删除非本模块文件"
+        );
     }
 
     /// 端到端：写 → 读，级别 / 关键字 / limit 过滤都对。
@@ -953,9 +957,21 @@ mod tests {
 
         // 直接调 write_line 绕开级别阈值（阈值来自环境变量，测试不该依赖它）。
         let date = Local::now().format("%Y-%m-%d").to_string();
-        write_line(&date, "2026-10-23 10:00:00.000 ERROR [gateway] 端口被占\n", "gateway");
-        write_line(&date, "2026-10-23 10:00:01.000 INFO  [switch] 切换成功\n", "switch");
-        write_line(&date, "2026-10-23 10:00:02.000 DEBUG [pool] 选号明细\n", "pool");
+        write_line(
+            &date,
+            "2026-10-23 10:00:00.000 ERROR [gateway] 端口被占\n",
+            "gateway",
+        );
+        write_line(
+            &date,
+            "2026-10-23 10:00:01.000 INFO  [switch] 切换成功\n",
+            "switch",
+        );
+        write_line(
+            &date,
+            "2026-10-23 10:00:02.000 DEBUG [pool] 选号明细\n",
+            "pool",
+        );
 
         let all = read(&json!({}));
         assert_eq!(all["entries"].as_array().unwrap().len(), 3);
