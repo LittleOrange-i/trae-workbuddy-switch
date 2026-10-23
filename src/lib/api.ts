@@ -2640,7 +2640,9 @@ export function relaunchApp(): Promise<void> {
  */
 export function getAppPrefs(): Promise<AppPrefs> {
   if (demoModeEnabled) return call("get_app_prefs");
-  if (!isDesktop()) return Promise.resolve({ close_to_tray: true });
+  /* webui 没有宿主进程，`app_prefs.json` 无人维护 ⇒ 这里给「未确认风险」的默认形状，
+     风险确认弹层在 webui 下不渲染（见 `legal-consent-dialog.tsx`）。 */
+  if (!isDesktop()) return Promise.resolve({ close_to_tray: true, legal_consent_at: 0 });
   return call("get_app_prefs");
 }
 

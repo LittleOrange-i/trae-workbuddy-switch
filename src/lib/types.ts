@@ -1409,6 +1409,15 @@ export interface GithubConfig {
 export interface AppPrefs {
   /** 关闭窗口时隐藏到托盘并保持后台运行；false = 关闭即退出。 */
   close_to_tray: boolean;
+  /**
+   * 首次启动「风险确认」的时间戳（epoch 毫秒）；**0 = 尚未确认**。
+   *
+   * 它只有渲染层读，却**刻意**存在后端而不是 `localStorage`：清一次站点数据就会
+   * 抹掉「已确认风险」的证据（见 `app_prefs.rs` 模块头的例外说明）。
+   * 后端归一化只认非负整数，字符串 / 负数 / 小数 / 缺字段一律回落 0 —— 宁可再问一次，
+   * 也不能凭空认定用户已同意。
+   */
+  legal_consent_at: number;
 }
 
 /**

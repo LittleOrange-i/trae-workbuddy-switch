@@ -378,8 +378,12 @@ function StartupCard({ variant }: { variant: AppSettingsVariant }) {
     setTrayBusy(true);
     setMsg(null);
     try {
+      /* 先读回完整偏好再写：`set_app_prefs` 是按**已知键**归一化的，只传
+         `close_to_tray` 会把 `legal_consent_at`（风险确认时间）冲回默认 0 ——
+         用户点一次托盘开关就被要求重新确认风险，属于跨功能的状态破坏。 */
+      const current = await api.getAppPrefs();
       // 按**回读值**渲染：后端会把非法值归一成默认值，回显请求值会与宿主真实行为分叉。
-      const saved = await api.setAppPrefs({ close_to_tray: value });
+      const saved = await api.setAppPrefs({ ...current, close_to_tray: value });
       setCloseToTray(saved.close_to_tray);
       if (saved.close_to_tray !== value) {
         setMsg({ type: "err", text: t("appSettings.tray.saveMismatch") });
