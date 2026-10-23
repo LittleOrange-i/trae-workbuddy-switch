@@ -1997,10 +1997,16 @@ async fn api_report_slow_call(Json(body): Json<Value>) -> Response {
         .to_string();
     let ms = body.get("ms").and_then(Value::as_u64).unwrap_or(0);
     if cmd.is_empty() || ms == 0 {
-        return json_err("参数不完整（cmd / ms）".to_string(), StatusCode::BAD_REQUEST);
+        return json_err(
+            "参数不完整（cmd / ms）".to_string(),
+            StatusCode::BAD_REQUEST,
+        );
     }
     let _ = tokio::task::spawn_blocking(move || {
-        runtime_log::warn("ipc-slow", format!("命令 {cmd} 耗时 {ms}ms（超过前端计时阈值）"));
+        runtime_log::warn(
+            "ipc-slow",
+            format!("命令 {cmd} 耗时 {ms}ms（超过前端计时阈值）"),
+        );
     })
     .await;
     json_ok(json!({ "ok": true }))
