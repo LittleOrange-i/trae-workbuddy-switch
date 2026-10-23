@@ -228,7 +228,10 @@ mod tests {
     #[test]
     fn legal_consent_at_真值表() {
         let cases: [(Value, u64); 6] = [
-            (json!({ "legal_consent_at": 1_760_000_000_000u64 }), 1_760_000_000_000),
+            (
+                json!({ "legal_consent_at": 1_760_000_000_000u64 }),
+                1_760_000_000_000,
+            ),
             (json!({ "legal_consent_at": 1 }), 1),
             (json!({ "legal_consent_at": "1760000000000" }), 0), // 字符串 ⇒ 未确认
             (json!({ "legal_consent_at": -1 }), 0),              // 负数 ⇒ 未确认
