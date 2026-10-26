@@ -434,6 +434,21 @@ Full guide (what to work on, PR checklist, code conventions): **[CONTRIBUTING.en
 
 Each project follows its own license. This project is an independent implementation with no affiliation, partnership or endorsement relationship with them; all names and trademarks belong to their respective owners.
 
+## Support this project
+
+Buddy Switch is free, open source, and licensed for noncommercial use only. If it saves you a few minutes a day, you can buy the author a drink:
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/donate-wechat.png" alt="WeChat Pay QR code" width="220" /><br /><sub>WeChat Pay</sub></td>
+    <td align="center"><img src="docs/images/donate-alipay.jpg" alt="Alipay QR code" width="220" /><br /><sub>Alipay</sub></td>
+  </tr>
+</table>
+
+No money needed either: **starring the repo** helps just as much — it is the main reason this project keeps getting maintained.
+
+> **Donations are unrelated to functionality**: every feature is the same for everyone, and donating **does not unlock, affect or change** any feature or licence. Donations are voluntary gifts: not a purchase, subscription, paid service, commercial licence or support commitment, and they create no consideration of any kind; donating buys no priority response, custom development or extra entitlement. Licensing and terms of use remain governed solely by [LICENSE](./LICENSE) — see [License](#license).
+
 ## Disclaimer
 
 Full text in **[docs/policies/DISCLAIMER.en.md](docs/policies/DISCLAIMER.en.md)** ([简体中文](docs/policies/DISCLAIMER.md)), seven sections: unofficial third-party tool; terms of service and compliance; data writes and backups; risks of automated behaviour; API gateway exposure; provided "as is"; restrictions on use (no commercial use, no resale or sharing of quota). Using the project means you have read and agree to them; if not, stop using it and uninstall.

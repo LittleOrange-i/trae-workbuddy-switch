@@ -432,6 +432,21 @@ npm/                     # npm 包（尚未发布）
 
 以上项目各自遵循其自身许可；本项目为独立实现，与它们不存在隶属、合作或背书关系，相关名称与商标归各自权利人所有。
 
+## 支持这个项目
+
+Buddy Switch 免费、开源，且仅授权个人非商业使用。如果它每天帮你省下几分钟，可以扫码请作者喝杯饮料：
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/donate-wechat.png" alt="微信支付收款码" width="220" /><br /><sub>微信支付</sub></td>
+    <td align="center"><img src="docs/images/donate-alipay.jpg" alt="支付宝收款码" width="220" /><br /><sub>支付宝</sub></td>
+  </tr>
+</table>
+
+不想花钱也完全没问题：**给项目点个 Star** 同样有用——它是作者继续维护下去最大的动力。
+
+> **打赏与功能无关**：所有功能对所有人一致，打赏**不解锁、不影响、也不改变**任何功能或授权。它属自愿赠与，不构成购买、订阅、付费服务、商业授权或技术支持承诺，亦不构成任何对价关系；不因打赏获得优先响应、定制开发或任何额外权益。软件许可与使用条件仍完全以 [LICENSE](./LICENSE) 为准，见[许可](#许可)一节。
+
 ## 免责声明
 
 完整条款见 **[docs/policies/DISCLAIMER.md](docs/policies/DISCLAIMER.md)**（[English](docs/policies/DISCLAIMER.en.md)），共 7 条：非官方第三方工具、服务条款与合规自理、数据写入与备份、自动化行为风险、API 网关暴露风险、按「原样」提供、用途限制（不得商用、不得转售或共享额度）。使用即表示已阅读并同意；如不同意，请立即停止使用并卸载。
