@@ -695,7 +695,11 @@ async fn collect_namespace_models(
                         )
                     })
                     .map(|model| {
-                        let mut entry = crate::routes::models::model_entry(model, wb_max_context);
+                        let mut entry = crate::routes::models::model_entry(
+                            model,
+                            wb_max_context,
+                            buddy_switch_core::modules::product::scope_of_wb_region(region),
+                        );
                         if let Some(object) = entry.as_object_mut() {
                             object.insert("namespace".into(), json!(spec.id));
                         }
@@ -761,6 +765,7 @@ async fn collect_namespace_models(
                     &catalog.models,
                     disabled.get(scope),
                     qoder.max_context_now(),
+                    scope,
                 )
                 .get("data")
                 .and_then(|data| data.as_array())

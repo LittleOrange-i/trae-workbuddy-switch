@@ -3030,6 +3030,61 @@ pub async fn set_model_disabled(
     }))
 }
 
+/// GET /api/gateway/model-image-caps —— 某**作用域**被用户手动指定的图片能力覆盖（issue #101）。
+///
+/// 形状 `{ scope, caps: { "<模型 id>": true|false } }`：**缺失的键 = 跟随上游**（不是「不支持」）。
+/// 只有用户动过的模型才在这里出现，因此前端拿它当「覆盖表」，与目录里的
+/// `supports_images` / `image_input_source` 合成三态展示。
+///
+/// 读的是**进程内唯一**的存储（[`buddy_switch_gateway::model_capability::shared`]）——
+/// 与三条产品线 `/v1/models` 的声明是同一份，不是「命令写一份、网关读另一份」。
+#[tauri::command]
+pub async fn get_model_image_caps(scope: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    // 纯内存读（HashMap 克隆），但仍放进 blocking 池：与写入侧同一把 std 锁，
+    // 避免在 IPC 线程上做任何可能被写者阻塞的操作。
+    let caps = tauri::async_runtime::spawn_blocking(move || {
+        buddy_switch_gateway::model_capability::overrides_of(scope)
+    })
+    .await
+    .map_err(|error| format!("读取图片能力失败: {error}"))?;
+    Ok(json!({ "scope": scope.as_str(), "caps": caps }))
+}
+
+/// POST /api/gateway/model-image-caps —— 指定 / 清除某**作用域**一个模型的图片能力覆盖。
+///
+/// `supports`：`true` / `false` = 手动指定；**`null` = 还原上游声明**（删键，不是写 `false`）。
+/// 三态是这块的全部要点 —— 把「还原」实现成 `false` 会让 WB 上游明明声明支持的模型
+/// 在客户端里永远看不到图片入口。
+///
+/// `set_and_save` 是**阻塞**的（含磁盘写）⇒ 放进 `spawn_blocking`（本仓既有纪律：
+/// 同步 IO 不得压在 IPC / 事件循环线程上，issue #48 / #80 同根因类）。
+#[tauri::command]
+pub async fn set_model_image_cap(
+    scope: String,
+    model_id: String,
+    supports: Option<bool>,
+) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    let id = model_id.trim().to_string();
+    if id.is_empty() {
+        return Err("模型 id 不能为空".to_string());
+    }
+    let changed = tauri::async_runtime::spawn_blocking(move || {
+        buddy_switch_gateway::model_capability::set_and_save(scope, &id, supports)
+    })
+    .await
+    .map_err(|error| format!("保存图片能力失败: {error}"))??;
+    Ok(json!({
+        "ok": true,
+        "scope": scope.as_str(),
+        "model_id": model_id.trim(),
+        // `null` 表示「跟随上游」，与入参同义回显（前端据此清掉本地覆盖）。
+        "supports": supports,
+        "changed": changed,
+    }))
+}
+
 /// GET /api/gateway/logs —— 最近 N 条请求日志（元数据）。
 ///
 /// `async` + `spawn_blocking`：`list` 要读进程内日志环（大日志时还有序列化）。

@@ -121,6 +121,24 @@ export const zh = {
   "shared.gateway.models.creditsFree": "免费",
   "shared.gateway.models.creditsNone": "上游未提供积分倍率",
   "shared.gateway.models.creditsHint": "倍率：按基准价的多少倍计费，不是金额",
+  /* ★ issue #101：图片输入能力（三态）。
+     「未声明」≠「不支持」—— 上游清单（Trae / Qoder 根本没有这个字段）没说时，
+     客户端按自己的配置处理，网关**不替它断言**。三态文案必须分开，否则用户会以为
+     网关在说「这个模型不能读图」。 */
+  "shared.gateway.models.colImages": "图片输入",
+  "shared.gateway.models.imageYes": "支持",
+  "shared.gateway.models.imageNo": "不支持",
+  "shared.gateway.models.imageUndeclared": "未声明",
+  "shared.gateway.models.imageSourceUpstream": "上游目录声明支持图片输入",
+  "shared.gateway.models.imageSourceOverride": "你在本页手动指定（覆盖上游声明）",
+  "shared.gateway.models.imageUndeclaredHint":
+    "上游清单没有声明这个模型能否读图。客户端连上来时默认按「不支持」处理（图片会被它自己挡掉，请求根本不到网关），需要时可在此手动标记。",
+  "shared.gateway.models.imageMarkYes": "标记为支持图片",
+  "shared.gateway.models.imageMarkNo": "标记为不支持图片",
+  "shared.gateway.models.imageReset": "还原上游声明",
+  "shared.gateway.models.imageYesToast": "已标记「{name}」支持图片输入",
+  "shared.gateway.models.imageNoToast": "已标记「{name}」不支持图片输入",
+  "shared.gateway.models.imageResetToast": "已还原「{name}」的图片能力为上游声明",
   "shared.gateway.models.upstreamAvailable": "可用",
   "shared.gateway.models.upstreamUnavailable": "不可用",
   "shared.gateway.models.exposed": "已暴露",

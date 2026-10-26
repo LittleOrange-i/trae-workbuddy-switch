@@ -204,6 +204,7 @@ pub async fn models(
         &catalog.models,
         disabled.get(scope),
         state.max_context_now(),
+        scope,
     );
     drop(disabled);
     let mut body = filtered;

@@ -348,6 +348,11 @@ fn api_routes() -> Router {
             "/api/gateway/disabled-models",
             get(api_gateway_disabled_models).post(api_gateway_set_model_disabled),
         )
+        // 图片能力声明 / 覆盖（issue #101）：同一路径两种方法，与 Tauri 命令一一对应。
+        .route(
+            "/api/gateway/model-image-caps",
+            get(api_gateway_model_image_caps).post(api_gateway_set_model_image_cap),
+        )
         .route("/api/gateway/logs", get(api_gateway_logs))
         .route("/api/gateway/logs/clear", post(api_gateway_clear_logs))
         // 限流探测（账号 × 模型矩阵 · 一次性作业 + 轮询）：start 异步作业 / status 快照 / cancel。
@@ -3426,6 +3431,87 @@ async fn api_gateway_set_model_disabled(Json(body): Json<Value>) -> Response {
         "scope": scope.as_str(),
         "model_id": model_id.trim(),
         "disabled": disabled,
+        "changed": changed,
+    }))
+}
+
+/// GET /api/gateway/model-image-caps —— 某**作用域**被用户手动指定的图片能力覆盖（issue #101）。
+///
+/// 形状 `{ scope, caps: { "<模型 id>": true|false } }`：**缺失的键 = 跟随上游**。
+/// 读的是进程内唯一存储，与三条产品线 `/v1/models` 的声明同源。
+async fn api_gateway_model_image_caps(RawQuery(query): RawQuery) -> Response {
+    let scope = match resolve_scope_param(query_value(query.as_deref(), "scope").as_deref()) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let caps = match tokio::task::spawn_blocking(move || {
+        buddy_switch_gateway::model_capability::overrides_of(scope)
+    })
+    .await
+    {
+        Ok(caps) => caps,
+        Err(error) => {
+            return json_err(
+                format!("读取图片能力失败: {error}"),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    json_ok(json!({ "scope": scope.as_str(), "caps": caps }))
+}
+
+/// POST /api/gateway/model-image-caps —— 指定 / 清除某作用域一个模型的图片能力覆盖。
+///
+/// `supports`：`true` / `false` = 手动指定；**`null` = 还原上游声明**（删键，不是写 `false`）。
+/// ⚠️ `modelId` 按 camelCase 读（与前端 `call()` 原样发送的键一致）；只读 snake 会造成
+/// 静默 no-op —— 与 `api_gateway_set_model_disabled` 同一手法。
+async fn api_gateway_set_model_image_cap(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let model_id = body
+        .get("modelId")
+        .or_else(|| body.get("model_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if model_id.is_empty() {
+        return json_err("模型 id 不能为空".to_string(), StatusCode::BAD_REQUEST);
+    }
+    // `supports` 允许**显式 null**（= 还原上游）⇒ 不能把「缺失」当 `false`。
+    let supports = match body.get("supports") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => {
+            return json_err(
+                "`supports` 只能是 true / false / null".to_string(),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    // 闭包要 `move` 走 id，但响应体还要回显它 ⇒ 先克隆一份给闭包。
+    let id_for_save = model_id.clone();
+    let changed = match tokio::task::spawn_blocking(move || {
+        buddy_switch_gateway::model_capability::set_and_save(scope, &id_for_save, supports)
+    })
+    .await
+    {
+        Ok(Ok(changed)) => changed,
+        Ok(Err(error)) => return json_err(error, StatusCode::BAD_REQUEST),
+        Err(error) => {
+            return json_err(
+                format!("保存图片能力失败: {error}"),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    json_ok(json!({
+        "ok": true,
+        "scope": scope.as_str(),
+        "model_id": model_id,
+        "supports": supports,
         "changed": changed,
     }))
 }

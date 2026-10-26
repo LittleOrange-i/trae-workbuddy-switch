@@ -27,6 +27,8 @@ pub mod disabled_models;
 pub mod error;
 pub mod key_usage;
 pub mod logging;
+/// 模型能力声明（图片输入，issue #101）：三条产品线出口 ① 与管理面共用的唯一解析点。
+pub mod model_capability;
 /// 账号池 × 模型限流探测（一次性作业；见模块文档）。
 pub mod model_probe;
 pub mod model_route;

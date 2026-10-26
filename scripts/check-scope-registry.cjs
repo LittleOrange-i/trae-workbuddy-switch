@@ -2617,6 +2617,83 @@ check("★ issue #65 模型表「思考档位 / 积分倍率」三平台同构�
   return "壳两个列槽 · 三平台都传 · 渲染只在 model-ability · 无 onClick";
 });
 
+check("★ issue #101 图片输入列：三平台都传、渲染唯一、未声明不得画成不支持", () => {
+  /* 需求（issue #101）：客户端连本网关时，图片被它自己的模型配置挡掉（请求根本没到网关）。
+     网关能做的是在 `/v1/models` 声明能力，并在管理面让用户能纠正 —— 两件事都得在。
+
+     可证伪：
+     ① 共用壳必须有 `imageColumn` 可选列槽，且表头 + 单元格各渲染一次；
+     ② 三个平台页**都**要传（少传一个 ⇒ 该平台看不到、也改不了，需求只做了一半）；
+     ③ 单元格渲染只允许来自 `model-image-cell.tsx`（页面自己拼就变红）；
+     ④ **三态文案必须都在**：把 `未声明` 写成 `不支持` 就是把「不知道」说成事实；
+     ⑤ 判据只允许在 `lib/model-image.ts`（页面里出现 `?? false` 即变红）。 */
+  const shell = readCode(MODEL_TABLE);
+  if (!/imageColumn\?:\s*\{/.test(shell)) {
+    throw new Error("模型表格壳缺可选列槽 `imageColumn`（不传就该整列不渲染）");
+  }
+  const uses = (shell.match(/\{imageColumn &&/g) || []).length;
+  if (uses !== 2) {
+    throw new Error(`\`imageColumn\` 在壳里出现 ${uses} 次，应表头 + 单元格各一次`);
+  }
+
+  const cell = readCode("src/components/gateway/model-image-cell.tsx");
+  for (const key of [
+    "shared.gateway.models.imageYes",
+    "shared.gateway.models.imageNo",
+    "shared.gateway.models.imageUndeclared",
+  ]) {
+    if (!cell.includes(key)) throw new Error(`model-image-cell.tsx 缺「${key}」—— 三态无法表达`);
+  }
+  if (!/data-act="gw-model-image-toggle"/.test(cell)) {
+    throw new Error("model-image-cell.tsx 缺覆盖切换按钮（只有徽标 = 只能看不能改）");
+  }
+
+  const judge = readCode("src/lib/model-image.ts");
+  if (!judge.includes("supports: null")) {
+    throw new Error("lib/model-image.ts 没有「未声明」这一档（supports: null）—— 三态塌成布尔");
+  }
+  if (/\?\?\s*false/.test(judge)) {
+    throw new Error("lib/model-image.ts 出现 `?? false` —— 把「未声明」压成「不支持」就是撒谎");
+  }
+
+  const pages = {
+    WB: WB_MODEL_LIST,
+    Trae: TRAE_MODEL_LIST,
+    Qoder: "src/components/gateway/qoder-model-list.tsx",
+  };
+  for (const [label, rel] of Object.entries(pages)) {
+    const code = readCode(rel);
+    if (!/imageColumn=\{imageColumn\}/.test(code)) {
+      throw new Error(`${label} 没传 \`imageColumn\` —— 该平台看不到也改不了图片能力`);
+    }
+    if (!/useImageCapColumn/.test(code)) {
+      throw new Error(`${label} 没有复用共用装配器（自己拼一份 = 又一处分叉）`);
+    }
+    if (code.includes("supports ?? false") || code.includes("supports_images ?? false")) {
+      throw new Error(`${label} 出现 \`?? false\` —— 「未声明」被写成了「不支持」`);
+    }
+  }
+
+  // zh / en 同步（en 缺键会回落中文，但显式加了才算同步）。
+  for (const file of [SHARED_LOCALE_ZH, SHARED_LOCALE_EN]) {
+    const text = readCode(file);
+    for (const key of [
+      "colImages",
+      "imageYes",
+      "imageNo",
+      "imageUndeclared",
+      "imageUndeclaredHint",
+      "imageMarkYes",
+      "imageReset",
+    ]) {
+      if (!text.includes(`shared.gateway.models.${key}`)) {
+        throw new Error(`${path.basename(file)} 缺 \`${key}\` 词条`);
+      }
+    }
+  }
+  return "壳有列槽 · 三平台都传 · 渲染唯一 · 三态文案齐 · 无 ?? false";
+});
+
 check("★ P11 禁用错误可展示（后端 403 model_disabled 的文案经 api.asError 透出）", () => {
   /* T01 对硬调用返回 403 / `type_name="model_disabled"` / 文案说明「被禁用」。
      前端要**能展示它**：切换失败路径必须把错误经 `api.asError` 本地化后透出

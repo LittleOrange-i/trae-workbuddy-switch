@@ -1791,7 +1791,16 @@ export interface CatalogModel {
   /** 上限档（后端 `snapshot_view` 输出；与 `context_window` 在旧响应里同值）。 */
   context_length_max?: number | null;
   max_tokens: number;
-  supports_images: boolean;
+  /**
+   * 是否支持图片输入（issue #101）。
+   *
+   * ⚠️ **可能整个字段不存在** —— 上游没声明、用户也没手动指定时后端不下发该字段
+   * （Trae / Qoder 的清单根本没有这个信息）。判据请走 `lib/model-image.ts` 的
+   * `resolveImageCap()`，别在这里 `?? false`（那会把「不知道」说成「不支持」）。
+   */
+  supports_images?: boolean | null;
+  /** 能力的来源：`upstream`（上游目录）/ `override`（本页手动指定）/ `null`（未声明）。 */
+  image_input_source?: "upstream" | "override" | null;
   /** 积分倍率**原文**（`x0.79` / `x0.34 credits` 三种写法并存）。 */
   credits?: string | null;
   /** 积分倍率数字（后端已归一）；`null` = 上游没给。渲染一律用这个，别自己剥 `x`。 */

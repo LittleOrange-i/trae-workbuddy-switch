@@ -658,6 +658,9 @@ pub fn run() {
             commands::save_account_strategy,
             commands::get_disabled_models,
             commands::set_model_disabled,
+            // 图片能力声明 / 覆盖（issue #101）：三条产品线 `/v1/models` 与管理面共用一份存储。
+            commands::get_model_image_caps,
+            commands::set_model_image_cap,
             commands::get_gateway_logs,
             commands::clear_gateway_logs,
             commands::probe_start,

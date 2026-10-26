@@ -183,7 +183,9 @@ const DEMO_READ_COMMANDS = new Set([
   "list_sessions", "list_session_replicas",
   // API 网关只读命令（演示站需返回虚构数据，否则 build:demo 报错）
   "get_gateway_config", "gateway_status", "list_api_keys", "get_gateway_models",
-  "get_account_strategy", "get_disabled_models", "get_gateway_logs",
+  // ⚠️ 图片能力**读取**只读，进演示面；`set_model_image_cap` 是写操作，**不进**（与禁用同款）。
+  "get_account_strategy", "get_disabled_models", "get_model_image_caps",
+  "get_gateway_logs",
   // 限流探测的只读状态命令（probe_status）：演示站需返回未跑过（phase=idle）的快照。
   // `probe_ledger` 是**只读**台账（跨重启的实测结论）：演示站返回空表（从未探过）。
   // ⚠️ probe_start / probe_cancel 是**写**操作（会真发上游请求 / 置取消位），一律不进这里。
@@ -479,6 +481,9 @@ const ROUTES: Record<string, Route> = {
   // 模型禁用偏好（P11）：GET 列表 / POST 置位·清位，同一路径两种方法（与 `/api/gateway/strategy` 同构）。
   get_disabled_models: { method: "GET", path: "/api/gateway/disabled-models" },
   set_model_disabled: { method: "POST", path: "/api/gateway/disabled-models" },
+  // 图片能力声明 / 覆盖（issue #101）：与上面两条同构 —— 同一路径两种方法。
+  get_model_image_caps: { method: "GET", path: "/api/gateway/model-image-caps" },
+  set_model_image_cap: { method: "POST", path: "/api/gateway/model-image-caps" },
   get_gateway_logs: { method: "GET", path: "/api/gateway/logs" },
   clear_gateway_logs: { method: "POST", path: "/api/gateway/logs/clear" },
   // 限流探测（账号 × 模型矩阵 · 一次性作业 + 轮询）：与 api.rs 路由、lib.rs 命令名三方一致。
@@ -2416,6 +2421,38 @@ export function setModelDisabled(
   disabled: boolean,
 ): Promise<{ ok: boolean; scope: Scope; model_id: string; disabled: boolean; changed: boolean }> {
   return call("set_model_disabled", { scope, modelId, disabled });
+}
+
+/**
+ * 读取某**作用域**的图片能力覆盖（issue #101）。
+ *
+ * 形状 `{ scope, caps }`：`caps` 只包含**用户手动指定过**的模型（`true` = 支持图片输入）。
+ * 缺失的键 = 跟随上游声明（**不是**「不支持」）—— 三态语义见 `lib/model-image.ts`。
+ */
+export function getModelImageCaps(
+  scope: Scope,
+): Promise<{ scope: Scope; caps: Record<string, boolean> }> {
+  return call("get_model_image_caps", { scope });
+}
+
+/**
+ * 指定 / 清除某作用域一个模型的图片能力覆盖（issue #101）。
+ *
+ * `supports`：`true` / `false` = 手动指定；**`null` = 还原上游声明**（后端删键，不是写 `false`）。
+ * 后端幂等：重复写同值返回 `changed: false`。
+ */
+export function setModelImageCap(
+  scope: Scope,
+  modelId: string,
+  supports: boolean | null,
+): Promise<{
+  ok: boolean;
+  scope: Scope;
+  model_id: string;
+  supports: boolean | null;
+  changed: boolean;
+}> {
+  return call("set_model_image_cap", { scope, modelId, supports });
 }
 
 export function getGatewayLogs(): Promise<{ logs: GatewayLogEntry[] }> {

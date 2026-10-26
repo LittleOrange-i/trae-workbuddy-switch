@@ -3305,6 +3305,12 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       const scope = String((args as { scope?: unknown } | undefined)?.scope ?? "wb-cn");
       return { scope, ids: scope === "qoder-cn" ? ["Kimi-K3"] : [] };
     }
+    /* 图片能力覆盖（issue #101）：演示站给一条「手动指定」样例，让三态都能画出来
+       （其余模型缺键 = 跟随上游）。写操作 `set_model_image_cap` 不进演示面。 */
+    case "get_model_image_caps": {
+      const scope = String((args as { scope?: unknown } | undefined)?.scope ?? "wb-cn");
+      return { scope, caps: scope === "wb-cn" ? { "deepseek-v4.1-flash": true } : {} };
+    }
     case "get_gateway_logs": return { logs: demoGatewayLogs() };
     /* 限流探测**只读**状态：演示站从未跑过探测 ⇒ 如实返回 idle（与真机 `model_probe::status` 同形）。
        `probe_start` / `probe_cancel` 是写操作，不进 DEMO_READ_COMMANDS，由 DemoAction 统一拦截。 */
