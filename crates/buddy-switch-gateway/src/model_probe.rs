@@ -208,6 +208,28 @@ pub enum ProbePhase {
     Cancelled,
 }
 
+/// **展示专用**的「上游声明的恢复时刻」——**唯一判定点**（WB / Qoder / Trae 三处探测都走它）。
+///
+/// ## 两道闸
+///
+/// 1. **只在这两档上取**：`rate_limited_model` / `rate_limited_account`。
+///    402（没额度）、`auth_dead`（凭据失效）、`model_blocked`（封禁）、`upstream_queued`（排队 30 秒）
+///    都**没有「等到几点」的概念** —— 给它们编一个时刻会让用户去傻等。
+/// 2. **只从文本里读**，且结果**只进 `upstream_reset_at_ms`**：文案里的 `reset at` 是
+///    **配额窗口重置**、不是解锁时刻（实测 6/6 判错），绝不能进 `reset_at_ms`（那会进冷却，
+///    把号冻掉一天）。
+///
+/// 三家的上游文案都带 `YYYY-MM-DD HH:MM:SS UTC+8` 形态（WB `6004` / Qoder 429 / Trae `4008`），
+/// 故共用 `pool::parse_reset_at_ms`（结构化优先、文案兜底）。
+fn documented_reset_for_limit(state: ProbeState, text: &str) -> Option<i64> {
+    matches!(
+        state,
+        ProbeState::RateLimitedModel | ProbeState::RateLimitedAccount
+    )
+    .then(|| crate::pool::parse_reset_at_ms(text))
+    .flatten()
+}
+
 /// 一格结果。
 ///
 /// `Deserialize` 是给**探测结果台账**（落盘后读回）用的；`PartialEq` 让台账能判断
@@ -219,7 +241,27 @@ pub struct ProbeCell {
     pub model: String,
     pub state: ProbeState,
     pub http_status: u16,
+    /// 上游声明的重置时刻（**配额窗口**，不等于解锁时刻）。大量上游（WB 的 `6004`）不给 ⇒ `None`。
     pub reset_at_ms: Option<i64>,
+    /// **展示专用**：上游声明（结构化 JSON 里没有时从文案 `… reset at <T> UTC+8` 解析）的重置时刻。
+    ///
+    /// ★★ **绝不参与回填**：`probe_outcome_of` 只读 [`Self::reset_at_ms`]。
+    /// 上游文案里的 `reset at` 是**配额窗口**重置（实测 6/6 判错），拿它当冷却时长会把号
+    /// 冷掉几小时甚至一天；而它作为「界面上的恢复时刻」正是用户要看到的那条信息。
+    /// 取值走 `pool::parse_reset_at_ms`（结构化优先、文案兜底），取舍见该函数的文档。
+    #[serde(default)]
+    pub upstream_reset_at_ms: Option<i64>,
+    /// 这一格**实测的时刻**（落盘后仍保留）。
+    ///
+    /// ## 为什么必须逐格记，而不是借作用域的 `updated_at_ms`
+    ///
+    /// `updated_at_ms`（`LedgerFile.scopes[*]`）是**作用域级**的「最近一次有格变化」——
+    /// 拿它给某一行当时间戳，会把「三天前探过的格」标成「刚刚探过」。
+    /// 账号页「实测独有」的每一行都靠本字段回答「这个结论是什么时候的」。
+    ///
+    /// `0` / 缺失 = **老台账**（该版本没记这个字段）⇒ 前端当作「时间未知」，不编。
+    #[serde(default)]
+    pub probed_at_ms: i64,
     /// 上游原文（截断 400 字符），排查用。
     ///
     /// ⚠️ 前端必须**纯文本**渲染（它是不可信输入：控制字符 / ANSI / 标记都可能出现）。
@@ -500,6 +542,8 @@ fn test_cell(uid: &str, model: &str, state: ProbeState) -> ProbeCell {
         state,
         http_status: 200,
         reset_at_ms: None,
+        probed_at_ms: timeutil::now_ms(),
+        upstream_reset_at_ms: None,
         reason: String::new(),
         latency_ms: 1,
     }
@@ -1206,6 +1250,8 @@ async fn probe_cell_wb(state: &GatewayState, region: Region, uid: &str, model: &
         state: ProbeState::Skipped,
         http_status: 0,
         reset_at_ms: None,
+        probed_at_ms: timeutil::now_ms(),
+        upstream_reset_at_ms: None,
         reason: reason.to_string(),
         latency_ms: 0,
     };
@@ -1268,6 +1314,8 @@ async fn probe_cell_wb(state: &GatewayState, region: Region, uid: &str, model: &
                 state: ProbeState::TransportError,
                 http_status: 0,
                 reset_at_ms: None,
+                probed_at_ms: timeutil::now_ms(),
+                upstream_reset_at_ms: None,
                 reason: format!("单格超时（{}s）", PROBE_CELL_TIMEOUT_SECS),
                 latency_ms,
             }
@@ -1283,6 +1331,8 @@ async fn probe_cell_wb(state: &GatewayState, region: Region, uid: &str, model: &
             state: ProbeState::Ok,
             http_status: 200,
             reset_at_ms: None,
+            probed_at_ms: timeutil::now_ms(),
+            upstream_reset_at_ms: None,
             reason: String::new(),
             latency_ms,
         },
@@ -1297,6 +1347,8 @@ async fn probe_cell_wb(state: &GatewayState, region: Region, uid: &str, model: &
                     state: ProbeState::TransportError,
                     http_status: 0,
                     reset_at_ms: None,
+                    probed_at_ms: timeutil::now_ms(),
+                    upstream_reset_at_ms: None,
                     reason: truncate_with_marker(&message, PROBE_REASON_LIMIT),
                     latency_ms,
                 };
@@ -1307,6 +1359,10 @@ async fn probe_cell_wb(state: &GatewayState, region: Region, uid: &str, model: &
                 UpstreamEvent::SoftRate { reset_at_ms, .. } => *reset_at_ms,
                 _ => None,
             };
+            // ★ 展示用的「恢复于」：结构化墙钟没有时，从上游文案里取
+            //   （`… your usage will reset at 2026-10-28 15:33:19 UTC+8 …`）。
+            //   判据与闸门全在 [`documented_reset_for_limit`]；回填仍只读结构化的 `reset_at_ms`。
+            let upstream_reset_at_ms = documented_reset_for_limit(state_key, &message);
             ProbeCell {
                 uid: uid.to_string(),
                 nickname,
@@ -1314,6 +1370,8 @@ async fn probe_cell_wb(state: &GatewayState, region: Region, uid: &str, model: &
                 state: state_key,
                 http_status: status,
                 reset_at_ms,
+                probed_at_ms: timeutil::now_ms(),
+                upstream_reset_at_ms,
                 reason: truncate_with_marker(&message, PROBE_REASON_LIMIT),
                 latency_ms,
             }
@@ -1368,6 +1426,8 @@ async fn probe_cell_qoder(
         state: ProbeState::Skipped,
         http_status: 0,
         reset_at_ms: None,
+        probed_at_ms: timeutil::now_ms(),
+        upstream_reset_at_ms: None,
         reason: reason.to_string(),
         latency_ms: 0,
     };
@@ -1444,6 +1504,8 @@ async fn probe_cell_qoder(
                 state: ProbeState::TransportError,
                 http_status: 0,
                 reset_at_ms: None,
+                probed_at_ms: timeutil::now_ms(),
+                upstream_reset_at_ms: None,
                 reason: truncate_with_marker(&transport_error, PROBE_REASON_LIMIT),
                 latency_ms,
             };
@@ -1456,6 +1518,8 @@ async fn probe_cell_qoder(
                 state: ProbeState::TransportError,
                 http_status: 0,
                 reset_at_ms: None,
+                probed_at_ms: timeutil::now_ms(),
+                upstream_reset_at_ms: None,
                 reason: format!("单格超时（{}s）", PROBE_CELL_TIMEOUT_SECS),
                 latency_ms,
             };
@@ -1471,20 +1535,27 @@ async fn probe_cell_qoder(
             state: ProbeState::Ok,
             http_status,
             reset_at_ms: None,
+            probed_at_ms: timeutil::now_ms(),
+            upstream_reset_at_ms: None,
             reason: String::new(),
             latency_ms,
         },
         // 有错误帧 ⇒ 按 `(状态码, 详情)` 判档（排队 ⇒ `upstream_queued`）。
         Some((judge_status, detail)) => {
-            let detail = truncate_with_marker(&detail, PROBE_REASON_LIMIT);
+            let state_key = probe_state_of_qoder(judge_status, &detail);
+            // ★ 与 WB 同口径：限流两档才取「上游声明的恢复时刻」——从**未截断**的原文解析
+            //   （截断可能切掉末尾的时刻），且只进 `upstream_reset_at_ms`（展示用）。
+            let upstream_reset_at_ms = documented_reset_for_limit(state_key, &detail);
             ProbeCell {
                 uid: uid.to_string(),
                 nickname,
                 model: model.to_string(),
-                state: probe_state_of_qoder(judge_status, &detail),
+                state: state_key,
                 http_status,
                 reset_at_ms: None,
-                reason: detail,
+                probed_at_ms: timeutil::now_ms(),
+                upstream_reset_at_ms,
+                reason: truncate_with_marker(&detail, PROBE_REASON_LIMIT),
                 latency_ms,
             }
         }
@@ -1542,6 +1613,8 @@ async fn probe_cell_trae(
         state: ProbeState::Skipped,
         http_status: 0,
         reset_at_ms: None,
+        probed_at_ms: timeutil::now_ms(),
+        upstream_reset_at_ms: None,
         reason: reason.to_string(),
         latency_ms: 0,
     };
@@ -1587,6 +1660,8 @@ async fn probe_cell_trae(
             } else {
                 probe_state_of_trae(trae_classify_http(status, &detail))
             };
+            // ★ 与 WB / Qoder 同口径：限流两档才取上游声明的恢复时刻（展示用，不进回填）。
+            let upstream_reset_at_ms = documented_reset_for_limit(state_key, &detail);
             return ProbeCell {
                 uid: uid.to_string(),
                 nickname,
@@ -1594,6 +1669,8 @@ async fn probe_cell_trae(
                 state: state_key,
                 http_status: status,
                 reset_at_ms: None,
+                probed_at_ms: timeutil::now_ms(),
+                upstream_reset_at_ms,
                 reason: truncate_with_marker(&detail, PROBE_REASON_LIMIT),
                 latency_ms,
             };
@@ -1606,6 +1683,8 @@ async fn probe_cell_trae(
                 state: ProbeState::TransportError,
                 http_status: 0,
                 reset_at_ms: None,
+                probed_at_ms: timeutil::now_ms(),
+                upstream_reset_at_ms: None,
                 reason: format!("单格超时（{}s）", PROBE_CELL_TIMEOUT_SECS),
                 latency_ms,
             };
@@ -1613,13 +1692,18 @@ async fn probe_cell_trae(
     };
 
     if let Some((code, message)) = error {
+        // ★ Trae 的业务错误在 SSE `event:error` 里（HTTP 200）—— 限流时 Recovery 时刻也在文案里。
+        let state_key = probe_state_of_trae(trae_classify_solo(code, &message));
+        let upstream_reset_at_ms = documented_reset_for_limit(state_key, &message);
         return ProbeCell {
             uid: uid.to_string(),
             nickname,
             model: model.to_string(),
-            state: probe_state_of_trae(trae_classify_solo(code, &message)),
+            state: state_key,
             http_status: status,
             reset_at_ms: None,
+            probed_at_ms: timeutil::now_ms(),
+            upstream_reset_at_ms,
             reason: truncate_with_marker(&message, PROBE_REASON_LIMIT),
             latency_ms,
         };
@@ -1631,6 +1715,8 @@ async fn probe_cell_trae(
         state: ProbeState::Ok,
         http_status: status,
         reset_at_ms: None,
+        probed_at_ms: timeutil::now_ms(),
+        upstream_reset_at_ms: None,
         reason: String::new(),
         latency_ms,
     }
@@ -1931,6 +2017,68 @@ mod tests {
                 "{kind:?} 不得落账号级"
             );
             assert_ne!(state, ProbeState::ModelBlocked, "{kind:?} 不得落模型封禁");
+        }
+    }
+
+    /// ★★ **展示与回填必须分家**（2026-10-27）：WB 的 `6004` 把恢复时刻写在**文案**里
+    /// （`… your usage will reset at 2026-10-28 15:33:19 UTC+8 …`），JSON 里没有数值键。
+    ///
+    /// - 界面要它（否则「实测独有」只能写「恢复时间未知」，而用户看得见上游明明给了时间）；
+    /// - 回填**不能**吃它（配额窗口 ≠ 解锁时刻；拿它当冷却时长会把号冷掉一天）。
+    ///
+    /// 变异：把 `upstream_reset_at_ms` 改成写进 `reset_at_ms` ⇒ 第二条断言红；
+    /// 把展示取值退回只认结构化 ⇒ 第一条断言红。
+    #[test]
+    fn documented_reset_is_display_only() {
+        const BODY: &str = r#"{"code":6004,"msg":"usage exceeds frequency limit, but don't worry, your usage will reset at 2026-10-28 15:33:19 UTC+8, alternatively, you can switch to the other models to continue using it","requestId":"66087274bbf4204952415993c6465fb"}"#;
+        assert_eq!(
+            crate::pool::parse_reset_at_ms(BODY),
+            Some(1_793_172_799_000),
+            "文案里的 `reset at <T> UTC+8` 必须解出（展示用）"
+        );
+        match crate::pool::classify_event(429, BODY) {
+            crate::pool::UpstreamEvent::SoftRate {
+                reset_at_ms,
+                model_scoped,
+            } => {
+                assert_eq!(
+                    reset_at_ms, None,
+                    "文案里的时刻**不得**进 `SoftRate` —— 它会被回填成冷却截止，把号冷掉一天"
+                );
+                assert!(model_scoped, "`6004` ⇒ 模型级限流");
+            }
+            other => panic!("429 + 6004 应为 SoftRate，实际 {other:?}"),
+        }
+    }
+
+    /// ★ 展示用恢复时刻的**闸门**：只有限流两档才取，其余档一律 `None`。
+    ///
+    /// 变异：把 `matches!` 里的两档改宽（例如加上 `NoCredits`）⇒ 最后四条断言红。
+    #[test]
+    fn documented_reset_only_for_the_two_limit_states() {
+        const BODY: &str = r#"{"code":6004,"msg":"usage exceeds frequency limit, your usage will reset at 2026-10-28 15:33:19 UTC+8","requestId":"x"}"#;
+        let expected = Some(1_793_172_799_000);
+        assert_eq!(
+            documented_reset_for_limit(ProbeState::RateLimitedModel, BODY),
+            expected
+        );
+        assert_eq!(
+            documented_reset_for_limit(ProbeState::RateLimitedAccount, BODY),
+            expected
+        );
+        // 402 / 凭据失效 / 封禁 / 排队 —— 都没有「等到几点」的概念。
+        for state in [
+            ProbeState::NoCredits,
+            ProbeState::AuthDead,
+            ProbeState::ModelBlocked,
+            ProbeState::UpstreamQueued,
+            ProbeState::Ok,
+        ] {
+            assert_eq!(
+                documented_reset_for_limit(state, BODY),
+                None,
+                "{state:?} 不得带「恢复时刻」"
+            );
         }
     }
 

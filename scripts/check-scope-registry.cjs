@@ -9516,6 +9516,33 @@ check("★ 客户端限流 × 限流探测：两侧读**同一份**实测结论�
   return "台账卡/网关卡同源（useProbeCells）· 入口 adopt:false · store 按 scope 收窄并合并 · 三档限流";
 });
 
+check("★★ Qoder / Trae 账号页的限流卡必须 `ledger={false}`（否则把 WorkBuddy 的台账串台）", () => {
+  /* 三平台共用 `ClientLimitsCard`，差异只有一个开关。
+     `client_limits` 扫的是 **WorkBuddy 客户端**落盘的会话 jsonl —— 在 Qoder / Trae 页传同样的
+     region **不会报错**，只会把 WB 的限流记录画到别的平台上（串台比空表坏得多，而且肉眼像真数据）。
+     变异：删掉 `ledger={false}` ⇒ 本断言红。 */
+  for (const [rel, page] of [
+    ["src/pages/QoderAccountsPage.tsx", "Qoder"],
+    ["src/pages/TraeAccountsPage.tsx", "Trae"],
+  ]) {
+    const src = readCode(rel);
+    const start = src.indexOf("<ClientLimitsCard");
+    if (start < 0) throw new Error(`${page} 账号页没有挂限流卡（与 WB 不一致）`);
+    const rest = src.slice(start);
+    const tag = rest.slice(0, rest.indexOf("/>"));
+    if (!tag.includes("ledger={false}")) {
+      throw new Error(`${page} 账号页的限流卡缺 \`ledger={false}\` ⇒ 会显示 WorkBuddy 的客户端限流台账`);
+    }
+    if (!tag.includes("probePath=")) {
+      throw new Error(`${page} 账号页的限流卡缺 \`probePath\` ⇒ 「去网关探测」会跳到 WB 的网关页`);
+    }
+  }
+  if (/ledger=\{false\}/.test(readCode("src/pages/AccountsPage.tsx"))) {
+    throw new Error("WorkBuddy 账号页必须走台账模式（`ledger` 默认 true），不能关掉");
+  }
+  return "Qoder/Trae ledger=false + 各自 probePath · WB 保持台账模式";
+});
+
 console.log(`\n${passed} passed / ${failures.length} failed\n`);
 if (failures.length) {
   for (const f of failures) console.error(" - " + f);

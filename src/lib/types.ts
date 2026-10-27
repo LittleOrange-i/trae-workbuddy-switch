@@ -1944,7 +1944,25 @@ export interface ModelProbeCell {
   model: string;
   state: ModelProbeState;
   http_status: number;
+  /** 上游声明的重置时刻（**配额窗口**，非解锁时刻）；上游没给 ⇒ `null`。 */
   reset_at_ms: number | null;
+  /**
+   * **展示专用**的上游声明重置时刻：`reset_at_ms` 为空时，从上游文案
+   * （`… will reset at 2026-10-28 15:33:19 UTC+8 …`）解析出的那个时刻。
+   *
+   * ★★ **不参与回填**（后端 `probe_outcome_of` 只读 `reset_at_ms`）：文案里的时刻是
+   * **配额窗口重置**、不是解锁时刻，拿它当冷却时长会把号冷掉几小时甚至一天。
+   * 界面显示时要标明来源（`resetHint`），不要写成「已恢复」。
+   */
+  upstream_reset_at_ms?: number | null;
+  /**
+   * 这一格**实测的时刻**（落盘台账里也保留）。
+   *
+   * ⚠️ 不要拿作用域的 `updated_at_ms` 顶替：那是「本作用域最近一次有格变化」，
+   * 给某一行用会把三天前探的格标成刚刚探过。
+   * `0` / 缺失 = **老台账**（该版本没记）⇒ 界面显示「时间未知」，不编。
+   */
+  probed_at_ms?: number;
   /** 上游返回原文（**不可信输入**：控制字符 / ANSI / 标记都可能出现，UI 必须纯文本渲染）。 */
   reason: string;
   latency_ms: number;

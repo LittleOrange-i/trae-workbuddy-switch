@@ -39,6 +39,8 @@ import { TraeImportAccountsDialog } from "@/components/trae-import-accounts-dial
 import { ClientlessEmptyCard, ClientlessStrip } from "@/components/clientless-notice";
 import { TraeOAuthLoginDialog } from "@/components/trae-oauth-login-dialog";
 import { RecycleBinSheet } from "@/components/recycle-bin-sheet";
+/* 账号页「限流」卡：与 WB **同一个组件**；Trae 没有客户端限流台账 ⇒ `ledger={false}`。 */
+import { ClientLimitsCard } from "@/components/client-limits-card";
 import { RestartConfirmDialog } from "@/components/restart-confirm-dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -2229,6 +2231,17 @@ export default function TraeAccountsPage() {
                               onDelete={requestDelete}
                             />
         )}
+        /* 列表下方的平台插槽：**限流**卡（与 WB 同一个 `ClientLimitsCard`）。
+           ⚠️ `ledger={false}`：Trae 没有可反推的客户端限流台账，不传会把 **WB 的**记录画到本页。 */
+        footer={
+          <section className="mt-7 min-w-0">
+            <ClientLimitsCard
+              region={variant}
+              ledger={false}
+              probePath="/trae/api-service?sub=models"
+            />
+          </section>
+        }
       />
 
       {/* 签到进度 / 结果：与「全部签到」同源，就地展开不做成独立页。 */}
