@@ -3607,6 +3607,8 @@ export interface QoderWebCreditProbe {
   uidMatches?: boolean;
   /** 响应形状摘要（分组名 / 行数 / 行内键名），不含额度数值。 */
   shape?: unknown;
+  /** 解析后的资源包（S3，字段映射由真样本锚定）。 */
+  packs?: QoderCreditPack[];
   /** 上游原始响应（仅探针返回）。 */
   raw?: unknown;
   message?: string;
@@ -3642,6 +3644,22 @@ export interface QoderWebSessionStatus {
   cookieNames: string[];
   savedAtMs: number;
   verifiedAtMs: number;
+}
+
+/** 一个 Qoder 资源包（积分包）。字段名与上游 snake_case 逐字对应。 */
+export interface QoderCreditPack {
+  group: string;
+  id?: string;
+  source?: string;
+  status?: string;
+  limit: number;
+  used: number;
+  remaining: number;
+  unit?: string;
+  usagePercentage: number;
+  isActive: boolean;
+  /** 毫秒；缺省 = 无到期时间（上游 `expires_at = 0`）。 */
+  expiresAtMs?: number;
 }
 
 /** 查询网页会话状态（只读）。 */

@@ -251,6 +251,8 @@ pub async fn credit_packs_probe<R: Runtime>(
         "cookieNames": names,
         "uidMatches": matches,
         "shape": web_usage::shape_of(&raw),
+        // 解析结果（S3）：真样本锚定的字段映射，前端 S6 直接用它渲染。
+        "packs": web_usage::parse_credit_packs(&raw),
         "raw": raw,
     }))
 }
