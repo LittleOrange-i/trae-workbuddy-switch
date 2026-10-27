@@ -27,7 +27,7 @@
  * 被筛没（整页空态 + 显示全部）。三者混用会让用户以为账号被删了。
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AlertTriangle, ListTree, RotateCw, SearchX, UserPlus } from "lucide-react";
 import { toast } from "sonner";
@@ -188,6 +188,16 @@ export default function AggregateAccountsPage() {
    * 的扫码登录写进国际版账号库。
    */
   const [oauthRegion, setOauthRegion] = useState<Region | null>(null);
+  /**
+   * Qoder 逐资源包明细（issue #111）：按 `scope:uid` 缓存。
+   *
+   * 与其它平台不同，这份数据**不在账号快照里**（走网页会话，仅桌面端 + 需登录一次），
+   * 所以只能打开抽屉时按需拉。拿不到就不渲染资源包区块 —— 聚合页不做登录引导
+   * （那一步在 Qoder 账号页），这里只负责「有就展示」。
+   */
+  const [qoderPackMap, setQoderPackMap] = useState<Record<string, api.QoderWebCreditPacks>>({});
+  /** 上次取数时刻（TTL 用 ref：改它不该触发重渲染）。 */
+  const qoderPackFetchedAt = useRef<Record<string, number>>({});
 
   /** WorkBuddy 主程序位（「WB」那枚）的切换：与账号页同一个向导（含会话迁移）。 */
   const [wbSwitchDialog, setWbSwitchDialog] = useState<{
@@ -1232,6 +1242,36 @@ export default function AggregateAccountsPage() {
 
   const detailAccount = detailRef ? accounts.find((item) => item.ref === detailRef) : undefined;
 
+  /**
+   * 打开抽屉时按需拉 Qoder 逐包（TTL 60s，与 Qoder 账号页同一个常量口径）。
+   *
+   * ★ 依赖用 `detailRef` 而不是 `detailAccount`：后者是每次渲染新算出来的对象，
+   *   把它放进依赖会让 effect 每渲染一次都跑一遍（页面渲染很频繁）。
+   */
+  useEffect(() => {
+    if (!detailAccount || detailAccount.platform !== "qoder") return;
+    const uid = detailAccount.data.uid;
+    const scope = detailAccount.scope;
+    const key = `${scope}:${uid}`;
+    const last = qoderPackFetchedAt.current[key] ?? 0;
+    if (Date.now() - last < 60_000) return;
+    let cancelled = false;
+    api
+      .qoderWebCreditPacks(scope, uid)
+      .then((result) => {
+        if (cancelled) return;
+        qoderPackFetchedAt.current[key] = Date.now();
+        setQoderPackMap((prev) => ({ ...prev, [key]: result }));
+      })
+      .catch(() => {
+        /* 静默：拿不到逐包不是错误，抽屉不渲染该区块即可。 */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailRef]);
+
 
   /**
    * 抽屉的数据上下文。**只喂页面已经有的东西**（不为了打开抽屉再发一轮请求）：
@@ -1271,8 +1311,20 @@ export default function AggregateAccountsPage() {
       traePrograms:
         detailAccount.platform === "trae" ? traeProgramsOf(signals, detailAccount) : undefined,
       qoderPrograms: detailAccount.platform === "qoder" ? signals?.qoderPrograms : undefined,
+      qoderPacks:
+        detailAccount.platform === "qoder"
+          ? qoderPackMap[`${detailAccount.scope}:${detailAccount.data.uid}`]
+          : undefined,
     };
-  }, [creditOf, detailAccount, signalsByScope, t, wbCnStatus, wbGlobalStatus]);
+  }, [
+    creditOf,
+    detailAccount,
+    qoderPackMap,
+    signalsByScope,
+    t,
+    wbCnStatus,
+    wbGlobalStatus,
+  ]);
 
   /**
    * 抽屉头部的「当前登录」徽章（issue #89 · 4.3 的一部分）。

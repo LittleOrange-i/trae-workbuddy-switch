@@ -30,7 +30,7 @@
  */
 
 import type { CreditExpiry } from "@/lib/types";
-import type { QoderProgramStatus } from "@/lib/api";
+import type { QoderProgramStatus, QoderWebCreditPacks } from "@/lib/api";
 import type { TraeProgram } from "@/components/trae-account-card";
 import type {
   DetailPack,
@@ -72,6 +72,14 @@ export interface AggregateDetailContext {
   traePrograms?: TraeProgram[];
   /** Qoder 的程序位（信号层 `qoderPrograms`，按区域一份）。 */
   qoderPrograms?: QoderProgramStatus[];
+  /**
+   * Qoder 的逐资源包明细（issue #111）。
+   *
+   * 与其它字段不同，这一份**必须现拉**（网页会话链路，只有桌面端拿得到）⇒
+   * 页面在打开抽屉时按需取，取不到就是 `undefined`/`available:false`，
+   * 此时抽屉不渲染资源包区块（不是渲染空包）。
+   */
+  qoderPacks?: QoderWebCreditPacks | null;
 }
 
 const dash = "—";
@@ -376,5 +384,49 @@ export function aggregateDetailPacks(
     );
   }
 
+  if (account.platform === "qoder") {
+    /* Qoder 的逐包来自**网页会话**（issue #111）：拿不到时返回空数组，抽屉就不渲染
+       资源包区块 —— 与「该账号没有包」是两件事，界面上靠「有没有区块」区分不了，
+       所以真正的引导放在 Qoder 账号页（那里有登录入口）。聚合页只做展示。 */
+    const packs = ctx.qoderPacks;
+    if (!packs?.available) return [];
+    return packs.packs
+      /* 零额度条目（真机上 `plan_quota` 那条 `limit_value = 0`）不进列表：
+         它的「0 / 0」会被读成「用完了」，而它本来就不计量。 */
+      .filter((pack) => pack.limit > 0 || pack.remaining > 0)
+      .map((pack, index) => {
+        const expired = pack.expiresAtMs !== undefined ? pack.expiresAtMs <= Date.now() : false;
+        const expiringSoon =
+          !expired &&
+          pack.expiresAtMs !== undefined &&
+          pack.expiresAtMs - Date.now() <= 14 * 24 * 3600 * 1000;
+        return toPack({
+          key: pack.id ?? `qoder-pack-${index}`,
+          name: qoderPackSourceName(t, pack.source),
+          total: pack.limit,
+          remaining: pack.remaining,
+          used: pack.used,
+          expireAt: pack.expiresAtMs ?? null,
+          expired,
+          expiringSoon,
+        });
+      });
+  }
+
   return [];
+}
+
+/** 上游 `source` → 聚合页文案（**不复用** Qoder 页的词条：文案域不同，混用会串）。 */
+function qoderPackSourceName(t: Translate, source: string | undefined): string {
+  switch (source) {
+    case "PLAN":
+      return t("aggregate.detail.qoderPackPlan");
+    case "RESOURCE_PACKAGE_SOURCE_BONUS":
+      return t("aggregate.detail.qoderPackBonus");
+    case "RESOURCE_PACKAGE_SOURCE_DEDICATED":
+    case "DEDICATED":
+      return t("aggregate.detail.qoderPackDedicated");
+    default:
+      return t("aggregate.detail.packFallbackName");
+  }
 }

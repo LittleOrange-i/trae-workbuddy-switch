@@ -128,6 +128,9 @@ export const en = {
   "aggregate.detail.credentialRelogin": "Sign-in required",
   "aggregate.detail.credentialMissing": "Credential missing",
   "aggregate.detail.unknown": "Unknown",
+  "aggregate.detail.qoderPackPlan": "Plan quota",
+  "aggregate.detail.qoderPackBonus": "Bonus pack",
+  "aggregate.detail.qoderPackDedicated": "Dedicated pack",
   "aggregate.detail.packFallbackName": "Credit pack",
   "aggregate.detail.groupSaved": "Group saved",
 

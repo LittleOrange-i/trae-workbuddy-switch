@@ -142,6 +142,9 @@ export const zh = {
   "aggregate.detail.credentialRelogin": "需重新登录",
   "aggregate.detail.credentialMissing": "凭据缺失",
   "aggregate.detail.unknown": "未知",
+  "aggregate.detail.qoderPackPlan": "套餐额度",
+  "aggregate.detail.qoderPackBonus": "赠送资源包",
+  "aggregate.detail.qoderPackDedicated": "专用资源包",
   "aggregate.detail.packFallbackName": "积分包",
   "aggregate.detail.groupSaved": "分组已保存",
 
