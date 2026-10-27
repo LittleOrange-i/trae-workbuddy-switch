@@ -139,7 +139,7 @@ macOS 未签名会触发 Gatekeeper，先 `xattr -d com.apple.quarantine <路径
 | `index.html` `vite.config.ts` `tsconfig*.json` `components.json` | 前端构建入口与工具配置，工具链按固定路径找它们 | 不能动 |
 | `package.json` `package-lock.json` / `Cargo.toml` `Cargo.lock` `rustfmt.toml` | 两套依赖清单与格式化配置 | 不能动 |
 | `Dockerfile` `docker-compose.yml` `.dockerignore` `docker/` | 服务端容器形态；`docker/entrypoint.sh` 被 Dockerfile 引用 | 构建上下文必须在根 |
-| `README.md` / `README.cn.md`（中英两版）`CONTRIBUTING*.md` `LICENSE` `AGENTS.md` | 面向使用者与协作者的门面；`AGENTS.md` 另含 UI / 提交 / 文档规范 | 不能动 |
+| `README.md` / `README.en.md`（中英两版）`CONTRIBUTING*.md` `LICENSE` `AGENTS.md` | 面向使用者与协作者的门面；`AGENTS.md` 另含 UI / 提交 / 文档规范 | 不能动 |
 | `src/` `src-tauri/` `crates/` `npm/` `scripts/` `docs/` `public/` | 源码、宿主、核心库、npm 包、工具脚本、文档、Web 静态资源 | — |
 | `node_modules/` `target/` `dist/` `deliverables/` | 依赖与构建产物（**全部被 `.gitignore` 忽略**） | 可随时删，重跑 `npm ci` / 构建即回来 |
 

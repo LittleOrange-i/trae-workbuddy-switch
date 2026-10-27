@@ -18,7 +18,7 @@
 //   ④ `.dockerignore` **必须**排除 `dist/` —— 否则宿主机那份旧前端可能被编进二进制，
 //      表现为「页面正常但内容是旧的」。
 //   ⑥ 发布工作流（`.github/workflows/docker.yml`）里的**镜像名**必须与
-//      `docker-compose.yml` / `README.md` / `docs/guides/DOCKER.md` 逐字一致。
+//      `docker-compose.yml` / `README.md` / `README.en.md` / `docs/guides/DOCKER.md` 逐字一致。
 //      漂移的症状极隐蔽：compose 拉不到镜像就**静默回落成本地构建**，
 //      用户只看到「很慢」，看不到「错」。同一个工作流还必须留 `packages: write`，
 //      少了它只有到打 tag 那一轮才会 403。
@@ -185,6 +185,7 @@ if (dockerfile) {
 const WORKFLOWS_DIR = path.join(ROOT, ".github", "workflows");
 const DOCKER_WORKFLOW = path.join(WORKFLOWS_DIR, "docker.yml");
 const README = path.join(ROOT, "README.md");
+const README_EN = path.join(ROOT, "README.en.md");
 const DOCKER_GUIDE = path.join(ROOT, "docs", "guides", "DOCKER.md");
 
 let publishedImage = null;
@@ -234,6 +235,7 @@ if (!fs.existsSync(WORKFLOWS_DIR)) {
       // 文档：README 是「发现 Docker 入口」的唯一地方，部署指南是唯一细节来源。
       for (const [label, file] of [
         ["README.md", README],
+        ["README.en.md", README_EN],
         ["docs/guides/DOCKER.md", DOCKER_GUIDE],
       ]) {
         const source = read(file);
