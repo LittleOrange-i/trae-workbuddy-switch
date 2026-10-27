@@ -61,7 +61,7 @@ export const zh = {
   "topbar.refreshDone": "已刷新",
   "topbar.refreshDoneDesc": "{scope} 的账号与状态已更新",
   "topbar.refreshFailed": "刷新失败",
-  "topbar.theme": "切换明暗主题",
+  "topbar.theme": "切换主题",
   "topbar.appMenu": "应用设置",
 
   // ---- 页头作用域副标题（redesign §3.2：页头统一「作用域 · 说明」+ 右侧 scope-chip）----
@@ -133,11 +133,12 @@ export const zh = {
 
   "appSettings.appearance.title": "外观",
   "appSettings.appearance.theme.label": "主题",
-  "appSettings.appearance.theme.description": "选择浅色、深色，或跟随系统外观自动切换",
+  "appSettings.appearance.theme.description": "选择浅色、深色、纯黑（OLED 省电），或跟随系统外观自动切换",
   "appSettings.appearance.theme.aria": "主题",
   "appSettings.theme.system": "系统",
   "appSettings.theme.light": "浅色",
   "appSettings.theme.dark": "深色",
+  "appSettings.theme.black": "纯黑",
 
   "appSettings.language.title": "语言",
   "appSettings.language.label": "界面语言",

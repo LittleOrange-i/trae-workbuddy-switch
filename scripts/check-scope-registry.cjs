@@ -8713,6 +8713,48 @@ check("★ §2 明暗主题切换：钉住行为而非只钉 localStorage 键名
   return "主题既持久化又作用到 DOM";
 });
 
+check("★ §2 纯黑（OLED）主题：`black` 必须是 `dark` 的**超集**，不是替代品", () => {
+  const theme = readCode("src/lib/theme.ts");
+  // 只挂 black 而不挂 dark ⇒ 全仓上百处 `dark:` 工具类集体失效（`@custom-variant dark (&:is(.dark *))`）。
+  if (!/classList\.toggle\(\s*"dark"/.test(theme)) throw new Error("applyTheme 不再挂 .dark 类");
+  if (!/classList\.toggle\(\s*"black"/.test(theme)) throw new Error("applyTheme 不再挂 .black 类");
+  if (!/preference === "black"/.test(theme)) throw new Error("black 未参与深浅推导（纯黑会渲染成浅色）");
+
+  const css = fs.readFileSync(path.join(ROOT, "src/index.css"), "utf8");
+  const darkAt = css.search(/^\.dark\s*\{/m);
+  const blackAt = css.search(/^\.black\s*\{/m);
+  if (darkAt < 0) throw new Error("index.css 缺 `.dark` 令牌块");
+  if (blackAt < 0) throw new Error("index.css 缺 `.black` 令牌块");
+  // 同特异性靠源码顺序取胜：`.black` 必须排在 `.dark` 之后，否则整块静默失效、控制台零报错。
+  if (blackAt < darkAt) throw new Error("`.black` 排在 `.dark` 之前 —— 同特异性下会被 `.dark` 覆盖");
+
+  const block = css.slice(blackAt, css.indexOf("\n}", blackAt));
+  if (!/--background:\s*oklch\(\s*0\s+0\s+0\s*\)/.test(block)) {
+    throw new Error("纯黑的 `--background` 必须是 `oklch(0 0 0)`（否则只是「更深的深色」，不是纯黑）");
+  }
+  // 只改 background 不改面板 ⇒ 纯黑底上浮起一片深色的灰蓝板子，比原深色更突兀。
+  for (const token of ["--card", "--card-2", "--popover", "--sidebar"]) {
+    if (!block.includes(`${token}:`)) throw new Error(`\`.black\` 缺 ${token}`);
+  }
+
+  for (const rel of [SHELL_LOCALE_ZH, SHELL_LOCALE_EN]) {
+    if (!/"appSettings\.theme\.black"\s*:/.test(fs.readFileSync(path.join(ROOT, rel), "utf8"))) {
+      throw new Error(`${path.basename(rel)} 缺 appSettings.theme.black`);
+    }
+  }
+  // 选项列表只能来自 `THEME_PREFERENCES` / `THEME_LABEL_KEYS`：两处各写一份必然漏改一处。
+  for (const rel of ["src/components/shell/app-menu.tsx", "src/components/app-settings.tsx"]) {
+    const code = readCode(rel);
+    if (!/THEME_PREFERENCES/.test(code)) {
+      throw new Error(`${path.basename(rel)} 未从 THEME_PREFERENCES 渲染选项`);
+    }
+    if (/"appSettings\.theme\.black"/.test(code)) {
+      throw new Error(`${path.basename(rel)} 手写了词条键（应走 THEME_LABEL_KEYS）`);
+    }
+  }
+  return "black ⊃ dark · `.black` 在 `.dark` 之后 · 背景为纯黑 · 两处列表同源";
+});
+
 check("★ §2 表格 / 卡片视图切换存在（不持久化是刻意的）", () => {
   const toolbar = stripComments(
     fs.readFileSync(path.join(ROOT, "src/components/account-toolbar.tsx"), "utf8"),

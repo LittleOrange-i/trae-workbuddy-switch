@@ -360,7 +360,7 @@ A background loop sets the account used by **subsequent CodeBuddy CLI launches**
 
 | Capability | Notes |
 | --- | --- |
-| App settings (⚙) | Theme (light / dark / system), UI language (简体中文 / English), silent start to tray, close-to-tray, auto-update |
+| App settings (⚙) | Theme (light / dark / pure black OLED / system), UI language (简体中文 / English), silent start to tray, close-to-tray, auto-update |
 | Global backup & restore | Covers every scope at once, selectable by accounts / config / gateway, **no credentials by default** |
 | Skill manager | Scans `skills/*/SKILL.md`, toggles each entry (line-level rewrite, other bytes preserved), moves entries across regions, imports from zip |
 | Client settings hosting | Reads and writes the upstream client's own `settings.json`: six-slot spec table, format fingerprint, minimal byte-level patch, backup / restore / diff |

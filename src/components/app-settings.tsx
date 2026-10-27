@@ -21,7 +21,14 @@ import { SCOPES, scopeOf, scopeParts, type Scope } from "@/lib/scope";
 import { planScopeShortcuts, SCOPE_SHORTCUT_LIMIT } from "@/lib/scope-shortcuts";
 import { useVisibleScopes } from "@/lib/scope-visibility";
 import { useShortcutsEnabled } from "@/lib/shortcut-preference";
-import { getThemePreference, setThemePreference, type ThemePreference } from "@/lib/theme";
+import {
+  getThemePreference,
+  isThemePreference,
+  setThemePreference,
+  THEME_LABEL_KEYS,
+  THEME_PREFERENCES,
+  type ThemePreference,
+} from "@/lib/theme";
 import { useAutoCheckUpdate } from "@/lib/update-preference";
 import type { GithubConfig, UpdateInfo } from "@/lib/types";
 import { GITHUB_RELEASE_URL, GITHUB_REPOSITORY_URL, openReleaseUrl } from "@/lib/update";
@@ -456,7 +463,7 @@ function AppearanceCard({ variant }: { variant: AppSettingsVariant }) {
   const [theme, setTheme] = useState<ThemePreference>(getThemePreference);
 
   function onThemeChange(value: string) {
-    if (value !== "system" && value !== "light" && value !== "dark") return;
+    if (!isThemePreference(value)) return;
     setThemePreference(value);
     setTheme(value);
   }
@@ -484,9 +491,11 @@ function AppearanceCard({ variant }: { variant: AppSettingsVariant }) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="system">{t("appSettings.theme.system")}</SelectItem>
-              <SelectItem value="light">{t("appSettings.theme.light")}</SelectItem>
-              <SelectItem value="dark">{t("appSettings.theme.dark")}</SelectItem>
+              {THEME_PREFERENCES.map((key) => (
+                <SelectItem key={key} value={key}>
+                  {t(THEME_LABEL_KEYS[key])}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </SettingsFieldRow>

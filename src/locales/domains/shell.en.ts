@@ -63,7 +63,7 @@ export const en = {
   "topbar.refreshDone": "Refreshed",
   "topbar.refreshDoneDesc": "{scope}: accounts and status updated",
   "topbar.refreshFailed": "Refresh failed",
-  "topbar.theme": "Switch light/dark theme",
+  "topbar.theme": "Switch theme",
   "topbar.appMenu": "App settings",
 
   // ---- Page-head scope subtitles (redesign §3.2) ----
@@ -136,11 +136,12 @@ export const en = {
   "appSettings.appearance.title": "Appearance",
   "appSettings.appearance.theme.label": "Theme",
   "appSettings.appearance.theme.description":
-    "Use light, dark, or follow the system appearance",
+    "Light, dark, pure black (OLED-friendly), or follow the system",
   "appSettings.appearance.theme.aria": "Theme",
   "appSettings.theme.system": "System",
   "appSettings.theme.light": "Light",
   "appSettings.theme.dark": "Dark",
+  "appSettings.theme.black": "Pure black",
 
   "appSettings.language.title": "Language",
   "appSettings.language.label": "Interface language",
