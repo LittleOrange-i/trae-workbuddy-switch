@@ -64,8 +64,8 @@ import { AccountWorkbench } from "@/components/account-workbench";
 import { AddAccountDrawer } from "@/components/add-account-drawer";
 import { ExportAccountsDialog } from "@/components/export-accounts-dialog";
 import { ImportAccountsDialog } from "@/components/import-accounts-dialog";
-/* 账号页「实测限流」卡（Qoder/Trae 共用；WB 用带台账的 `ClientLimitsCard`）。 */
-import { ProbeLimitsCard } from "@/components/probe-limits-card";
+/* 账号页「限流」卡：与 WB **同一个组件**；Qoder 没有客户端限流台账 ⇒ `ledger={false}`。 */
+import { ClientLimitsCard } from "@/components/client-limits-card";
 import { RecycleBinSheet } from "@/components/recycle-bin-sheet";
 import {
   QoderAccountCard,
@@ -96,7 +96,7 @@ import type {
   QoderProgramStatus,
 } from "@/lib/api";
 import { accountSearchText } from "@/lib/account-search";
-import { packSourceLabel, packState } from "@/lib/qoder-packs";
+import { PACKS_TTL_MS, packSourceLabel, packState } from "@/lib/qoder-packs";
 import {
   filterAccounts,
   groupAccounts,
@@ -189,6 +189,10 @@ export default function QoderAccountsPage() {
    * 绝不显示空区块 —— 那是「不知道」伪装成「没有」。
    */
   const [webPacks, setWebPacks] = useState<Record<string, api.QoderWebCreditPacks>>({});
+  /** 正在取逐包的账号（浮层里显示「读取中」而不是「未登录」）。 */
+  const [packsLoading, setPacksLoading] = useState<Record<string, boolean>>({});
+  /** 每账号上次取数时刻（TTL 用 ref：改它不该触发重渲染）。 */
+  const packsFetchedAt = useRef<Record<string, number>>({});
   const [proBusy, setProBusy] = useState<string | null>(null);
   const [detailAutoEditRemark, setDetailAutoEditRemark] = useState(false);
   const [detailAutoEditGroup, setDetailAutoEditGroup] = useState(false);
@@ -703,18 +707,61 @@ export default function QoderAccountsPage() {
   }
 
   /**
+   * 取某账号的逐包明细（带 TTL；`force` 绕过 TTL）。
+   *
+   * ★ 并发去重：浮层与抽屉可能同时触发同一个账号 —— 用 `packsLoading` 挡第二次，
+   * 否则会并发打两次上游（逐包接口要带会话 Cookie，重复调用没有意义）。
+   */
+  async function loadPacks(uid: string, force = false) {
+    if (!uid) return;
+    if (packsLoading[uid]) return;
+    const last = packsFetchedAt.current[uid] ?? 0;
+    if (!force && webPacks[uid] && Date.now() - last < PACKS_TTL_MS) return;
+    setPacksLoading((prev) => ({ ...prev, [uid]: true }));
+    try {
+      const result = await api.qoderWebCreditPacks(scope, uid);
+      packsFetchedAt.current[uid] = Date.now();
+      setWebPacks((prev) => ({ ...prev, [uid]: result }));
+    } catch {
+      /* 静默：详情拿不到不是错误，浮层会按 `packs` 为空给出引导。 */
+    } finally {
+      setPacksLoading((prev) => {
+        const next = { ...prev };
+        delete next[uid];
+        return next;
+      });
+    }
+  }
+
+  /**
    * 「登录 Qoder 网页端」（issue #111）：开一个独立窗口让用户登录一次。
    *
    * 为什么需要这一步：逐包明细只存在于网页端私有接口，只认浏览器会话 Cookie，
    * 而本仓 Qoder 的设备码登录**从不产生网页会话**。登录态落在本地缓存后，
    * 以后取逐包就不必再登录（见 `web_session`）。
    */
-  async function openWebLogin() {
+  async function openWebLogin(account: QoderAccountView) {
     try {
       await api.qoderWebLoginOpen(scope);
       toast.success(t("qoder.page.accounts.web.loginToast"));
     } catch (e) {
       toast.error(api.asError(e));
+      return;
+    }
+    /* 登录是**在另一个窗口**里完成的 ⇒ 主窗口拿不到「登录成功」事件。
+       轮询会话状态（本地命令，不打上游），一检测到就立刻刷新该账号的逐包。
+       最多等 2 分钟（40 × 3s）：再长说明用户没打算现在登录，没必要一直转。 */
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      try {
+        const status = await api.qoderWebSessionStatus(scope, account.uid);
+        if (status.hasSession) {
+          await loadPacks(account.uid, true);
+          return;
+        }
+      } catch {
+        /* 单次查询失败不终止轮询（窗口可能正处在导航中）。 */
+      }
     }
   }
 
@@ -965,28 +1012,13 @@ export default function QoderAccountsPage() {
     ];
   }, [detail, credits, t, webPacks]);
 
-  /**
-   * 打开抽屉时取一次逐包明细。
-   *
-   * ★ 失败**不弹错**：`available: false` 是合法结果（未登录 / 会话过期 / 上游抖动），
-   * 界面回落聚合行即可；只有真正异常的 `Err` 才走 catch，而那时也不打扰用户。
-   */
+  /** 打开抽屉时取一次逐包（TTL 内不重复请求）。 */
   useEffect(() => {
     const uid = detail?.uid;
-    if (!uid) return;
-    let cancelled = false;
-    api
-      .qoderWebCreditPacks(scope, uid)
-      .then((result) => {
-        if (!cancelled) setWebPacks((prev) => ({ ...prev, [uid]: result }));
-      })
-      .catch(() => {
-        /* 静默：没有逐包不是错误，界面已回落聚合行。 */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [detail?.uid, scope]);
+    if (uid) void loadPacks(uid);
+    // `loadPacks` 是纯读取 + setState，不依赖其它 props；只按 uid 变化触发。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.uid]);
 
   /** 打开抽屉时查一次 Pro 升级包资格（活动下线/接口不可用 ⇒ 静默不渲染）。 */
   useEffect(() => {
@@ -1355,7 +1387,7 @@ export default function QoderAccountsPage() {
               setExportTargets([target]);
               setExportOpen(true);
             }}
-            onWebLogin={() => void openWebLogin()}
+            onWebLogin={(target) => void openWebLogin(target)}
             onDelete={setPendingDelete}
             onRefreshPart={(kind) => onRefreshPart(account, kind)}
             refreshingKinds={refreshPartBusy.kindsOf(account.uid)}
@@ -1385,7 +1417,10 @@ export default function QoderAccountsPage() {
                 setExportTargets([account]);
                 setExportOpen(true);
               }}
-              onWebLogin={() => void openWebLogin()}
+              onWebLogin={(target) => void openWebLogin(target)}
+              packs={webPacks[account.uid]}
+              packsLoading={!!packsLoading[account.uid]}
+              onRequestPacks={(target) => void loadPacks(target.uid)}
               credits={
                 row && row.ok
                   ? { remaining: row.remaining ?? 0, total: row.total ?? 0, plan: row.plan ?? null }
@@ -1397,12 +1432,16 @@ export default function QoderAccountsPage() {
             />
           );
         }}
-        /* 列表下方的平台插槽：**实测限流**。
-           Qoder 没有可反推的客户端日志（WB 才有 `client_limits`）⇒ 这里只有「实测」那一半，
-           故用 `ProbeLimitsCard` 而不是 WB 的 `ClientLimitsCard`（两者同位置、同一套时间口径）。 */
+        /* 列表下方的平台插槽：**限流**卡（与 WB 同一个 `ClientLimitsCard`、同一几何与时间口径）。
+           ⚠️ `ledger={false}`：Qoder 没有可反推的客户端日志（`client_limits` 扫的是 WB 的 jsonl），
+           不传它会把 **WB 的**限流记录画到本页上 —— 串台比空表坏得多。 */
         footer={
           <section className="mt-7 min-w-0">
-            <ProbeLimitsCard region={region} probePath="/qoder/api-service?sub=models" />
+            <ClientLimitsCard
+              region={region}
+              ledger={false}
+              probePath="/qoder/api-service?sub=models"
+            />
           </section>
         }
       />

@@ -17,6 +17,15 @@ import type { Translate } from "@/lib/i18n";
  */
 export const EXPIRING_SOON_MS = 14 * 24 * 3600 * 1000;
 
+/**
+ * 逐包数据的**前端缓存有效期**：60 秒。
+ *
+ * 为什么需要 TTL：浮层打开即请求、卡片与抽屉都会触发 ⇒ 没有 TTL 的话，同一个账号
+ * 会被点一次打一次上游（逐包接口要带会话 Cookie，打多了容易被判异常）。
+ * 60s 是「够新鲜」与「别打扰上游」的折中；显式「刷新」按钮走 `force`，不受它限制。
+ */
+export const PACKS_TTL_MS = 60_000;
+
 /** 包级状态（**行内差异**，不往卡片上挂徽章 —— 卡片是固定版式）。 */
 export type QoderPackState = "expired" | "expiring" | "normal" | "zero";
 

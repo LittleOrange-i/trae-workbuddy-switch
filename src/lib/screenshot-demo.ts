@@ -2015,6 +2015,94 @@ function demoQoderUsage(scope: string): unknown {
  * CLI `missing`（没装 / 没登录过）—— 四态是四种不同的引导动作，压成布尔会给错方向。
  * 路径按 Windows 形态写（演示环境即 Windows），与 `qoder::paths` 的派生一致。
  */
+/** 演示用：Qoder 额度视图（issue #111 之后卡片指标行与浮层都需要它）。 */
+function demoQoderCredits(scope: string): unknown {
+  const global = scope.endsWith("global");
+  const rows = global
+    ? [{ uid: "qg1", name: "Qoder Global", remaining: 300, used: 100, total: 400, plan: "Pro" }]
+    : [
+        { uid: "q1", name: "jackey", remaining: 890, used: 10, total: 900, plan: "Pro" },
+        { uid: "q2", name: "team-qoder", remaining: 0, used: 100, total: 100, plan: null },
+      ];
+  const sum = rows.reduce(
+    (acc, row) => ({ remaining: acc.remaining + row.remaining, total: acc.total + row.total }),
+    { remaining: 0, total: 0 },
+  );
+  return {
+    region: global ? "global" : "cn",
+    summary: { okAccounts: rows.length, failedAccounts: 0, ...sum },
+    accounts: rows.map((row) => ({
+      uid: row.uid,
+      name: row.name,
+      ok: true,
+      authRaw: null,
+      refreshedAt: Date.now(),
+      updatedAt: Date.now(),
+      remaining: row.remaining,
+      used: row.used,
+      total: row.total,
+      isExceeded: row.remaining <= 0,
+      plan: row.plan,
+    })),
+  };
+}
+
+/**
+ * 演示用：逐包明细。
+ *
+ * 刻意给四种形态：**正常 / 临期（5 天后）/ 已过期 / 零额度套餐条目** ——
+ * 否则演示站只能看到一种颜色，等于没演示行内差异。
+ */
+function demoQoderWebPacks(uid: string): unknown {
+  const DAY = 24 * 3600 * 1000;
+  const now = Date.now();
+  const pack = (
+    id: string,
+    group: string,
+    source: string,
+    limit: number,
+    used: number,
+    expiresAtMs: number,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    id,
+    group,
+    source,
+    status: expiresAtMs > 0 && expiresAtMs < now ? "EXPIRED" : "ACTIVE",
+    limit,
+    used,
+    remaining: Math.max(0, limit - used),
+    unit: "credits",
+    usagePercentage: limit > 0 ? Math.round((used / limit) * 100) : 0,
+    isActive: !(expiresAtMs > 0 && expiresAtMs < now),
+    expiresAtMs: expiresAtMs > 0 ? expiresAtMs : undefined,
+    ...extra,
+  });
+
+  const packs =
+    uid === "q2"
+      ? [pack("demo-p3", "resource_package_quota", "RESOURCE_PACKAGE_SOURCE_BONUS", 100, 100, now - DAY)]
+      : [
+          pack("demo-p0", "plan_quota", "PLAN", 0, 0, 0),
+          pack("demo-p1", "resource_package_quota", "RESOURCE_PACKAGE_SOURCE_BONUS", 100, 0, now + 30 * DAY),
+          pack("demo-p2", "resource_package_quota", "RESOURCE_PACKAGE_SOURCE_BONUS", 500, 110, now + 5 * DAY),
+        ];
+
+  const counted = packs.filter((p) => p.limit > 0);
+  return {
+    available: true,
+    packs,
+    summary: {
+      count: counted.length,
+      zeroCount: packs.length - counted.length,
+      limit: counted.reduce((n, p) => n + p.limit, 0),
+      used: counted.reduce((n, p) => n + p.used, 0),
+      remaining: counted.reduce((n, p) => n + p.remaining, 0),
+    },
+    verifiedAtMs: now,
+  };
+}
+
 function demoQoderLocalSources(scope: string): unknown {
   const global = scope.endsWith("global");
   const region = global ? "global" : "cn";
@@ -3375,6 +3463,26 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       const scope = String((args as { scope?: unknown } | undefined)?.scope ?? "");
       return demoQoderLocalSources(scope);
     }
+    /* issue #111 · 逐资源包明细（只读）。演示里给三条**不同状态**的包 + 一条套餐占位，
+       截图能同时看到「正常 / 临期 / 已过期 / 零额度」四种行内形态。 */
+    case "qoder_credits": {
+      const scope = String((args as { scope?: unknown } | undefined)?.scope ?? "");
+      return demoQoderCredits(scope);
+    }
+    case "qoder_web_credit_packs": {
+      const uid = String((args as { uid?: unknown } | undefined)?.uid ?? "");
+      return demoQoderWebPacks(uid);
+    }
+    case "qoder_web_session_status":
+      /* 演示站「已登录」：浮层直接展示逐包，不需要登录引导。 */
+      return {
+        hasSession: true,
+        expired: false,
+        source: "stored",
+        cookieNames: ["qoder_session"],
+        savedAtMs: Date.now() - 3_600_000,
+        verifiedAtMs: Date.now() - 600_000,
+      };
     case "qoder_program_status": {
       const scope = String((args as { scope?: unknown } | undefined)?.scope ?? "");
       return demoQoderPrograms(scope);

@@ -232,6 +232,8 @@ const DEMO_READ_COMMANDS = new Set([
   // 网关五条只读：config / status / models / keys / logs —— 同样不进写操作
   //（保存配置 / 建 Key / 吊销 / 恢复 / 删除 / 清日志）。
   "get_qoder_accounts", "get_qoder_local_sources", "qoder_program_status", "qoder_usage",
+  // issue #111 · 逐包链路（三条都只读；演示站要有数据，否则卡片指标行与浮层无法截图）。
+  "qoder_credits", "qoder_web_credit_packs", "qoder_web_session_status",
   // issue #47：逐账号「今日签到状态」（**只读**）。
   "qoder_checkin_status_map",
   "get_qoder_gateway_config", "qoder_gateway_status", "get_qoder_gateway_models",

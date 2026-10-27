@@ -47,6 +47,7 @@ import {
 
 import { AVATAR_TEXT_CLASS, accountInitials, avatarTone } from "@/components/account-card";
 import { Badge } from "@/components/ui/badge";
+import { QoderPacksPopover } from "@/components/qoder/qoder-packs-popover";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { DemoAction } from "@/components/demo-action";
@@ -66,7 +67,7 @@ import {
 } from "@/components/account-menu-parts";
 import type { AccountRefreshKind } from "@/lib/account-refresh";
 import { shouldOpenAccountDetail } from "@/lib/account-open-guard";
-import type { QoderAccountView, QoderProgramStatus } from "@/lib/api";
+import type { QoderAccountView, QoderProgramStatus, QoderWebCreditPacks } from "@/lib/api";
 import { demoModeEnabled } from "@/lib/demo-mode";
 import { displayText } from "@/lib/display-text";
 import { useT, type Translate } from "@/lib/i18n";
@@ -406,6 +407,11 @@ export interface QoderAccountCardProps {
   onExport?: (account: QoderAccountView) => void;
   /** 「更多 → 登录 Qoder 网页端」（issue #111；不传 ⇒ 不渲染该项）。 */
   onWebLogin?: (account: QoderAccountView) => void;
+  /** 该账号的逐包明细（`undefined` = 还没请求；`null` = 请求过但没结果）。 */
+  packs?: QoderWebCreditPacks | null;
+  packsLoading?: boolean;
+  /** 打开浮层时触发取数（缓存与 TTL 由页面持有）。 */
+  onRequestPacks?: (account: QoderAccountView) => void;
   /**
    * 单项刷新（积分 / 今日 Token / 签到状态 / 凭据状态）。
    * 传了 ⇒ 菜单出现「刷新」分组（四项各自独立）；不传 ⇒ 菜单与原来一致。
@@ -435,6 +441,9 @@ export function QoderAccountCard({
   onCheckin,
   onExport,
   onWebLogin,
+  packs,
+  packsLoading = false,
+  onRequestPacks,
   onRefreshPart,
   refreshingKinds,
   doneKinds,
@@ -572,6 +581,13 @@ export function QoderAccountCard({
                 <span className="text-foreground">{credits.plan}</span>
               </span>
             ) : null}
+            {/* 两级显示的**第二级入口**：聚合行照旧，逐包在浮层里（issue #111 R6）。 */}
+            <QoderPacksPopover
+              packs={packs}
+              loading={packsLoading}
+              onRequest={() => onRequestPacks?.(account)}
+              onWebLogin={() => onWebLogin?.(account)}
+            />
           </div>
         ) : null}
         {credentialSummary ? (
