@@ -5,6 +5,7 @@
     {
       "title": "新功能",
       "items": [
+        "limits：三平台共用限流卡，逐格给出「恢复时刻 / 实测时刻」",
         "aggregate：聚合抽屉展示 Qoder 逐资源包明细（#111 收尾）",
         "qoder：逐包浮层 + 能力四态 + TTL 缓存，补齐 #111 剩余项",
         "qoder：抽屉显示真实逐包明细 + 「登录网页端」入口（#111 S6）",
@@ -16,6 +17,29 @@
         "settings：新增「CodeBuddy CLI」区块（状态条 + 模式卡 + 切换向导）（#109 前端）",
         "codebuddy-cli：支持从网关模式切回直连（#109 PR-2 的另一半）",
         "codebuddy-cli：一键把 CLI 切到本机网关（建 Key + 写 settings + 关轮换）（#109 PR-2 后端）"
+      ]
+    },
+    {
+      "title": "其他维护",
+      "items": [
+        "release：重新生成内置版本说明（2026.10.271903）",
+        "donate：更新微信与支付宝收款码"
+      ]
+    },
+    {
+      "title": "问题修复",
+      "items": [
+        "usage：环形图半径按容器尺寸推导，修复 size=150 时被裁剪",
+        "gateway：模型冷却的来源可辨、徽标给区间、闸门有出口（#88 四个缺口）",
+        "codebuddy-cli：CLI 指向本机网关时拒绝写上游 token，并让轮换跳过（#109 PR-1）",
+        "trae,sticky：「顺序」档真的粘住账号，`/status` 报的是生效中的会话数",
+        "unified：命名空间判定与清单同源，`default_namespace` 真正生效",
+        "gateway：半开探针票按请求归属并归还，选号鉴权补断言，白名单收敛成一份",
+        "security：OAuth 兑换主机白名单、CSRF fail-closed、探针随机名、helper 执行白名单",
+        "security：管理面补 Host/Origin 校验，凭据落盘收回 0600",
+        "macos：钥匙串密码进程内缓存，消除反复授权弹框（#104）",
+        "trae：冷却记录按凭据指纹自证失效，裸 401 降级为浅冷却（#108）",
+        "gateway：模型闸门暂停回 503 而非 401，并让兜底选号看见模型级冷却（#106）"
       ]
     },
     {
@@ -31,30 +55,9 @@
       ]
     },
     {
-      "title": "问题修复",
-      "items": [
-        "gateway：模型冷却的来源可辨、徽标给区间、闸门有出口（#88 四个缺口）",
-        "codebuddy-cli：CLI 指向本机网关时拒绝写上游 token，并让轮换跳过（#109 PR-1）",
-        "trae,sticky：「顺序」档真的粘住账号，`/status` 报的是生效中的会话数",
-        "unified：命名空间判定与清单同源，`default_namespace` 真正生效",
-        "gateway：半开探针票按请求归属并归还，选号鉴权补断言，白名单收敛成一份",
-        "security：OAuth 兑换主机白名单、CSRF fail-closed、探针随机名、helper 执行白名单",
-        "security：管理面补 Host/Origin 校验，凭据落盘收回 0600",
-        "macos：钥匙串密码进程内缓存，消除反复授权弹框（#104）",
-        "trae：冷却记录按凭据指纹自证失效，裸 401 降级为浅冷却（#108）",
-        "gateway：模型闸门暂停回 503 而非 401，并让兜底选号看见模型级冷却（#106）"
-      ]
-    },
-    {
       "title": "构建与 CI",
       "items": [
         "补 Windows 编译覆盖、默认串行测试、程序位门禁双向"
-      ]
-    },
-    {
-      "title": "其他维护",
-      "items": [
-        "donate：更新微信与支付宝收款码"
       ]
     }
   ],
