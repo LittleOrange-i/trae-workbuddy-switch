@@ -185,6 +185,21 @@ if (dockerignore) {
     fail(".dockerignore 没有排除 `node_modules`");
   }
   notes.push(".dockerignore：已排除 dist / target / node_modules");
+
+  /* ★ `*.md` 是全量排除，所以**每一份要在镜像内被读到的 md 都必须显式放行**。
+     这条是 2026-10-27 的实战教训：`*.md` + `!README.md` 漏了 `!README.en.md`，
+     本机 `check:docker` 全绿（文件在宿主上），而镜像内 `npm run build` 红在
+     「缺少文件：README.en.md」—— 一个只在容器里才现形的破绽。 */
+  if (lines.includes("*.md")) {
+    for (const required of ["README.md", "README.en.md", "docs/guides/DOCKER.md"]) {
+      if (!lines.includes(`!${required}`)) {
+        fail(
+          `.dockerignore 有 \`*.md\` 却没有 \`!${required}\` —— 镜像内读不到它，` +
+            "`npm run build` 会在容器里红（本机不会）",
+        );
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
