@@ -309,8 +309,12 @@ export function aggregateDetailSections(
 /**
  * 资源包明细。
  *
- * 只有**确实拿到包**时才给：WB 走 `credit.resources`，Trae 走 `creditPackages`，
- * Qoder 没有包的概念（按 credits 计费，只有剩余量）⇒ 空数组，抽屉不渲染该区块。
+ * 只有**确实拿到包**时才给：WB 走 `credit.resources`，Trae 走 `creditPackages`。
+ *
+ * ⚠️ Qoder **有**包的概念（issue #111 已接入网页端逐资源包明细），但数据来自
+ * **网页会话**链路（仅桌面端 + 需登录一次），而聚合页的账号快照里没有这份数据
+ * ⇒ 这里仍然给空数组。要补需要先把逐包并进聚合快照，属后续阶段。
+ * （旧注释「Qoder 没有包的概念」是错的，已更正。）
  */
 export function aggregateDetailPacks(
   account: AggregateAccount,

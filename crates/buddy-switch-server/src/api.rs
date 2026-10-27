@@ -546,6 +546,10 @@ fn api_routes() -> Router {
             post(api_qoder_web_desktop_only),
         )
         .route(
+            "/api/qoder/web/credit-packs",
+            get(api_qoder_web_desktop_only),
+        )
+        .route(
             "/api/qoder/web/session/status",
             get(api_qoder_web_desktop_only),
         )

@@ -602,6 +602,7 @@ const ROUTES: Record<string, Route> = {
   qoder_web_login_open: { method: "POST", path: "/api/qoder/web/login-open" },
   qoder_web_login_close: { method: "POST", path: "/api/qoder/web/login-close" },
   qoder_web_credit_packs_probe: { method: "POST", path: "/api/qoder/web/credit-packs/probe" },
+  qoder_web_credit_packs: { method: "GET", path: "/api/qoder/web/credit-packs" },
   qoder_web_session_status: { method: "GET", path: "/api/qoder/web/session/status" },
   qoder_web_session_logout: { method: "POST", path: "/api/qoder/web/session/logout" },
   // Qoder API 网关管理面（网关本体走独立端口 57895，见 src/pages/QoderApiServicePage）。
@@ -3660,6 +3661,41 @@ export interface QoderCreditPack {
   isActive: boolean;
   /** 毫秒；缺省 = 无到期时间（上游 `expires_at = 0`）。 */
   expiresAtMs?: number;
+}
+
+/** 逐包汇总（后端算好，前端只显示）。 */
+export interface QoderPackSummary {
+  /** 有额度的包数（`limit > 0`）。 */
+  count: number;
+  /** 额度为 0 的占位条目数（套餐条目）。 */
+  zeroCount: number;
+  limit: number;
+  used: number;
+  remaining: number;
+}
+
+/** 「拿不到逐包」的原因 —— 前端按它选文案，不要统一显示「出错了」。 */
+export type QoderPacksUnavailableReason =
+  | "no_session"
+  | "session_expired"
+  | "session_mismatch"
+  | "upstream";
+
+export interface QoderWebCreditPacks {
+  available: boolean;
+  reason?: QoderPacksUnavailableReason;
+  message?: string;
+  packs: QoderCreditPack[];
+  summary?: QoderPackSummary;
+  verifiedAtMs?: number;
+}
+
+/** 读已缓存的网页会话取逐包明细（不弹登录窗；拿不到时给结构化原因）。 */
+export function qoderWebCreditPacks(
+  scope: Scope,
+  uid: string,
+): Promise<QoderWebCreditPacks> {
+  return call<QoderWebCreditPacks>("qoder_web_credit_packs", { scope, uid });
 }
 
 /** 查询网页会话状态（只读）。 */

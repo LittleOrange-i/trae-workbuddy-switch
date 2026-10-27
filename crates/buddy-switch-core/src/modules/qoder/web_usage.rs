@@ -331,6 +331,45 @@ pub fn parse_credit_packs(raw: &Value) -> Vec<QuotaPack> {
     packs
 }
 
+/// 逐包汇总（前端「N 个包，共剩 X」那一行用）。
+///
+/// ★ 只做**求和**，不做「该显示几个」的判断：`PLAN` 组那一条在真机上 `limit_value = 0`
+/// （套餐额度单独计量），把它算进「包总数」会让「我有 7 个包」变成 8 个。
+/// 所以 `count` 只数**有额度的包**（`limit > 0`），零额度条目单独计 `zeroCount`。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackSummary {
+    /// 有额度的包数量（`limit > 0`）。
+    pub count: usize,
+    /// 额度为 0 的条目数量（套餐占位这一类）。
+    pub zero_count: usize,
+    pub limit: i64,
+    pub used: i64,
+    pub remaining: i64,
+}
+
+/// 汇总逐包。
+pub fn summarize(packs: &[QuotaPack]) -> PackSummary {
+    let mut summary = PackSummary {
+        count: 0,
+        zero_count: 0,
+        limit: 0,
+        used: 0,
+        remaining: 0,
+    };
+    for pack in packs {
+        if pack.limit > 0 {
+            summary.count += 1;
+            summary.limit += pack.limit;
+            summary.used += pack.used;
+            summary.remaining += pack.remaining;
+        } else {
+            summary.zero_count += 1;
+        }
+    }
+    summary
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------

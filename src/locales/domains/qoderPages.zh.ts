@@ -216,6 +216,18 @@ export const zh = {
   "qoder.page.accounts.chip.checkinUnavailable": "签到不可用",
   "qoder.page.accounts.metric.credits": "积分",
   "qoder.page.accounts.metric.creditsValue": "{remaining} / {total}",
+
+  // ---- 网页端逐包明细（issue #111）----
+  "qoder.page.accounts.web.loginMenu": "登录 Qoder 网页端（看逐包明细）",
+  "qoder.page.accounts.web.loginToast": "已打开登录窗：登录完成后回到这里刷新即可看到逐包明细",
+  "qoder.page.accounts.web.sourcePlan": "套餐额度",
+  "qoder.page.accounts.web.sourceBonus": "赠送资源包",
+  "qoder.page.accounts.web.sourceDedicated": "专用资源包",
+  "qoder.page.accounts.web.sourceOther": "资源包",
+  "qoder.page.accounts.web.neverExpires": "长期有效",
+  "qoder.page.accounts.web.expired": "已过期",
+  "qoder.page.accounts.web.packName": "{source} · {n}",
+
   "qoder.page.accounts.metric.plan": "套餐",
   "qoder.page.accounts.credits.loading": "额度查询中…",
   "qoder.page.accounts.checkin.action": "签到",

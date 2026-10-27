@@ -64,6 +64,8 @@ import { AccountWorkbench } from "@/components/account-workbench";
 import { AddAccountDrawer } from "@/components/add-account-drawer";
 import { ExportAccountsDialog } from "@/components/export-accounts-dialog";
 import { ImportAccountsDialog } from "@/components/import-accounts-dialog";
+/* 账号页「实测限流」卡（Qoder/Trae 共用；WB 用带台账的 `ClientLimitsCard`）。 */
+import { ProbeLimitsCard } from "@/components/probe-limits-card";
 import { RecycleBinSheet } from "@/components/recycle-bin-sheet";
 import {
   QoderAccountCard,
@@ -94,6 +96,7 @@ import type {
   QoderProgramStatus,
 } from "@/lib/api";
 import { accountSearchText } from "@/lib/account-search";
+import { packSourceLabel, packState } from "@/lib/qoder-packs";
 import {
   filterAccounts,
   groupAccounts,
@@ -178,6 +181,14 @@ export default function QoderAccountsPage() {
    * 只在打开抽屉时查一次（单账号 1 个请求），不在列表首页批查（会翻 N 倍）。
    */
   const [proPack, setProPack] = useState<Record<string, api.QoderProPackStatus>>({});
+  /**
+   * 逐包明细（issue #111）：按 uid 缓存。
+   *
+   * ⚠️ 与 `credits` **并存、不互替**：`credits` 是 openapi 的聚合三标量（任何形态都有），
+   * 逐包要走网页会话（仅桌面端 + 需登录一次）。拿不到逐包时**回落聚合行**，
+   * 绝不显示空区块 —— 那是「不知道」伪装成「没有」。
+   */
+  const [webPacks, setWebPacks] = useState<Record<string, api.QoderWebCreditPacks>>({});
   const [proBusy, setProBusy] = useState<string | null>(null);
   const [detailAutoEditRemark, setDetailAutoEditRemark] = useState(false);
   const [detailAutoEditGroup, setDetailAutoEditGroup] = useState(false);
@@ -691,6 +702,22 @@ export default function QoderAccountsPage() {
     await loadEnrichment();
   }
 
+  /**
+   * 「登录 Qoder 网页端」（issue #111）：开一个独立窗口让用户登录一次。
+   *
+   * 为什么需要这一步：逐包明细只存在于网页端私有接口，只认浏览器会话 Cookie，
+   * 而本仓 Qoder 的设备码登录**从不产生网页会话**。登录态落在本地缓存后，
+   * 以后取逐包就不必再登录（见 `web_session`）。
+   */
+  async function openWebLogin() {
+    try {
+      await api.qoderWebLoginOpen(scope);
+      toast.success(t("qoder.page.accounts.web.loginToast"));
+    } catch (e) {
+      toast.error(api.asError(e));
+    }
+  }
+
   function openDetail(account: QoderAccountView) {
     setDetailAutoEditRemark(false);
     setDetailAutoEditGroup(false);
@@ -796,10 +823,12 @@ export default function QoderAccountsPage() {
   }, [detail, t]);
 
   /**
-   * 抽屉的积分包 —— **只在拿到额度时**渲染（`packs` 空数组 = 抽屉不渲染该区块）。
+   * 抽屉的积分包：**有逐包就用逐包，没有就回落聚合行**（issue #111）。
    *
-   * ⚠️ `expiryText` 给 `—`：额度响应里的 `expiresAt` 单位未取证，按毫秒渲染会把秒值
-   * 显示成 1970（谎报）。宁可写「未知」。
+   * 逐包来自网页会话（`qoderWebCreditPacks`），需要桌面端 + 登录过一次；
+   * 拿不到时显示 openapi 的聚合三标量 —— 那在任何形态都拿得到，不是空区块。
+   * 聚合行的 `expiryText` 仍给 `—`：`quota/usage` 的 `expiresAt` 是套餐级、不是包级，
+   * 按它渲染「到期」会张冠李戴。
    */
   /** 分组候选（本作用域已用过的组名）—— 抽屉里的分组选择器用，见 WB 页同名变量。 */
   const detailGroups = useMemo(() => {
@@ -877,6 +906,45 @@ export default function QoderAccountsPage() {
 
   const detailPacks = useMemo<DetailPack[]>(() => {
     if (!detail) return [];
+    const web = webPacks[detail.uid];
+
+    // ① 有逐包 ⇒ 逐条渲染（这才回答了「我有几个包、各剩多少、何时到期」）。
+    if (web?.available && web.packs.length > 0) {
+      const now = Date.now();
+      const seen = new Map<string, number>();
+      return web.packs.map((pack, index) => {
+        const source = packSourceLabel(t, pack.source);
+        const ordinal = (seen.get(source) ?? 0) + 1;
+        seen.set(source, ordinal);
+        const state = packState(pack, now);
+        const expired = state === "expired";
+        const expiringSoon = state === "expiring";
+        const ratio =
+          pack.limit > 0
+            ? Math.min(100, Math.max(0, (pack.remaining / pack.limit) * 100))
+            : 0;
+        return {
+          key: pack.id ?? `${pack.group}-${index}`,
+          name: t("qoder.page.accounts.web.packName", {
+            source,
+            n: String(ordinal),
+          }),
+          remainingText: String(pack.remaining),
+          totalText: String(pack.limit),
+          usedText: String(pack.used),
+          expiryText: expired
+            ? t("qoder.page.accounts.web.expired")
+            : pack.expiresAtMs !== undefined
+              ? formatAbsoluteTime(pack.expiresAtMs)
+              : t("qoder.page.accounts.web.neverExpires"),
+          expired,
+          expiringSoon,
+          ratio,
+        };
+      });
+    }
+
+    // ② 没有逐包 ⇒ **回落聚合行**（不是空区块；聚合三标量在任意形态都拿得到）。
     const row = credits[detail.uid];
     if (!row || !row.ok) return [];
     const remaining = row.remaining ?? 0;
@@ -895,7 +963,30 @@ export default function QoderAccountsPage() {
         ratio: total > 0 ? Math.min(100, Math.max(0, (remaining / total) * 100)) : 0,
       },
     ];
-  }, [detail, credits, t]);
+  }, [detail, credits, t, webPacks]);
+
+  /**
+   * 打开抽屉时取一次逐包明细。
+   *
+   * ★ 失败**不弹错**：`available: false` 是合法结果（未登录 / 会话过期 / 上游抖动），
+   * 界面回落聚合行即可；只有真正异常的 `Err` 才走 catch，而那时也不打扰用户。
+   */
+  useEffect(() => {
+    const uid = detail?.uid;
+    if (!uid) return;
+    let cancelled = false;
+    api
+      .qoderWebCreditPacks(scope, uid)
+      .then((result) => {
+        if (!cancelled) setWebPacks((prev) => ({ ...prev, [uid]: result }));
+      })
+      .catch(() => {
+        /* 静默：没有逐包不是错误，界面已回落聚合行。 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [detail?.uid, scope]);
 
   /** 打开抽屉时查一次 Pro 升级包资格（活动下线/接口不可用 ⇒ 静默不渲染）。 */
   useEffect(() => {
@@ -1264,6 +1355,7 @@ export default function QoderAccountsPage() {
               setExportTargets([target]);
               setExportOpen(true);
             }}
+            onWebLogin={() => void openWebLogin()}
             onDelete={setPendingDelete}
             onRefreshPart={(kind) => onRefreshPart(account, kind)}
             refreshingKinds={refreshPartBusy.kindsOf(account.uid)}
@@ -1293,6 +1385,7 @@ export default function QoderAccountsPage() {
                 setExportTargets([account]);
                 setExportOpen(true);
               }}
+              onWebLogin={() => void openWebLogin()}
               credits={
                 row && row.ok
                   ? { remaining: row.remaining ?? 0, total: row.total ?? 0, plan: row.plan ?? null }
@@ -1304,6 +1397,14 @@ export default function QoderAccountsPage() {
             />
           );
         }}
+        /* 列表下方的平台插槽：**实测限流**。
+           Qoder 没有可反推的客户端日志（WB 才有 `client_limits`）⇒ 这里只有「实测」那一半，
+           故用 `ProbeLimitsCard` 而不是 WB 的 `ClientLimitsCard`（两者同位置、同一套时间口径）。 */
+        footer={
+          <section className="mt-7 min-w-0">
+            <ProbeLimitsCard region={region} probePath="/qoder/api-service?sub=models" />
+          </section>
+        }
       />
 
       {/* 产品名走注册表（唯一来源）—— 本页在 Qoder 分区下渲染，但产品名不写死。 */}

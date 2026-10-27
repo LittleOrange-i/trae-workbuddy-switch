@@ -208,6 +208,18 @@ export const en = {
   "qoder.page.accounts.chip.checkinUnavailable": "Check-in unavailable",
   "qoder.page.accounts.metric.credits": "Credits",
   "qoder.page.accounts.metric.creditsValue": "{remaining} / {total}",
+
+  // ---- Web-session credit packs (issue #111) ----
+  "qoder.page.accounts.web.loginMenu": "Sign in to Qoder web (per-pack detail)",
+  "qoder.page.accounts.web.loginToast": "Sign-in window opened. After signing in, come back and refresh to see per-pack detail.",
+  "qoder.page.accounts.web.sourcePlan": "Plan quota",
+  "qoder.page.accounts.web.sourceBonus": "Bonus pack",
+  "qoder.page.accounts.web.sourceDedicated": "Dedicated pack",
+  "qoder.page.accounts.web.sourceOther": "Resource pack",
+  "qoder.page.accounts.web.neverExpires": "No expiry",
+  "qoder.page.accounts.web.expired": "Expired",
+  "qoder.page.accounts.web.packName": "{source} · {n}",
+
   "qoder.page.accounts.metric.plan": "Plan",
   "qoder.page.accounts.credits.loading": "Loading quota…",
   "qoder.page.accounts.checkin.action": "Check in",

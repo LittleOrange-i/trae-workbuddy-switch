@@ -257,6 +257,73 @@ pub async fn credit_packs_probe<R: Runtime>(
     }))
 }
 
+/// 读**已缓存**的网页会话，取逐包明细（S6 的数据源；不弹登录窗）。
+///
+/// 与 [`credit_packs_probe`] 的分工：
+/// - probe 是**取证**用的（会开窗、返回 `raw`），供阶段零复核；
+/// - 本函数是**渲染**用的：只读缓存、不返回 `raw`、失败也返回**结构化原因**而不是 `Err`。
+///
+/// ★ 为什么失败走 `Ok({available:false, reason})` 而不是 `Err`：前端要按原因给**不同引导**
+/// （没登录 → 「登录网页端」；归属不符 → 「换个账号」；上游抖动 → 「稍后重试」），
+/// 用 `Err` 一律变成「出错了」，用户不知道该做什么。
+pub async fn credit_packs(scope: String, uid: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    let region = require_qoder_region(scope)?;
+    if uid.trim().is_empty() {
+        return Err("缺少 uid".to_string());
+    }
+    let now = web_usage_now_ms();
+    let Some(session) = web_session::load(region) else {
+        return Ok(unavailable("no_session"));
+    };
+    if !session.matches_uid(&uid) {
+        // 缓存里是**别人的**会话 ⇒ 既不能用也不能留。
+        let _ = web_session::clear(region);
+        return Ok(unavailable("session_mismatch"));
+    }
+    if !session.is_fresh(now) {
+        return Ok(unavailable("session_expired"));
+    }
+    let raw = match web_usage::fetch_credit_packs_raw(region, &session.cookie).await {
+        Ok(raw) => raw,
+        Err(error) => {
+            if error.unauthorized {
+                let _ = web_session::clear(region);
+                return Ok(unavailable("session_expired"));
+            }
+            // 上游抖动 / 网络问题**不清缓存**（否则一次抖动就掉登录态）。
+            let mut payload = unavailable("upstream");
+            payload["message"] = json!(error.message);
+            return Ok(payload);
+        }
+    };
+    if !web_usage::owner_matches(&raw, &uid) {
+        let _ = web_session::clear(region);
+        return Ok(unavailable("session_mismatch"));
+    }
+    // 会话被上游接受 ⇒ 记一次验证时刻（`is_fresh` 仍以首次落盘时间为准）。
+    let _ = web_session::save(
+        region,
+        &web_session::WebSession {
+            verified_at_ms: now,
+            ..session
+        },
+    );
+    let packs = web_usage::parse_credit_packs(&raw);
+    Ok(json!({
+        "available": true,
+        // 汇总（「N 个包共剩 X」这类行用，省得前端再求和）。
+        "summary": web_usage::summarize(&packs),
+        "packs": packs,
+        "verifiedAtMs": now,
+    }))
+}
+
+/// 「拿不到逐包」的统一形状。`reason` 是前端选文案的唯一依据。
+fn unavailable(reason: &str) -> Value {
+    json!({ "available": false, "reason": reason, "packs": Vec::<Value>::new() })
+}
+
 /// 当前区域有没有可用的网页会话（前端据此决定显示「登录」按钮还是「已登录」）。
 ///
 /// 返回 `hasSession`（新鲜且 uid 匹配）、`expired`（有缓存但过期/换过账号）。

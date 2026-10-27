@@ -5117,6 +5117,12 @@ pub async fn qoder_web_session_status(scope: String, uid: String) -> Result<Valu
     crate::qoder_web::session_status(scope, uid).await
 }
 
+/// GET /api/qoder/web/credit-packs —— 读**已缓存**会话取逐包明细（渲染用，不弹窗）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn qoder_web_credit_packs(scope: String, uid: String) -> Result<Value, String> {
+    crate::qoder_web::credit_packs(scope, uid).await
+}
+
 /// POST /api/qoder/web/session/logout —— 清除本地会话缓存（幂等；「退出网页登录」）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn qoder_web_session_logout(scope: String) -> Result<Value, String> {

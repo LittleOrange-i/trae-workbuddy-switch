@@ -736,6 +736,7 @@ pub fn run() {
             commands::qoder_web_login_open,
             commands::qoder_web_login_close,
             commands::qoder_web_credit_packs_probe,
+            commands::qoder_web_credit_packs,
             commands::qoder_web_session_status,
             commands::qoder_web_session_logout,
             commands::trae_merge_legacy_regions,

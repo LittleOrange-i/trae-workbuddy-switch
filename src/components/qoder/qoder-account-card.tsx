@@ -38,6 +38,7 @@ import {
   Download,
   Ellipsis,
   FolderTree,
+  Globe,
   Info,
   Sparkles,
   StickyNote,
@@ -221,6 +222,13 @@ export interface QoderAccountMenuProps {
   /** 手动签到（与批量 / 抽屉同一条路径）。 */
   onCheckin?: (account: QoderAccountView) => void;
   onExport?: (account: QoderAccountView) => void;
+  /**
+   * 「更多 → 登录 Qoder 网页端」（issue #111）。
+   *
+   * 逐包明细只存在于网页端接口，而本仓的 Qoder 登录走设备码、**不产生网页会话**。
+   * 这一项就是补那条链路的入口：不传 ⇒ 不渲染（例如 headless 宿主）。
+   */
+  onWebLogin?: (account: QoderAccountView) => void;
   onDelete?: (account: QoderAccountView) => void;
   onRefreshPart?: (kind: AccountRefreshKind) => void;
   refreshingKinds?: readonly AccountRefreshKind[];
@@ -239,6 +247,7 @@ export function QoderAccountMenu({
   onSetGroup,
   onCheckin,
   onExport,
+  onWebLogin,
   onDelete,
   onRefreshPart,
   refreshingKinds,
@@ -319,6 +328,12 @@ export function QoderAccountMenu({
           <Download />
           {t("shared.cardMenu.export")}
         </DropdownMenuItem>
+        {onWebLogin && (
+          <DropdownMenuItem onSelect={() => onWebLogin(account)}>
+            <Globe />
+            {t("qoder.page.accounts.web.loginMenu")}
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem disabled={!onEditRemark} onSelect={() => onEditRemark?.(account)}>
           <StickyNote />
           {t("qoder.page.accounts.card.editRemark")}
@@ -389,6 +404,8 @@ export interface QoderAccountCardProps {
   onCheckin?: (account: QoderAccountView) => void;
   /** 「更多 → 导出账号」：与批量导出共用同一个弹层（只把目标换成一个账号）。 */
   onExport?: (account: QoderAccountView) => void;
+  /** 「更多 → 登录 Qoder 网页端」（issue #111；不传 ⇒ 不渲染该项）。 */
+  onWebLogin?: (account: QoderAccountView) => void;
   /**
    * 单项刷新（积分 / 今日 Token / 签到状态 / 凭据状态）。
    * 传了 ⇒ 菜单出现「刷新」分组（四项各自独立）；不传 ⇒ 菜单与原来一致。
@@ -417,6 +434,7 @@ export function QoderAccountCard({
   onSetGroup,
   onCheckin,
   onExport,
+  onWebLogin,
   onRefreshPart,
   refreshingKinds,
   doneKinds,
@@ -455,6 +473,7 @@ export function QoderAccountCard({
       onSetGroup={onSetGroup}
       onCheckin={onCheckin}
       onExport={onExport}
+      onWebLogin={onWebLogin}
       onDelete={onDelete}
       onRefreshPart={onRefreshPart ? (kind) => onRefreshPart(account, kind) : undefined}
       refreshingKinds={refreshingKinds}
