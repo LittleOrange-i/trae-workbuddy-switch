@@ -31,6 +31,7 @@ use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindow, Webview
 
 use buddy_switch_core::modules::product::{require_qoder_region, resolve_scope_param};
 use buddy_switch_core::modules::qoder::region::{self, QoderRegion};
+use buddy_switch_core::modules::qoder::web_session;
 use buddy_switch_core::modules::qoder::web_usage;
 
 /// 登录窗的 label。
@@ -151,6 +152,14 @@ pub async fn login_close<R: Runtime>(app: &AppHandle<R>) -> Result<Value, String
 ///
 /// 返回体刻意包含 `raw`：本阶段的唯一目的是拿到真实响应形状来设计解析器
 /// （`shape` 只给键名与计数，`raw` 给完整样本）。⚠️ 两者都**不含 Cookie**。
+///
+/// ## 会话来源（`source` 字段）
+///
+/// 1. `window` —— 登录窗里现读的 Cookie（用户刚登录）；
+/// 2. `stored` —— 窗口里没有、但本地缓存里有一份**新鲜的、uid 匹配**的会话
+///    （用户之前登录过，这次只是没开窗）。少这一步的话，每次取数都要重新登录一次。
+///
+/// 上游 401/403 ⇒ 本地缓存立刻作废（那份 Cookie 已经死了，留着只会反复失败）。
 pub async fn credit_packs_probe<R: Runtime>(
     app: &AppHandle<R>,
     scope: String,
@@ -162,30 +171,81 @@ pub async fn credit_packs_probe<R: Runtime>(
         return Err("缺少 uid".to_string());
     }
 
-    let window = app
-        .get_webview_window(LOGIN_LABEL)
-        .ok_or_else(|| "登录窗尚未打开：请先点击「登录 Qoder 网页端」".to_string())?;
+    // ① 登录窗（可能没开 —— 没开不等于失败，下面还有本地缓存）。
+    let window = app.get_webview_window(LOGIN_LABEL);
+    let mut names: Vec<String> = Vec::new();
+    let mut header = String::new();
+    let mut source = "none";
+    if let Some(window) = window {
+        // ★★ 必须离开当前线程读 cookie：Windows 上 `cookies()` 在同步上下文会死锁
+        //    （Tauri Known issues / wry#583）。`spawn_blocking` 同时满足「独立线程」。
+        let window = window.clone();
+        if let Ok(pair) =
+            tauri::async_runtime::spawn_blocking(move || cookie_header_for(&window, region)).await
+        {
+            if let Ok((header_from_window, window_names)) = pair {
+                if !header_from_window.is_empty() {
+                    header = header_from_window;
+                    names = window_names;
+                    source = "window";
+                }
+            }
+        }
+    }
 
-    // ★★ 必须离开当前线程读 cookie：Windows 上 `cookies()` 在同步上下文会死锁
-    //    （Tauri Known issues / wry#583）。`spawn_blocking` 同时满足「独立线程」。
-    let (header, names) =
-        tauri::async_runtime::spawn_blocking(move || cookie_header_for(&window, region))
-            .await
-            .map_err(|error| format!("读取网页会话失败: {error}"))??;
+    // ② 本地缓存（保鲜 + uid 归属双重校验）。
+    if header.is_empty() {
+        let now = web_usage_now_ms();
+        if let Some(session) = web_session::load(region) {
+            if session.is_fresh(now) && session.matches_uid(&uid) {
+                header = session.cookie;
+                names = session.cookie_names;
+                source = "stored";
+            }
+        }
+    }
 
     if header.is_empty() {
         return Ok(json!({
             "hasSession": false,
+            "source": source,
             "cookieCount": 0,
             "cookieNames": Vec::<String>::new(),
-            "message": "登录窗里还没有该区域的会话 Cookie：请先在窗口中完成登录。",
+            "message": "还没有可用的网页会话：请先点击「登录 Qoder 网页端」并在窗口中完成登录。",
         }));
     }
 
-    let raw = web_usage::fetch_credit_packs_raw(region, &header).await?;
+    let raw = match web_usage::fetch_credit_packs_raw(region, &header).await {
+        Ok(raw) => raw,
+        Err(error) => {
+            // ★ 只有「上游明确拒绝」才清缓存；网络抖动不清（否则一次抖动就掉登录态）。
+            if error.unauthorized {
+                let _ = web_session::clear(region);
+            }
+            return Err(error.message);
+        }
+    };
     let matches = web_usage::owner_matches(&raw, &uid);
+    if matches {
+        // 归属对得上 ⇒ 这份会话值得留下来，下次不必重新登录。
+        let now = web_usage_now_ms();
+        let _ = web_session::save(
+            region,
+            &web_session::WebSession {
+                uid: uid.trim().to_string(),
+                cookie: header,
+                cookie_names: names.clone(),
+                saved_at_ms: now,
+                verified_at_ms: now,
+            },
+        );
+    } else {
+        // ★ 归属不符 ⇒ 这是**别人的**会话，绝不能留在本机、更不能显示给当前账号。
+        let _ = web_session::clear(region);
+    }
     Ok(json!({
         "hasSession": true,
+        "source": source,
         // ⚠️ 只给名称与条数，**不给值**。
         "cookieCount": names.len(),
         "cookieNames": names,
@@ -193,4 +253,46 @@ pub async fn credit_packs_probe<R: Runtime>(
         "shape": web_usage::shape_of(&raw),
         "raw": raw,
     }))
+}
+
+/// 当前区域有没有可用的网页会话（前端据此决定显示「登录」按钮还是「已登录」）。
+///
+/// 返回 `hasSession`（新鲜且 uid 匹配）、`expired`（有缓存但过期/换过账号）。
+/// 两者**不是**一件事：过期要引导重新登录，匹配要引导清除。
+pub async fn session_status(scope: String, uid: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    let region = require_qoder_region(scope)?;
+    let now = web_usage_now_ms();
+    let mut source = "none";
+    let stored = web_session::load(region);
+    let has_session = stored
+        .as_ref()
+        .map(|session| session.is_fresh(now) && session.matches_uid(&uid))
+        .unwrap_or(false);
+    if has_session {
+        source = "stored";
+    }
+    let payload = serde_json::json!({
+        "hasSession": has_session,
+        "expired": !has_session && stored.is_some(),
+        "source": source,
+        "cookieNames": stored.as_ref().map(|s| s.cookie_names.clone()).unwrap_or_default(),
+        "savedAtMs": stored.as_ref().map(|s| s.saved_at_ms).unwrap_or(0),
+        "verifiedAtMs": stored.as_ref().map(|s| s.verified_at_ms).unwrap_or(0),
+    });
+    Ok(payload)
+}
+
+/// 清除本地会话缓存（「退出网页登录」；幂等）。
+pub async fn session_logout(scope: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    let region = require_qoder_region(scope)?;
+    web_session::clear(region)?;
+    Ok(json!({ "cleared": true }))
+}
+
+/// 当前毫秒。包一层是为了测试里能替换（当前没有单元测试直接依赖它，
+/// 但把时间源收在一处，别让 `Instant::now()` 散落）。
+fn web_usage_now_ms() -> i64 {
+    buddy_switch_core::modules::config::now_ms()
 }

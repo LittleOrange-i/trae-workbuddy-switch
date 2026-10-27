@@ -23,6 +23,7 @@
 //! | [`checkin`] | 签到状态与领取（`/sash` 通道；国际版未开放如实上报） |
 //! | [`credits`] | 额度 / 套餐视图（逐账号 + 区域汇总） |
 //! | [`web_usage`] | **网页端**逐资源包明细（只认会话 Cookie，issue #111） |
+//! | [`web_session`] | 网页会话（Cookie）的本地缓存（0600、7 天保鲜、按 uid 归属） |
 //! | [`store`] | 落盘助手（原子写 + JSON 读写 + 脱敏） |
 //!
 //! ## 令牌家族（前缀语义）
@@ -56,6 +57,7 @@ pub mod switch;
 pub mod token;
 pub mod trash;
 pub mod usage;
+pub mod web_session;
 pub mod web_usage;
 
 // ---------------------------------------------------------------------------

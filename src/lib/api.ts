@@ -602,6 +602,8 @@ const ROUTES: Record<string, Route> = {
   qoder_web_login_open: { method: "POST", path: "/api/qoder/web/login-open" },
   qoder_web_login_close: { method: "POST", path: "/api/qoder/web/login-close" },
   qoder_web_credit_packs_probe: { method: "POST", path: "/api/qoder/web/credit-packs/probe" },
+  qoder_web_session_status: { method: "GET", path: "/api/qoder/web/session/status" },
+  qoder_web_session_logout: { method: "POST", path: "/api/qoder/web/session/logout" },
   // Qoder API 网关管理面（网关本体走独立端口 57895，见 src/pages/QoderApiServicePage）。
   // ⚠️ **一个监听、两个区域**：状态 / 清单两条按 `scope` 看对应的那本账号库（fail-closed）；
   //   配置与监听是否起来是两区域共用的事实（故 config 不带 scope）。
@@ -3594,8 +3596,10 @@ export function qoderProPackClaim(
 
 /** 逐包探针结果（阶段零-2 取证用；`raw` 是上游原始响应，不含 Cookie）。 */
 export interface QoderWebCreditProbe {
-  /** 登录窗里是否已有该区域的会话 Cookie。 */
+  /** 是否拿到了会话（`window` 现读或 `stored` 缓存）。 */
   hasSession: boolean;
+  /** 会话来源：登录窗现读 / 本地缓存 / 无。 */
+  source?: "window" | "stored" | "none";
   cookieCount: number;
   /** 只给名称，**不含值**（Cookie 等价于完整身份凭据）。 */
   cookieNames: string[];
@@ -3620,12 +3624,37 @@ export function qoderWebLoginClose(): Promise<{ closed: boolean }> {
   return call<{ closed: boolean }>("qoder_web_login_close", {});
 }
 
-/** 收割会话 Cookie 并探一次逐包接口（取证；不落盘）。 */
+/** 收割会话 Cookie 并探一次逐包接口（取证；命中即缓存，供下次免登录）。 */
 export function qoderWebCreditPacksProbe(
   scope: Scope,
   uid: string,
 ): Promise<QoderWebCreditProbe> {
   return call<QoderWebCreditProbe>("qoder_web_credit_packs_probe", { scope, uid });
+}
+
+/** 网页会话状态（前端据此决定显示「登录」还是「已登录 / 需重新登录」）。 */
+export interface QoderWebSessionStatus {
+  /** 有新鲜且 uid 匹配的会话。 */
+  hasSession: boolean;
+  /** 有缓存但已过期或换过账号 ⇒ 该引导重新登录，而非当作「已登录」。 */
+  expired: boolean;
+  source: "window" | "stored" | "none";
+  cookieNames: string[];
+  savedAtMs: number;
+  verifiedAtMs: number;
+}
+
+/** 查询网页会话状态（只读）。 */
+export function qoderWebSessionStatus(
+  scope: Scope,
+  uid: string,
+): Promise<QoderWebSessionStatus> {
+  return call<QoderWebSessionStatus>("qoder_web_session_status", { scope, uid });
+}
+
+/** 清除本地网页会话（「退出网页登录」；幂等）。 */
+export function qoderWebSessionLogout(scope: Scope): Promise<{ cleared: boolean }> {
+  return call<{ cleared: boolean }>("qoder_web_session_logout", { scope });
 }
 
 /** 限额护栏视图（`GET /api/qoder/gateway/quota`）。 */

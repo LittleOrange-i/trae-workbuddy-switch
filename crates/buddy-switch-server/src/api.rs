@@ -545,6 +545,14 @@ fn api_routes() -> Router {
             "/api/qoder/web/credit-packs/probe",
             post(api_qoder_web_desktop_only),
         )
+        .route(
+            "/api/qoder/web/session/status",
+            get(api_qoder_web_desktop_only),
+        )
+        .route(
+            "/api/qoder/web/session/logout",
+            post(api_qoder_web_desktop_only),
+        )
         // ---- Qoder API 网关（管理面；网关本体走独立端口 57895，**不** merge 进本 Router）----
         // ⚠️ 一个监听、两个区域：区域由请求所用 API Key 的归属决定（`QoderKeyRegion`），
         //   状态 / 模型两条按 `scope` 看对应的那本账号库（fail-closed）。

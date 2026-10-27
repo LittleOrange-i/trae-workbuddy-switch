@@ -5111,6 +5111,18 @@ pub async fn qoder_web_credit_packs_probe(
     crate::qoder_web::credit_packs_probe(&app, scope, uid).await
 }
 
+/// GET /api/qoder/web/session/status —— 本区域有没有可用的网页会话（只读）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn qoder_web_session_status(scope: String, uid: String) -> Result<Value, String> {
+    crate::qoder_web::session_status(scope, uid).await
+}
+
+/// POST /api/qoder/web/session/logout —— 清除本地会话缓存（幂等；「退出网页登录」）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn qoder_web_session_logout(scope: String) -> Result<Value, String> {
+    crate::qoder_web::session_logout(scope).await
+}
+
 /// POST /api/qoder/pro-pack/claim —— 领取 Pro 升级包（幂等；已领过 `already=true`）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn qoder_pro_pack_claim(scope: String, uid: String) -> Result<Value, String> {

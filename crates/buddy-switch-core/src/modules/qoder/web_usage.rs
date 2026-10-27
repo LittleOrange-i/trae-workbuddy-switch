@@ -116,6 +116,32 @@ pub fn owner_matches(raw: &Value, expected_uid: &str) -> bool {
     !actual.is_empty() && actual.eq_ignore_ascii_case(expected_uid.trim())
 }
 
+/// 取数失败，并区分「会话被上游拒绝」与「其它错误」。
+///
+/// 为什么必须分开：上游 401/403 意味着**这份 Cookie 已经死了**，此时本地缓存的会话
+/// 必须立刻清除并引导用户重新登录；而网络超时 / 502 之类**不该**把用户的登录态抹掉
+/// —— 混在一起会让「网抖了一下」变成「你的登录没了」，且是无谓的重新登录。
+pub struct WebUsageError {
+    pub message: String,
+    /// `true` = 上游明确拒绝（401 / 403）。
+    pub unauthorized: bool,
+}
+
+impl WebUsageError {
+    fn other(message: String) -> Self {
+        Self {
+            message,
+            unauthorized: false,
+        }
+    }
+}
+
+impl std::fmt::Display for WebUsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// 用会话 Cookie 取逐包明细的**原始响应**。
 ///
 /// `cookie_header` 是 `k=v; k2=v2` 形状（由宿主从 `Webview::cookies()` 拼出）。
@@ -125,12 +151,14 @@ pub fn owner_matches(raw: &Value, expected_uid: &str) -> bool {
 pub async fn fetch_credit_packs_raw(
     region: QoderRegion,
     cookie_header: &str,
-) -> Result<Value, String> {
+) -> Result<Value, WebUsageError> {
     if cookie_header.trim().is_empty() {
-        return Err("没有可用的网页会话 Cookie（请先登录 Qoder 网页端）".to_string());
+        return Err(WebUsageError::other(
+            "没有可用的网页会话 Cookie（请先登录 Qoder 网页端）".to_string(),
+        ));
     }
     let spec = region::realm_spec(region);
-    let client = api::shared_client()?;
+    let client = api::shared_client().map_err(WebUsageError::other)?;
     let response = client
         .get(credits_url(region))
         .timeout(std::time::Duration::from_secs(20))
@@ -141,18 +169,29 @@ pub async fn fetch_credit_packs_raw(
         .header("Cookie", cookie_header)
         .send()
         .await
-        .map_err(|error| format!("网页端额度明细请求失败: {error}"))?;
+        .map_err(|error| WebUsageError::other(format!("网页端额度明细请求失败: {error}")))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
+    let code = status.as_u16();
+    // 401 / 403 = 会话被上游明确拒绝 ⇒ 缓存该作废。
+    let unauthorized = matches!(code, 401 | 403);
     if !status.is_success() {
         // ⚠️ 只回状态码与截断后的响应体，**不回显 Cookie**。
-        return Err(format!(
-            "网页端额度明细请求失败: HTTP {} {}",
-            status.as_u16(),
-            body.chars().take(160).collect::<String>()
-        ));
+        let hint = if unauthorized {
+            "（网页会话已失效，需要重新登录）"
+        } else {
+            ""
+        };
+        return Err(WebUsageError {
+            message: format!(
+                "网页端额度明细请求失败: HTTP {code} {hint} {}",
+                body.chars().take(120).collect::<String>()
+            ),
+            unauthorized,
+        });
     }
-    serde_json::from_str(&body).map_err(|error| format!("网页端额度明细响应不是 JSON: {error}"))
+    serde_json::from_str(&body)
+        .map_err(|error| WebUsageError::other(format!("网页端额度明细响应不是 JSON: {error}")))
 }
 
 // ---------------------------------------------------------------------------
