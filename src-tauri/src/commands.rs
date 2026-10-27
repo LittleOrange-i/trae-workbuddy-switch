@@ -5080,6 +5080,37 @@ pub async fn qoder_pro_pack_status(scope: String, uid: String) -> Result<Value, 
     qoder::checkin::pro_pack_status_for(region, &uid).await
 }
 
+// ---------------------------------------------------------------------------
+// issue #111 · Qoder 网页端逐资源包明细（登录窗 + 会话收割 + 取证探针）
+// ---------------------------------------------------------------------------
+//
+// 实现全在 [`crate::qoder_web`]，这里只是薄包装 —— 与本文件其余命令同构。
+// ⚠️ **必须包在 `commands.rs` 里**：`scripts/check-api-contract.cjs` 只把
+// `commands::<name>` 形态认作「已登记」，直接写 `qoder_web::<name>` 会被判未登记
+// （构建全绿、桌面端 command not found 的那类静默失效）。
+
+/// POST /api/qoder/web/login-open —— 打开（或前置）Qoder 网页端登录窗。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn qoder_web_login_open(app: tauri::AppHandle, scope: String) -> Result<Value, String> {
+    crate::qoder_web::login_open(&app, scope).await
+}
+
+/// POST /api/qoder/web/login-close —— 关闭登录窗（幂等）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn qoder_web_login_close(app: tauri::AppHandle) -> Result<Value, String> {
+    crate::qoder_web::login_close(&app).await
+}
+
+/// POST /api/qoder/web/credit-packs/probe —— 收割会话 Cookie 并探一次逐包接口。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn qoder_web_credit_packs_probe(
+    app: tauri::AppHandle,
+    scope: String,
+    uid: String,
+) -> Result<Value, String> {
+    crate::qoder_web::credit_packs_probe(&app, scope, uid).await
+}
+
 /// POST /api/qoder/pro-pack/claim —— 领取 Pro 升级包（幂等；已领过 `already=true`）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn qoder_pro_pack_claim(scope: String, uid: String) -> Result<Value, String> {

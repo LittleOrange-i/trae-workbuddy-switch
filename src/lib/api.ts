@@ -597,6 +597,11 @@ const ROUTES: Record<string, Route> = {
   qoder_switch_account: { method: "POST", path: "/api/qoder/accounts/switch" },
   qoder_set_account_group: { method: "POST", path: "/api/qoder/accounts/group" },
   qoder_usage: { method: "GET", path: "/api/qoder/usage" },
+  // issue #111 · 网页端逐资源包明细。三条都是**桌面端专属**：headless 形态（Docker /
+  // npm CLI）没有 `Webview`，server 侧同名路由返回结构化「仅桌面端可用」，不返回空包列表。
+  qoder_web_login_open: { method: "POST", path: "/api/qoder/web/login-open" },
+  qoder_web_login_close: { method: "POST", path: "/api/qoder/web/login-close" },
+  qoder_web_credit_packs_probe: { method: "POST", path: "/api/qoder/web/credit-packs/probe" },
   // Qoder API 网关管理面（网关本体走独立端口 57895，见 src/pages/QoderApiServicePage）。
   // ⚠️ **一个监听、两个区域**：状态 / 清单两条按 `scope` 看对应的那本账号库（fail-closed）；
   //   配置与监听是否起来是两区域共用的事实（故 config 不带 scope）。
@@ -3576,6 +3581,51 @@ export function qoderProPackClaim(
   uid: string,
 ): Promise<QoderProPackClaimResult> {
   return call<QoderProPackClaimResult>("qoder_pro_pack_claim", { scope, uid });
+}
+
+// ---------------------------------------------------------------------------
+// issue #111 · Qoder 网页端逐资源包明细
+// ---------------------------------------------------------------------------
+//
+// ⚠️ 这三条**仅桌面端可用**：逐包数据在网页端私有接口，只认浏览器登录后的会话
+// Cookie，而只有 Tauri 的 `Webview::cookies()` 能读到它。headless 形态（Docker /
+// npm CLI / 裸二进制）调用会得到结构化的「仅桌面端可用」错误 —— 那**不是**「该账号
+// 没有资源包」，两者不得混为一谈。
+
+/** 逐包探针结果（阶段零-2 取证用；`raw` 是上游原始响应，不含 Cookie）。 */
+export interface QoderWebCreditProbe {
+  /** 登录窗里是否已有该区域的会话 Cookie。 */
+  hasSession: boolean;
+  cookieCount: number;
+  /** 只给名称，**不含值**（Cookie 等价于完整身份凭据）。 */
+  cookieNames: string[];
+  /** 会话归属者是否与 `uid` 一致；不一致 ⇒ 明细必须丢弃。 */
+  uidMatches?: boolean;
+  /** 响应形状摘要（分组名 / 行数 / 行内键名），不含额度数值。 */
+  shape?: unknown;
+  /** 上游原始响应（仅探针返回）。 */
+  raw?: unknown;
+  message?: string;
+}
+
+/** 打开（或前置）Qoder 网页端登录窗，供用户登录一次。 */
+export function qoderWebLoginOpen(
+  scope: Scope,
+): Promise<{ opened: boolean; url: string }> {
+  return call<{ opened: boolean; url: string }>("qoder_web_login_open", { scope });
+}
+
+/** 关闭 Qoder 网页端登录窗（已关闭 ⇒ `closed=false`，不报错）。 */
+export function qoderWebLoginClose(): Promise<{ closed: boolean }> {
+  return call<{ closed: boolean }>("qoder_web_login_close", {});
+}
+
+/** 收割会话 Cookie 并探一次逐包接口（取证；不落盘）。 */
+export function qoderWebCreditPacksProbe(
+  scope: Scope,
+  uid: string,
+): Promise<QoderWebCreditProbe> {
+  return call<QoderWebCreditProbe>("qoder_web_credit_packs_probe", { scope, uid });
 }
 
 /** 限额护栏视图（`GET /api/qoder/gateway/quota`）。 */

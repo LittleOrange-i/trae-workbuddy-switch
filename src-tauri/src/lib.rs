@@ -10,6 +10,11 @@ mod trae_gateway;
 //    重启后静默断服（issue #52）。
 #[cfg(desktop)]
 mod companion;
+// Qoder 网页端登录窗 + 会话 Cookie 收割（issue #111）。
+// ⚠️ **不加 `#[cfg(desktop)]`**：命令名写进了下面无条件编译的 `generate_handler!`，
+//    加了 cfg 会让非桌面目标的构建直接找不到模块。真正的「仅桌面端可用」判定在
+//    **能力层**（headless 宿主走 server 路由，返回结构化拒绝），不靠这里裁剪。
+mod qoder_web;
 #[cfg(desktop)]
 mod tray;
 mod unified_gateway;
@@ -726,6 +731,11 @@ pub fn run() {
             commands::qoder_switch_account,
             commands::qoder_set_account_group,
             commands::qoder_usage,
+            // issue #111 · 网页端逐资源包明细：登录窗 + 会话收割 + 取证探针。
+            // ⚠️ 仅桌面端（`Webview` 只存在于 Tauri 宿主）；server 侧同名路由返回结构化拒绝。
+            commands::qoder_web_login_open,
+            commands::qoder_web_login_close,
+            commands::qoder_web_credit_packs_probe,
             commands::trae_merge_legacy_regions,
             commands::trae_save_login,
             commands::trae_backup_profile,

@@ -528,6 +528,23 @@ fn api_routes() -> Router {
             post(api_qoder_set_account_group),
         )
         .route("/api/qoder/usage", get(api_qoder_usage))
+        // ---- Qoder 网页端逐资源包明细（issue #111）----
+        // ★ 三条都**只对桌面端成立**：逐包数据在网页端私有接口，只认浏览器登录后的
+        //   会话 Cookie，而只有 Tauri 的 `Webview::cookies()` 能读到它。本进程是
+        //   headless 服务端（Docker / npm CLI / 裸二进制），没有 `Webview` ⇒ 原理上做不到。
+        //   ⇒ 结构化拒绝，**不返回空包列表**（那会被读成「该账号没有资源包」，与事实相反）。
+        .route(
+            "/api/qoder/web/login-open",
+            post(api_qoder_web_desktop_only),
+        )
+        .route(
+            "/api/qoder/web/login-close",
+            post(api_qoder_web_desktop_only),
+        )
+        .route(
+            "/api/qoder/web/credit-packs/probe",
+            post(api_qoder_web_desktop_only),
+        )
         // ---- Qoder API 网关（管理面；网关本体走独立端口 57895，**不** merge 进本 Router）----
         // ⚠️ 一个监听、两个区域：区域由请求所用 API Key 的归属决定（`QoderKeyRegion`），
         //   状态 / 模型两条按 `scope` 看对应的那本账号库（fail-closed）。
@@ -4637,6 +4654,23 @@ async fn api_companion_status() -> Response {
 async fn api_companion_set_visible() -> Response {
     json_err(
         "桌面悬浮窗仅在桌面端可用".to_string(),
+        StatusCode::BAD_REQUEST,
+    )
+}
+
+/// POST /api/qoder/web/{login-open,login-close,credit-packs/probe} —— Qoder 网页端逐包链路。
+///
+/// ★ **仅桌面端可用**，且是**原理性**限制而非未实现：逐包数据在网页端私有接口
+/// `/api/v2/me/usages/big_model_credits`，只认浏览器登录后的会话 Cookie；本进程是
+/// headless 服务端（Docker / npm CLI / 裸二进制），没有 Tauri 的 `Webview` ⇒ 拿不到
+/// 那份 Cookie（issue #111 §4）。
+///
+/// 三条路由共用同一句拒绝，理由见 [`api_companion_set_visible`] 的同一取舍：
+/// **不假装成功**。尤其不能返回 `packs: []` —— 那会被前端读成「该账号没有资源包」，
+/// 与「当前形态拿不到」是两件完全不同的事。
+async fn api_qoder_web_desktop_only() -> Response {
+    json_err(
+        "Qoder 逐包明细需要桌面版：当前运行的是一体化服务端/命令行形态，没有内嵌浏览器，无法采集网页会话。聚合额度（剩余/已用/总量）在任意形态都可用。".to_string(),
         StatusCode::BAD_REQUEST,
     )
 }
