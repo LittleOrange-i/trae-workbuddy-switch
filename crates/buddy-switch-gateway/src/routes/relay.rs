@@ -251,7 +251,12 @@ pub async fn relay(
     let probe_tag = next_probe_tag();
     let model = request.model.clone();
     let outcome = relay_inner(state, request, &probe_tag).await;
-    state.pool.write().await.release_probe(&model, &probe_tag);
+    let mut pool = state.pool.write().await;
+    // 探针票与验证票都按**请求**整体归还（同一个理由：`relay_inner` 的提前返回点太多，
+    // 逐个写必漏；而请求结束后它不可能再验证任何格子）。
+    pool.release_probe(&model, &probe_tag);
+    pool.release_verify_tickets(&probe_tag);
+    drop(pool);
     outcome
 }
 
@@ -427,6 +432,8 @@ async fn relay_inner(
             attempt,
             preferred_uid.as_deref(),
             allowed.as_ref(),
+            // ★ #88 4.2：到期验证票按请求归属 —— 同一格同一时刻只放一个探针。
+            probe_tag,
         )
         .await;
 
@@ -961,6 +968,7 @@ async fn select_account(
     attempt: usize,
     sticky_uid: Option<&str>,
     allowed: Option<&HashSet<String>>,
+    owner: &str,
 ) -> Option<Value> {
     // 偏好与策略**都来自同一个枚举** `AccountStrategy`，因此这里一次算清：
     // - `Pinned`    ⇒ 加权选号 + 偏好 uid（指定是偏好，不是约束）；
@@ -1002,6 +1010,7 @@ async fn select_account(
                     seed,
                     preferred,
                     allowed,
+                    owner,
                 ),
                 false,
             )

@@ -1875,6 +1875,7 @@ mod tests {
                 reason: String::new(),
                 hits: 0,
                 from_upstream: false,
+                verify_fails: 0,
             },
         );
         let map = pool_of(vec![blocked]);
@@ -1910,6 +1911,7 @@ mod tests {
                 reason: String::new(),
                 hits: 1,
                 from_upstream: false,
+                verify_fails: 0,
             },
         );
         let map = pool_of(vec![recovered.clone()]);
