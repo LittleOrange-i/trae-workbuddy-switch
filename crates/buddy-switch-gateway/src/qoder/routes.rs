@@ -1211,6 +1211,7 @@ async fn aggregate_relay(
                 input_tokens: prompt_tokens,
                 output_tokens: completion_tokens,
                 custom: &responses_custom,
+                raw_usage: usage.as_ref(),
             },
             model,
         ))
