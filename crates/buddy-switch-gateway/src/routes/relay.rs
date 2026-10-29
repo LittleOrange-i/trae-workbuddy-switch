@@ -440,8 +440,11 @@ async fn relay_hops(
     let mut tried: Vec<String> = Vec::new();
     let mut skipped: Vec<(String, &'static str)> = Vec::new();
     let mut reason: Option<crate::model_fallback::Trigger> = None;
-    // 当前跳要用的归属域（同平台跨区域时会变，见循环里的注释）。
-    let mut hop_region = request.region;
+    // 当前跳要用的归属域。
+    //
+    // 跨作用域的目标全部走 `cross::relay_on_scope` 并**直接 return**，
+    // 所以这里不再需要 `mut`（CI 的 `-D warnings` 会把 unused_mut 当错误）。
+    let hop_region = request.region;
     // ★ 总请求预算：**延迟由请求次数决定，不由跳数决定**。
     //   每跳分到 `min(max_rotate, 剩余预算)` 次尝试，用完即停（不论链还剩几跳）。
     let mut remaining_budget = crate::model_fallback::TOTAL_REQUEST_BUDGET;
