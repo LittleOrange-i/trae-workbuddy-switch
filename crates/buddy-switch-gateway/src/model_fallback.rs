@@ -59,7 +59,19 @@ use crate::pool::UpstreamEvent;
 /// 每跳都要走完一整轮换号循环（`max_rotate` 默认 64，实际通常 1-3 次），延迟线性叠加；
 /// 第 3 跳的实际成功率极低而成本确定。上限写死在一个常量里，避免出现
 /// 「配了 3 个但只用前 2 个」的死配置。
-pub const MAX_TARGETS: usize = 2;
+pub const MAX_TARGETS: usize = 3;
+
+/// 一次请求的**总上游请求数**预算（跨所有跳与所有账号轮次）。
+///
+/// ## 为什么是「总请求数」而不是「跳数上限」
+/// 延迟由**请求次数**决定，不由跳数决定：3 跳 × 每跳 3 个号 = 9 次请求，
+/// 与「2 跳 × 每跳 5 个号」是同一量级。按跳数限流会给出错误的直觉。
+///
+/// ## 为什么是 8
+/// 失败多为 429 / 5xx（1–2s 内返回），8 次约 10–16s，落在客户端 30–60s 超时之内。
+/// **超时档例外**：单次上游超时是 600s（`state.rs`），一次超时就吃满整个预算 ——
+/// 这是已知的、刻意不在这里处理的限制（缩短超时会影响所有正常请求）。
+pub const TOTAL_REQUEST_BUDGET: usize = 8;
 
 /// 可触发降级的上游事件（**白名单**，见模块文档）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -110,12 +122,96 @@ pub fn baseline_triggers() -> BTreeSet<Trigger> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FallbackChain {
-    /// 备选模型，按尝试顺序。超过 [`MAX_TARGETS`] 的部分在读取时截断。
-    pub targets: Vec<String>,
+    /// 备选目标，按尝试顺序。超过 [`MAX_TARGETS`] 的部分在读取时截断。
+    pub targets: Vec<FallbackTarget>,
     /// 触发条件白名单。**空集视为 [`baseline_triggers`]** —— 手写配置只填 `targets`
     /// 时也能工作，而不是「配了却不触发」这种最难自查的状态。
     pub triggers: BTreeSet<Trigger>,
     pub enabled: bool,
+}
+
+/// 一个备选目标：**哪个作用域**的**哪个模型**。
+///
+/// ## 为什么带 `scope`
+/// 备选不限于同平台：`wb-cn:glm` 失败后可以降到 `wb-global:glm`（同平台跨区域，
+/// 协议完全兼容）或 `trae-cn:claude`（跨平台，需要换 relay）。
+/// 用 `Scope` 表达「平台 × 区域」比 `platform + region` 两个字段少一层分派。
+///
+/// ## 为什么 `scope` 是 `Option<String>` 而不是 `Option<Scope>`
+/// 1. **向后兼容**：旧配置的 `targets` 是裸字符串数组（`["deepseek-v3"]`），
+///    反序列化时补成 `None` = 「与入口同作用域」；
+/// 2. **失败隔离**：未知作用域只让**这一跳**失效。用 `Scope` 作字段类型的话，
+///    一个拼错的作用域会让**整份配置**反序列化失败 ⇒ `load()` 回落空表 ⇒
+///    用户所有链凭空消失（与 `ModelFallback::scopes` 用 `String` 作键同一个理由）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FallbackTarget {
+    /// `None` = 与入口请求同作用域（旧配置 / 同平台同区域）。
+    pub scope: Option<String>,
+    /// 模型 id（目标作用域清单里的名字）。
+    pub model: String,
+}
+
+impl FallbackTarget {
+    /// 同作用域的备选（旧配置形态）。
+    pub fn same_scope(model: impl Into<String>) -> Self {
+        Self {
+            scope: None,
+            model: model.into(),
+        }
+    }
+
+    /// 这一跳实际要去的作用域：`None` 时取入口作用域。
+    pub fn scope_or(&self, entry: Scope) -> Scope {
+        self.scope
+            .as_deref()
+            .and_then(|raw| Scope::parse(raw).ok())
+            .unwrap_or(entry)
+    }
+
+    /// 该 target 是不是**跨作用域**（需要换 relay）。
+    pub fn crosses_scope(&self, entry: Scope) -> bool {
+        self.scope_or(entry) != entry
+    }
+}
+
+impl Serialize for FallbackTarget {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // 同作用域的目标序列化成**裸字符串**（保持旧配置可读、可手写）。
+        match &self.scope {
+            None => serializer.serialize_str(&self.model),
+            Some(scope) => {
+                use serde::ser::SerializeStruct;
+                let mut state = serializer.serialize_struct("FallbackTarget", 2)?;
+                state.serialize_field("scope", scope)?;
+                state.serialize_field("model", &self.model)?;
+                state.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FallbackTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            /// 旧形态：`"deepseek-v3"`（同作用域）。
+            Bare(String),
+            /// 新形态：`{ "scope": "trae-cn", "model": "claude-4" }`。
+            ///
+            /// `scope` 可省略（前端「同作用域」就是 `{ model }`）——
+            /// 省略等价于裸字符串，不必让调用方记两种形态。
+            Scoped {
+                #[serde(default)]
+                scope: Option<String>,
+                model: String,
+            },
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Bare(model) => FallbackTarget::same_scope(model),
+            Repr::Scoped { scope, model } => FallbackTarget { scope, model },
+        })
+    }
 }
 
 impl Default for FallbackChain {
@@ -145,18 +241,24 @@ impl FallbackChain {
     /// ⚠️ **不在这里截断** `MAX_TARGETS`。截断必须发生在「自环 / 与主模型同名」过滤**之后**
     /// （见 [`plan_for`]）—— 否则链里写一个与主模型同名的条目会白占一个配额，
     /// 把后面真正的备选挤掉（测试 `plan_is_capped_deduped_and_case_insensitive` 钉住这一点）。
-    pub fn effective_targets(&self) -> Vec<String> {
-        let mut seen = BTreeSet::new();
+    pub fn effective_targets(&self) -> Vec<FallbackTarget> {
+        // ★ 去重键必须带 `scope`：`wb-cn:glm` 与 `trae-cn:glm` 是**两个不同的目标**，
+        //   只按模型名去重会把跨平台的同名模型误吞掉。
+        let mut seen: BTreeSet<(Option<String>, String)> = BTreeSet::new();
         let mut out = Vec::new();
         for target in &self.targets {
-            let name = target.trim();
+            let name = target.model.trim();
             if name.is_empty() {
                 continue;
             }
-            if !seen.insert(name.to_ascii_lowercase()) {
+            let key = (target.scope.clone(), name.to_ascii_lowercase());
+            if !seen.insert(key) {
                 continue;
             }
-            out.push(name.to_string());
+            out.push(FallbackTarget {
+                scope: target.scope.clone(),
+                model: name.to_string(),
+            });
         }
         out
     }
@@ -223,8 +325,8 @@ impl ModelFallback {
 /// **唯一判断点** —— 别处不要再写「哪些跳该试」的逻辑（复制即漂移的种子）。
 ///
 /// 返回**只含主模型**时，调用方应直接走原有路径（不进入降级循环）。
-pub fn plan_for(fb: &ModelFallback, scope: Scope, model: &str) -> Vec<String> {
-    let mut plan = vec![model.to_string()];
+pub fn plan_for(fb: &ModelFallback, scope: Scope, model: &str) -> Vec<FallbackTarget> {
+    let mut plan = vec![FallbackTarget::same_scope(model.to_string())];
     let scoped = fb.scope(scope);
     if !scoped.enabled {
         return plan;
@@ -243,16 +345,20 @@ pub fn plan_for(fb: &ModelFallback, scope: Scope, model: &str) -> Vec<String> {
         return plan;
     }
     for target in chain.effective_targets() {
-        // 主 + 2 跳 = 最多 3 个模型。`plan` 含主模型，所以到 3 就停。
+        // `plan` 含主模型，所以到 MAX_TARGETS + 1 就停。
         if plan.len() > MAX_TARGETS {
             break;
         }
-        // 目标与主模型同名 ⇒ 不自环。
-        if target.eq_ignore_ascii_case(model.trim()) {
+        // 目标与主模型同名**且同作用域** ⇒ 不自环。
+        // ★ 跨作用域的同名模型**不是**自环：`wb-cn:glm` → `trae-cn:glm` 是两个不同的上游。
+        if !target.crosses_scope(scope) && target.model.eq_ignore_ascii_case(model.trim()) {
             continue;
         }
-        // 同一请求内每个模型只试一次：链里写重了也只保留一份。
-        if plan.iter().any(|seen| seen.eq_ignore_ascii_case(&target)) {
+        // 同一请求内每个 (作用域, 模型) 只试一次：链里写重了也只保留一份。
+        if plan.iter().any(|seen| {
+            seen.scope_or(scope) == target.scope_or(scope)
+                && seen.model.eq_ignore_ascii_case(&target.model)
+        }) {
             continue;
         }
         plan.push(target);
@@ -337,6 +443,11 @@ pub enum TargetState {
 #[derive(Debug, Clone, Serialize)]
 pub struct TargetView {
     pub model: String,
+    /// 该目标所在的作用域（`wb-cn` / `trae-cn` …）。
+    ///
+    /// 前端据此标注「跨平台」—— 跨作用域的备选会消耗**另一个平台**的账号额度，
+    /// 这一点必须在卡片上说清，否则用户不知道额度去哪了。
+    pub scope: String,
     pub state: TargetState,
     /// 闸门剩余秒数（仅 `Gated` 有意义）。
     pub gated_for_secs: Option<u64>,
@@ -520,12 +631,23 @@ pub fn build_view(
                     .effective_targets()
                     .into_iter()
                     .take(MAX_TARGETS)
-                    .map(|model| {
-                        let gate = gates
-                            .iter()
-                            .find(|(name, _)| name.eq_ignore_ascii_case(&model));
-                        let state = if crate::disabled_models::is_disabled(disabled, scope, &model)
-                        {
+                    .map(|target| {
+                        let model = target.model.clone();
+                        let target_scope = target.scope_or(scope);
+                        // 闸门列表是**入口作用域**的：跨作用域的目标查不到它的闸门，
+                        // 只按禁用状态判（并在视图里带 `scope`，前端据此标注「跨平台」）。
+                        let gate = if target_scope == scope {
+                            gates
+                                .iter()
+                                .find(|(name, _)| name.eq_ignore_ascii_case(&model))
+                        } else {
+                            None
+                        };
+                        let state = if crate::disabled_models::is_disabled(
+                            disabled,
+                            target_scope,
+                            &model,
+                        ) {
                             TargetState::Disabled
                         } else if gate.is_some() {
                             TargetState::Gated
@@ -541,6 +663,7 @@ pub fn build_view(
                         }
                         TargetView {
                             model,
+                            scope: target_scope.as_str().to_string(),
                             state,
                             gated_for_secs,
                             caps_lost,
@@ -574,13 +697,14 @@ pub fn normalize(input: ScopeFallback) -> ScopeFallback {
     let mut normalized = input;
     normalized.chains.retain(|from, _| !from.trim().is_empty());
     for (from, chain) in normalized.chains.iter_mut() {
-        let mut seen = BTreeSet::new();
+        // 去重键带 `scope`（同 `effective_targets` 的理由：跨平台同名模型是两个目标）。
+        let mut seen: BTreeSet<(Option<String>, String)> = BTreeSet::new();
         chain.targets.retain(|target| {
-            let name = target.trim();
+            let name = target.model.trim();
             if name.is_empty() || name.eq_ignore_ascii_case(from.trim()) {
                 return false;
             }
-            seen.insert(name.to_ascii_lowercase())
+            seen.insert((target.scope.clone(), name.to_ascii_lowercase()))
         });
         chain.targets.truncate(MAX_TARGETS);
     }
@@ -701,10 +825,18 @@ mod tests {
 
     fn chain(targets: &[&str], triggers: &[Trigger]) -> FallbackChain {
         FallbackChain {
-            targets: targets.iter().map(|s| s.to_string()).collect(),
+            targets: targets
+                .iter()
+                .map(|s| FallbackTarget::same_scope(*s))
+                .collect(),
             triggers: triggers.iter().copied().collect(),
             enabled: true,
         }
+    }
+
+    /// 只取模型名做断言（作用域另有专门用例）。
+    fn names(plan: &[FallbackTarget]) -> Vec<&str> {
+        plan.iter().map(|target| target.model.as_str()).collect()
     }
 
     fn store(scope: Scope, scoped: ScopeFallback) -> ModelFallback {
@@ -724,14 +856,14 @@ mod tests {
             .insert("a".into(), chain(&["b", "c"], &[Trigger::Gate]));
         let fb = store(Scope::WbCn, scoped);
         assert_eq!(
-            plan_for(&fb, Scope::WbCn, "a"),
+            names(&plan_for(&fb, Scope::WbCn, "a")),
             vec!["a"],
             "总开关关 ⇒ 只主模型"
         );
 
         // 完全没有该作用域的配置。
         assert_eq!(
-            plan_for(&ModelFallback::default(), Scope::WbCn, "a"),
+            names(&plan_for(&ModelFallback::default(), Scope::WbCn, "a")),
             vec!["a"]
         );
     }
@@ -752,9 +884,51 @@ mod tests {
         // 大小写不敏感命中主模型 "A"，且上限 2、去重、不自环。
         let plan = plan_for(&fb, Scope::WbCn, "a");
         assert_eq!(
-            plan,
-            vec!["a", "b", "c"],
-            "上限 2 + 去重 + 不自环：{plan:?}"
+            names(&plan),
+            vec!["a", "b", "c", "d"],
+            "上限 3 + 去重 + 不自环：{plan:?}"
+        );
+    }
+
+    /// 跨作用域的目标：**同名不算自环**、去重键必须带 scope。
+    ///
+    /// 变异验证：把去重键退回「只看模型名」⇒ `trae-cn:glm` 会被 `wb-cn:glm` 吞掉，本用例红。
+    #[test]
+    fn cross_scope_targets_are_not_self_loops_and_dedupe_by_scope() {
+        let mut scoped = ScopeFallback {
+            enabled: true,
+            ..Default::default()
+        };
+        scoped.chains.insert(
+            "glm".into(),
+            FallbackChain {
+                targets: vec![
+                    // 与主模型同名，但**另一个作用域** —— 不是自环。
+                    FallbackTarget {
+                        scope: Some("trae-cn".into()),
+                        model: "glm".into(),
+                    },
+                    // 同作用域的重复项（大小写不同）⇒ 应被去重。
+                    FallbackTarget::same_scope("deepseek"),
+                    FallbackTarget::same_scope("DeepSeek"),
+                    // 同平台跨区域。
+                    FallbackTarget {
+                        scope: Some("wb-global".into()),
+                        model: "glm".into(),
+                    },
+                ],
+                triggers: [Trigger::Gate].into_iter().collect(),
+                enabled: true,
+            },
+        );
+        let fb = store(Scope::WbCn, scoped);
+        let plan = plan_for(&fb, Scope::WbCn, "glm");
+        assert_eq!(names(&plan), vec!["glm", "glm", "deepseek", "glm"], "plan={plan:?}");
+        let scopes: Vec<&str> = plan.iter().map(|t| t.scope_or(Scope::WbCn).as_str()).collect();
+        assert_eq!(
+            scopes,
+            vec!["wb-cn", "trae-cn", "wb-cn", "wb-global"],
+            "同名模型必须按作用域区分：{scopes:?}"
         );
     }
 
@@ -768,13 +942,13 @@ mod tests {
         c.enabled = false;
         scoped.chains.insert("a".into(), c);
         let fb = store(Scope::WbCn, scoped);
-        assert_eq!(plan_for(&fb, Scope::WbCn, "a"), vec!["a"]);
+        assert_eq!(names(&plan_for(&fb, Scope::WbCn, "a")), vec!["a"]);
     }
 
     #[test]
     fn empty_triggers_fall_back_to_baseline() {
         let c = FallbackChain {
-            targets: vec!["b".into()],
+            targets: vec![FallbackTarget::same_scope("b")],
             triggers: BTreeSet::new(),
             enabled: true,
         };
@@ -853,7 +1027,7 @@ mod tests {
             }
         }"#;
         let fb: ModelFallback = serde_json::from_str(text).expect("必须能读进来");
-        assert_eq!(plan_for(&fb, Scope::WbCn, "a"), vec!["a", "b"]);
+        assert_eq!(names(&plan_for(&fb, Scope::WbCn, "a")), vec!["a", "b"]);
         let round = serde_json::to_string(&fb).unwrap();
         assert!(
             round.contains("future-scope"),
@@ -865,7 +1039,7 @@ mod tests {
     fn corrupted_file_falls_back_to_empty() {
         let fb: ModelFallback = serde_json::from_str("{ not json").unwrap_or_default();
         assert!(fb.scopes.is_empty());
-        assert_eq!(plan_for(&fb, Scope::WbCn, "a"), vec!["a"]);
+        assert_eq!(names(&plan_for(&fb, Scope::WbCn, "a")), vec!["a"]);
     }
 
     #[test]

@@ -170,6 +170,8 @@ export const en = {
   "shared.gateway.fallback.drawer.edit": "Edit fallback · {model}",
   "shared.gateway.fallback.field.from": "Primary model",
   "shared.gateway.fallback.field.fromLocked": "The primary cannot be changed. Delete and recreate to switch it — changing from is a different chain.",
+  "shared.gateway.fallback.field.thisScope": "this scope",
+  "shared.gateway.fallback.field.crossPlatformPending": "cross-platform not supported yet",
   "shared.gateway.fallback.field.targets": "Backup models (tried in order)",
   "shared.gateway.fallback.field.targetsHint": "Up to {max} (with the primary, {hops} hops total). Disabled or unavailable models are not listed.",
   "shared.gateway.fallback.capsNote": "Requests with images automatically skip backups that do not accept image input; tools, structured output and context window are not checked in this version — the backup accepts or rejects them itself.",

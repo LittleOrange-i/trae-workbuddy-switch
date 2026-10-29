@@ -204,6 +204,8 @@ export const zh = {
   "shared.gateway.fallback.drawer.edit": "编辑降级链 · {model}",
   "shared.gateway.fallback.field.from": "主模型",
   "shared.gateway.fallback.field.fromLocked": "主模型不可改。要换主模型请删掉这条链重配 —— 改 from 等于换了一条链。",
+  "shared.gateway.fallback.field.thisScope": "本区域",
+  "shared.gateway.fallback.field.crossPlatformPending": "跨平台暂不支持",
   "shared.gateway.fallback.field.targets": "备选模型（按顺序尝试）",
   "shared.gateway.fallback.field.targetsHint": "最多 {max} 个（含主模型共 {hops} 跳）。已禁用 / 上游不可用的模型不会出现在这里。",
   "shared.gateway.fallback.capsNote": "带图片的请求会自动跳过不支持图片输入的备选；工具调用 / 结构化输出 / 上下文窗口本版不校验，由备选自己决定接受还是拒绝。",

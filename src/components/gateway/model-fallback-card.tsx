@@ -139,7 +139,11 @@ export function ModelFallbackCard({ region, scope: scopeProp, modelOptions, clas
         chains.map((chain) => [
           chain.from,
           {
-            targets: chain.targets.map((target) => target.model),
+            targets: chain.targets.map((target) => ({
+              // 同作用域存 `null`（配置里最简形态）；跨作用域才带 scope。
+              scope: target.scope === scope ? null : target.scope,
+              model: target.model,
+            })),
             triggers: chain.triggers,
             enabled: chain.enabled,
           },
@@ -155,7 +159,10 @@ export function ModelFallbackCard({ region, scope: scopeProp, modelOptions, clas
         chains.map((item) => [
           item.from,
           {
-            targets: item.targets.map((target) => target.model),
+            targets: item.targets.map((target) => ({
+              scope: target.scope === scope ? null : target.scope,
+              model: target.model,
+            })),
             triggers: item.triggers,
             enabled: item.from === chain.from ? !item.enabled : item.enabled,
           },
@@ -241,6 +248,7 @@ export function ModelFallbackCard({ region, scope: scopeProp, modelOptions, clas
             <ChainRow
               key={chain.from}
               chain={chain}
+              scope={scope}
               maxTargets={view.max_targets}
               baseline={view.baseline}
               onEdit={() => setEditing(chain.from)}
@@ -283,12 +291,15 @@ export function ModelFallbackCard({ region, scope: scopeProp, modelOptions, clas
 
 function ChainRow({
   chain,
+  scope,
   maxTargets,
   baseline,
   onEdit,
   onToggle,
 }: {
   chain: FallbackChainView;
+  /** 入口作用域：用来判断哪些备选是**跨作用域**（要标出平台前缀）。 */
+  scope: Scope;
   maxTargets: number;
   baseline: FallbackTrigger[];
   onEdit: () => void;
@@ -317,10 +328,17 @@ function ChainRow({
 
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         {chain.targets.map((target, index) => (
-          <span key={target.model} className="flex items-center gap-1.5">
+          <span key={`${target.scope}:${target.model}`} className="flex items-center gap-1.5">
             {index > 0 ? (
               <span className="text-[11px] text-muted-foreground/50" aria-hidden>
                 ›
+              </span>
+            ) : null}
+            {/* 跨作用域的目标带上前缀：否则用户以为还是同一个池的模型，
+                而它实际消耗的是**另一个平台/区域**的账号额度。 */}
+            {target.scope !== scope ? (
+              <span className="shrink-0 rounded bg-card-2 px-1 py-0.5 font-mono text-[10px] text-muted-foreground">
+                {target.scope}
               </span>
             ) : null}
             <ModelChip model={target.model} state={target.state} />

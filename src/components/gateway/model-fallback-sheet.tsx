@@ -39,11 +39,12 @@ import {
 } from "@/components/ui/sheet";
 import { previewModelFallback } from "@/lib/api";
 import { useT } from "@/lib/i18n";
-import type { Scope } from "@/lib/scope";
+import { SCOPES, type Scope } from "@/lib/scope";
 import { cn } from "@/lib/utils";
 import { useGatewayStore } from "@/stores/gateway";
 import type {
   FallbackPreview,
+  FallbackTargetInput,
   FallbackTrigger,
   ModelFallbackView,
   Region,
@@ -51,6 +52,14 @@ import type {
 } from "@/lib/types";
 
 /** 可勾选的触发条件（顺序即展示顺序：先「默认开」后「需谨慎」）。 */
+/**
+ * 「与入口同作用域」在下拉里的哨兵值。
+ *
+ * Radix 的 `Select` 把**空字符串**当作「无值」（`SelectValue` 会渲染 placeholder），
+ * 所以不能用 `""` 表示「本区域」—— 用户会看到一个空白下拉，以为没配。
+ */
+const SELF_SCOPE = "__self__";
+
 const TRIGGERS: { key: FallbackTrigger; labelKey: string; descKey: string }[] = [
   { key: "gate", labelKey: "shared.gateway.fallback.trigger.gate", descKey: "shared.gateway.fallback.trigger.gateDesc" },
   { key: "model_rate", labelKey: "shared.gateway.fallback.trigger.model_rate", descKey: "shared.gateway.fallback.trigger.model_rateDesc" },
@@ -64,7 +73,7 @@ const TRIGGERS: { key: FallbackTrigger; labelKey: string; descKey: string }[] = 
 
 interface Draft {
   from: string;
-  targets: string[];
+  targets: FallbackTargetInput[];
   triggers: FallbackTrigger[];
 }
 
@@ -124,7 +133,11 @@ export function ModelFallbackSheet({
       existing
         ? {
             from: existing.from,
-            targets: existing.targets.map((target) => target.model),
+            targets: existing.targets.map((target) => ({
+              // 同作用域存 `null`（配置里最简形态）；跨作用域才带 scope。
+              scope: target.scope === scope ? null : target.scope,
+              model: target.model,
+            })),
             triggers: [...existing.triggers],
           }
         : { from: "", targets: [], triggers: [...view.baseline] },
@@ -132,14 +145,22 @@ export function ModelFallbackSheet({
   }, [open, editing, view]);
 
   // 预演：后端纯计算，零副作用（不写、不领探针票、不发上游）。
-  const targetsKey = draft?.targets.filter(Boolean).join(",") ?? "";
+  const targetsKey =
+    draft?.targets
+      .filter((target) => target.model.trim())
+      .map((target) => `${target.scope ?? ""}:${target.model}`)
+      .join(",") ?? "";
   useEffect(() => {
     if (!draft?.from) {
       setPreview(null);
       return;
     }
     let alive = true;
-    void previewModelFallback(scope, draft.from, draft.targets.filter(Boolean))
+    void previewModelFallback(
+      scope,
+      draft.from,
+      draft.targets.filter((target) => target.model.trim()).map((target) => target.model),
+    )
       .then((result) => {
         if (alive) setPreview(result);
       })
@@ -154,7 +175,13 @@ export function ModelFallbackSheet({
 
   async function onSave() {
     if (!draft?.from) return;
-    const targets = draft.targets.filter(Boolean);
+    const targets = draft.targets
+      .filter((target) => target.model.trim())
+      .map((target) => ({
+        // 同作用域传 `null`（后端等价于裸字符串），跨作用域才带 scope。
+        scope: target.scope && target.scope !== scope ? target.scope : null,
+        model: target.model.trim(),
+      }));
     if (!targets.length) {
       toast.error(t("shared.gateway.fallback.needTarget"), {
         description: t("shared.gateway.fallback.needTargetDesc"),
@@ -165,7 +192,10 @@ export function ModelFallbackSheet({
     const chains: ScopeFallbackConfig["chains"] = {};
     for (const chain of view.chains) {
       chains[chain.from] = {
-        targets: chain.targets.map((target) => target.model),
+        targets: chain.targets.map((target) => ({
+          scope: target.scope === scope ? null : target.scope,
+          model: target.model,
+        })),
         triggers: chain.triggers,
         enabled: chain.enabled,
       };
@@ -240,18 +270,62 @@ export function ModelFallbackSheet({
                 {t("shared.gateway.fallback.field.targets")}
               </h3>
               <div className="space-y-1.5">
-                {Array.from({ length: view.max_targets }, (_, index) => (
+                {Array.from({ length: view.max_targets }, (_, index) => {
+                  const target = draft.targets[index] ?? { scope: null, model: "" };
+                  return (
                   <div key={index} className="flex items-center gap-1.5">
                     <span className="w-3.5 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
                       {index + 1}
                     </span>
+                    {/* 作用域：默认「本区域」；同平台的另一区域可切（WB 已支持执行），
+                        跨平台列出但**禁用**并说明原因 —— 不列出来会让用户以为不支持，
+                        列出来能选则是假开关。 */}
                     <Select
-                      value={draft.targets[index] ?? ""}
+                      value={target.scope ?? SELF_SCOPE}
                       onValueChange={(value) =>
                         setDraft((prev) => {
                           if (!prev) return prev;
                           const targets = [...prev.targets];
-                          targets[index] = value;
+                          const next = value === SELF_SCOPE ? null : value;
+                          const changed = next !== (targets[index].scope ?? null);
+                          targets[index] = {
+                            ...targets[index],
+                            scope: next,
+                            // 换作用域后原模型名可能不在目标清单里，清空避免误存。
+                            model: changed ? "" : targets[index].model,
+                          };
+                          return { ...prev, targets };
+                        })
+                      }
+                    >
+                      <SelectTrigger className="w-[92px] shrink-0 text-[11.5px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={SELF_SCOPE}>
+                          {t("shared.gateway.fallback.field.thisScope")}
+                        </SelectItem>
+                        {SCOPES.filter((candidate) => candidate !== scope).map((candidate) => {
+                          const crossPlatform =
+                            candidate.slice(0, candidate.indexOf("-")) !==
+                            scope.slice(0, scope.indexOf("-"));
+                          return (
+                            <SelectItem key={candidate} value={candidate} disabled={crossPlatform}>
+                              {crossPlatform
+                                ? `${candidate}（${t("shared.gateway.fallback.field.crossPlatformPending")}）`
+                                : candidate}
+                            </SelectItem>
+                          );
+                        })}
+                      </SelectContent>
+                    </Select>
+                    <Select
+                      value={target.model}
+                      onValueChange={(value) =>
+                        setDraft((prev) => {
+                          if (!prev) return prev;
+                          const targets = [...prev.targets];
+                          targets[index] = { ...targets[index], model: value };
                           return { ...prev, targets };
                         })
                       }
@@ -267,6 +341,13 @@ export function ModelFallbackSheet({
                               {name}
                             </SelectItem>
                           ))}
+                        {/* 跨作用域时，已存的目标模型可能不在当前 options 里 ——
+                            补一条，否则下拉显示空白、用户以为没配。 */}
+                        {target.model && !options.includes(target.model) ? (
+                          <SelectItem value={target.model} className="font-mono text-[12px]">
+                            {target.model}
+                          </SelectItem>
+                        ) : null}
                       </SelectContent>
                     </Select>
                     <Button
@@ -310,7 +391,8 @@ export function ModelFallbackSheet({
                       ↓
                     </Button>
                   </div>
-                ))}
+                  );
+                })}
               </div>
               <p className="text-[11.5px] leading-relaxed text-muted-foreground">
                 {t("shared.gateway.fallback.field.targetsHint", {

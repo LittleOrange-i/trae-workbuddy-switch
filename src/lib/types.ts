@@ -1659,6 +1659,8 @@ export type FallbackTargetState = "healthy" | "gated" | "disabled" | "unknown";
 
 export interface FallbackTargetView {
   model: string;
+  /** 该目标所在的作用域（`wb-cn` / `wb-global` / `trae-cn` …）。 */
+  scope: string;
   state: FallbackTargetState;
   /** 闸门剩余秒数（仅 `state === "gated"` 时有值）。 */
   gated_for_secs: number | null;
@@ -1704,11 +1706,24 @@ export interface ModelFallbackView {
 }
 
 /** 保存时的提交形状（与后端 `ScopeFallback` 一致）。 */
+/**
+ * 一个备选目标：**哪个作用域**的**哪个模型**。
+ *
+ * `scope` 省略 / `null` = 与入口同作用域（绝大多数情况）。
+ * 显式指定时可以跨区域（`wb-cn` → `wb-global`）—— 同平台跨区域在 WB 中继里
+ * 靠「换 region」实现，协议一致；跨平台（`wb-cn` → `trae-cn`）暂不支持执行，
+ * 卡片会按 `scope` 标注。
+ */
+export interface FallbackTargetInput {
+  scope?: string | null;
+  model: string;
+}
+
 export interface ScopeFallbackConfig {
   enabled: boolean;
   chains: Record<
     string,
-    { targets: string[]; triggers: FallbackTrigger[]; enabled: boolean }
+    { targets: FallbackTargetInput[]; triggers: FallbackTrigger[]; enabled: boolean }
   >;
 }
 

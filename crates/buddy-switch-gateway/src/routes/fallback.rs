@@ -44,8 +44,8 @@ pub struct FallbackLoop {
     scope: Scope,
     /// 客户端原本请求的模型（降级头里的 `from`）。
     origin: String,
-    /// `[主模型, 备选1, 备选2…]`。
-    plan: Vec<String>,
+    /// `[主模型, 备选1, 备选2…]`（每项带自己的作用域）。
+    plan: Vec<crate::model_fallback::FallbackTarget>,
     /// 链的**触发条件白名单**（用户配的 `triggers`）。
     ///
     /// ★ 必须带上：只看状态码会**无视用户配的白名单** ——
@@ -61,7 +61,15 @@ impl FallbackLoop {
     pub async fn plan(scope: Scope, origin_model: &str) -> Self {
         let fb = model_fallback::shared();
         let guard = fb.read().await;
-        let plan = model_fallback::plan_for(&guard, scope, origin_model);
+        let mut plan = model_fallback::plan_for(&guard, scope, origin_model);
+        // ★ Trae / Qoder 侧**只支持同作用域**的备选。
+        //
+        //   跨作用域（同平台跨区域）在 WB 的中继里能靠「换 region」实现，
+        //   但这两条平台的中继把 region/variant 固化在入口签名里、且返回 `Response`
+        //   无法折回可判事件的结果 —— 强行做会让判据退化成只看状态码。
+        //   这里**过滤掉**跨作用域的目标（而不是发出去再失败）：
+        //   卡片会按 `target.scope` 标注「仅 WB 支持」，用户看得到原因。
+        plan.retain(|target| !target.crosses_scope(scope));
         let triggers = model_fallback::chain_of(&guard, scope, origin_model)
             .map(|chain| chain.effective_triggers())
             .unwrap_or_default();
@@ -85,7 +93,10 @@ impl FallbackLoop {
 
     /// hop 序列（`[主模型, 备选1, 备选2…]`）。
     pub fn models(&self) -> Vec<String> {
-        self.plan.clone()
+        self.plan
+            .iter()
+            .map(|target| target.model.clone())
+            .collect()
     }
 
     /// 第 `hop` 跳的模型名（`hop = 0` 是主模型）。
@@ -94,7 +105,14 @@ impl FallbackLoop {
     ///   回落的后果是「备选全被禁用时，把主模型原样重发一次」——
     ///   客户端收到一个「降级到 A → A」的头，而实际只是重试了一次主模型。
     pub fn model_at(&self, hop: usize) -> Option<&str> {
-        self.plan.get(hop).map(String::as_str)
+        self.plan.get(hop).map(|target| target.model.as_str())
+    }
+
+    /// 第 `hop` 跳的**完整目标**（含作用域）。
+    ///
+    /// Trae / Qoder 侧的跨作用域执行要它：同作用域换号与跨作用域换 relay 是两件事。
+    pub fn target_at(&self, hop: usize) -> Option<&crate::model_fallback::FallbackTarget> {
+        self.plan.get(hop)
     }
 
     /// 这一跳要用的请求体。

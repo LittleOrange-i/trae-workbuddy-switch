@@ -165,6 +165,12 @@ pub struct FallbackInfo {
 }
 
 /// 中继失败。
+/// 单跳允许的最大尝试次数（`max_rotate` 的合法上限）。
+///
+/// 上限定 6：单次上游失败多为 1–2s，6 次 ≈ 12s，仍在客户端 30–60s 超时内。
+/// 再往上调只会把「池里号很多」变成「一个请求跑一分钟」。
+pub const MAX_ATTEMPTS_PER_HOP: usize = 6;
+
 pub struct RelayFailure {
     /// 对外错误。
     pub error: GatewayError,
@@ -400,11 +406,14 @@ async fn relay_hops(
     let scope = fallback_scope(request.region);
 
     // 业务请求（签到 / 积分 / 旅行）没有「模型」概念，一律不降级。
-    let plan: Vec<String> = if matches!(request.kind, RelayKind::Llm) {
+    let plan: Vec<crate::model_fallback::FallbackTarget> = if matches!(request.kind, RelayKind::Llm)
+    {
         let fb = state.fallback.read().await;
         crate::model_fallback::plan_for(&fb, scope, &origin)
     } else {
-        vec![origin.clone()]
+        vec![crate::model_fallback::FallbackTarget::same_scope(
+            origin.clone(),
+        )]
     };
 
     // 没有链（或链里没有有效备选）⇒ 走原路径。绝大多数用户是这一条，零额外开销。
@@ -415,7 +424,7 @@ async fn relay_hops(
         None
     };
     let Some(chain) = chain else {
-        let outcome = relay_once(state, request, probe_tag).await;
+        let outcome = relay_once(state, request, probe_tag, None).await;
         state.pool.write().await.release_probe(&origin, probe_tag);
         return outcome;
     };
@@ -425,10 +434,38 @@ async fn relay_hops(
     let mut tried: Vec<String> = Vec::new();
     let mut skipped: Vec<(String, &'static str)> = Vec::new();
     let mut reason: Option<crate::model_fallback::Trigger> = None;
+    // 当前跳要用的归属域（同平台跨区域时会变，见循环里的注释）。
+    let mut hop_region = request.region;
+    // ★ 总请求预算：**延迟由请求次数决定，不由跳数决定**。
+    //   每跳分到 `min(max_rotate, 剩余预算)` 次尝试，用完即停（不论链还剩几跳）。
+    let mut remaining_budget = crate::model_fallback::TOTAL_REQUEST_BUDGET;
+    let per_hop_cap = state
+        .config_snapshot()
+        .await
+        .max_rotate
+        .clamp(1, MAX_ATTEMPTS_PER_HOP);
     let started = std::time::Instant::now();
 
-    for (hop, model) in plan.iter().enumerate() {
+    for (hop, target) in plan.iter().enumerate() {
+        let model = &target.model;
         if hop > 0 {
+            // ★ 跨作用域的目标分两种，处置完全不同：
+            //
+            //   1. **同平台跨区域**（`wb-cn` → `wb-global`）：换 region 走正常路径即可 ——
+            //      协议一致，只是账号池与上游域名不同。这是零成本的兜底，优先支持。
+            //   2. **跨平台**（`wb-cn` → `trae-cn`）：需要换 relay。暂不支持，且**不静默**：
+            //      记进 `skipped` 并在卡片上显示原因，否则用户配了链却等不到降级。
+            if target.crosses_scope(scope) {
+                let target_scope = target.scope_or(scope);
+                if target_scope.product() != scope.product() {
+                    skipped.push((
+                        format!("{}:{}", target_scope.as_str(), target.model),
+                        "cross_platform_pending",
+                    ));
+                    continue;
+                }
+                hop_region = crate::model_fallback::region_of(target_scope);
+            }
             // 目标不可用（已禁用 / 闸门暂停中）⇒ **跳过这一跳，不发请求**。
             // 发出去只会拿到一个必然失败的响应，白烧一次配额与延迟。
             if let Some(why) =
@@ -447,12 +484,15 @@ async fn relay_hops(
             // 改名复用 `model_route` 的现成实现（它已经是「改 body 顶层 model」的唯一入口）。
             body = crate::model_route::rewrite_body_model(&body, model);
         }
+        let hop_attempts = per_hop_cap.min(remaining_budget.max(1));
+        remaining_budget = remaining_budget.saturating_sub(hop_attempts);
         let hop_request = RelayRequest {
             model: model.clone(),
             prepared_body: body.clone(),
+            region: hop_region,
             ..request.clone()
         };
-        let outcome = relay_once(state, hop_request, probe_tag).await;
+        let outcome = relay_once(state, hop_request, probe_tag, Some(hop_attempts)).await;
         // ★ 见 `relay` 的文档：按 hop 归还，不能挪到循环外。
         state.pool.write().await.release_probe(model, probe_tag);
 
@@ -693,11 +733,18 @@ async fn relay_once(
     state: &GatewayState,
     request: RelayRequest,
     probe_tag: &str,
+    // 本次允许的**上游尝试次数**（由外层按总预算分配）。
+    // 传 `None` = 用配置里的 `max_rotate`（非降级路径 / 无预算概念时）。
+    attempts: Option<usize>,
 ) -> Result<RelayOutcome, RelayFailure> {
     let mut now_ms = timeutil::now_ms();
     let realm = realm_of(request.region);
     let config = state.config_snapshot().await;
-    let tries = config.max_rotate.max(1);
+    // ★ `max_rotate` 现在可配（1–6），且会被**总请求预算**进一步压小：
+    //   外层按「剩余预算」分配，避免「跳数 × 轮次」把单请求拖到客户端超时。
+    let tries = attempts
+        .unwrap_or(config.max_rotate)
+        .clamp(1, MAX_ATTEMPTS_PER_HOP);
 
     // 与账号库对齐（增量 upsert，不删除既有账号以保留治理历史）。
     //
