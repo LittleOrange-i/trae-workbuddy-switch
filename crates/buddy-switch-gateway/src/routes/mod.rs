@@ -2,6 +2,7 @@
 
 pub mod biz;
 pub mod chat;
+pub mod cross;
 /// 模型降级链的 hop 循环骨架（Trae / Qoder 两条自有中复用；WB 走 `relay` 自己的）。
 pub mod fallback;
 pub mod health;

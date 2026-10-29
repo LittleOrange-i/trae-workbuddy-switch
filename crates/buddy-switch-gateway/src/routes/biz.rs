@@ -163,6 +163,9 @@ pub async fn biz_for_region(
     .await;
 
     match outcome {
+        // 跨作用域降级：目标产品线已经产出了成型响应（SSE / JSON / 错误体都已封装），
+        // 直接返回，不再做协议转换或聚合。
+        Ok(RelayOutcome::Ready(response)) => return response,
         Ok(RelayOutcome::Ok { response, .. }) => {
             // ⑤ **透传响应**（状态码 + 正文），**不做协议转换**。
             let status = response.status();

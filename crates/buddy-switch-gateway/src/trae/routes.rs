@@ -395,6 +395,17 @@ pub async fn chat_for_variant(
             return last.expect("第 0 跳必然执行过");
         };
         let hop_model = hop_model.to_string();
+        // 同平台跨区域：换 variant（`trae-cn` ↔ `trae-global` 协议一致，只是账号池与域名不同）。
+        //
+        // ★ 只在**目标作用域 ≠ 入口作用域**时才换：同作用域必须**原样保留入口的变体**。
+        //   `trae_variant_of` 返回的是**合并版**（`trae_merged`），而入口可能是 `trae_cn` ——
+        //   无脑替换会让请求日志里的变体名从 `trae_cn` 变成 `trae_merged`
+        //   （`request_log_carries_the_variant` 钉住了这一点）。
+        let hop_variant = fallback
+            .scope_at(hop)
+            .filter(|target_scope| *target_scope != scope)
+            .and_then(crate::routes::cross::trae_variant_of)
+            .unwrap_or(variant);
         let hop_body = Bytes::from(hop_body);
         let response = if stream {
             stream_chat(
@@ -408,7 +419,7 @@ pub async fn chat_for_variant(
                 sticky_key.as_deref(),
                 ENDPOINT_CHAT,
                 started,
-                variant,
+                hop_variant,
                 key.as_deref(),
                 // chat 入口没有 custom 工具概念。
                 None,
@@ -425,7 +436,7 @@ pub async fn chat_for_variant(
                 &config.preferred_uid,
                 sticky_key.as_deref(),
                 started,
-                variant,
+                hop_variant,
                 key.as_deref(),
             )
             .await
@@ -593,6 +604,17 @@ pub async fn messages_for_variant(
             return last.expect("第 0 跳必然执行过");
         };
         let hop_model = hop_model.to_string();
+        // 同平台跨区域：换 variant（`trae-cn` ↔ `trae-global` 协议一致，只是账号池与域名不同）。
+        //
+        // ★ 只在**目标作用域 ≠ 入口作用域**时才换：同作用域必须**原样保留入口的变体**。
+        //   `trae_variant_of` 返回的是**合并版**（`trae_merged`），而入口可能是 `trae_cn` ——
+        //   无脑替换会让请求日志里的变体名从 `trae_cn` 变成 `trae_merged`
+        //   （`request_log_carries_the_variant` 钉住了这一点）。
+        let hop_variant = fallback
+            .scope_at(hop)
+            .filter(|target_scope| *target_scope != scope)
+            .and_then(crate::routes::cross::trae_variant_of)
+            .unwrap_or(variant);
         let hop_body = Bytes::from(hop_body);
         let response = if stream {
             stream_chat(
@@ -606,7 +628,7 @@ pub async fn messages_for_variant(
                 sticky_key.as_deref(),
                 ENDPOINT_MESSAGES,
                 started,
-                variant,
+                hop_variant,
                 key.as_deref(),
                 // Anthropic 入口没有 custom 工具概念。
                 None,
@@ -624,7 +646,7 @@ pub async fn messages_for_variant(
                 sticky_key.as_deref(),
                 ENDPOINT_MESSAGES,
                 started,
-                variant,
+                hop_variant,
                 key.as_deref(),
             )
             .await
@@ -813,6 +835,17 @@ pub async fn responses_for_variant(
             return last.expect("第 0 跳必然执行过");
         };
         let hop_model = hop_model.to_string();
+        // 同平台跨区域：换 variant（`trae-cn` ↔ `trae-global` 协议一致，只是账号池与域名不同）。
+        //
+        // ★ 只在**目标作用域 ≠ 入口作用域**时才换：同作用域必须**原样保留入口的变体**。
+        //   `trae_variant_of` 返回的是**合并版**（`trae_merged`），而入口可能是 `trae_cn` ——
+        //   无脑替换会让请求日志里的变体名从 `trae_cn` 变成 `trae_merged`
+        //   （`request_log_carries_the_variant` 钉住了这一点）。
+        let hop_variant = fallback
+            .scope_at(hop)
+            .filter(|target_scope| *target_scope != scope)
+            .and_then(crate::routes::cross::trae_variant_of)
+            .unwrap_or(variant);
         let hop_body = Bytes::from(hop_body);
         let response = if stream {
             stream_chat(
@@ -826,7 +859,7 @@ pub async fn responses_for_variant(
                 sticky_key.as_deref(),
                 ENDPOINT_RESPONSES,
                 started,
-                variant,
+                hop_variant,
                 key.as_deref(),
                 Some(responses_custom.clone()),
             )
@@ -843,7 +876,7 @@ pub async fn responses_for_variant(
                 sticky_key.as_deref(),
                 ENDPOINT_RESPONSES,
                 started,
-                variant,
+                hop_variant,
                 key.as_deref(),
             )
             .await

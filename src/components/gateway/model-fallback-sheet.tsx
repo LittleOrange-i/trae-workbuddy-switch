@@ -309,11 +309,14 @@ export function ModelFallbackSheet({
                           const crossPlatform =
                             candidate.slice(0, candidate.indexOf("-")) !==
                             scope.slice(0, scope.indexOf("-"));
+                          // 跨平台只有 **WorkBuddy 入口**能执行（它同一进程内调得到另外两条产品线）；
+                          // Trae / Qoder 入口跨平台会形成调用环，故禁用并说明。
+                          const allowed = !crossPlatform || scope.startsWith("wb-");
                           return (
-                            <SelectItem key={candidate} value={candidate} disabled={crossPlatform}>
-                              {crossPlatform
-                                ? `${candidate}（${t("shared.gateway.fallback.field.crossPlatformPending")}）`
-                                : candidate}
+                            <SelectItem key={candidate} value={candidate} disabled={!allowed}>
+                              {allowed
+                                ? candidate
+                                : `${candidate}（${t("shared.gateway.fallback.field.crossPlatformPending")}）`}
                             </SelectItem>
                           );
                         })}

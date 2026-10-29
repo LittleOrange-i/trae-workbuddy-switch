@@ -199,6 +199,8 @@ pub async fn chat_for_region(
     }
 
     match attempt {
+        // 跨作用域降级：目标产品线已经产出了成型响应，直接返回。
+        Ok(RelayOutcome::Ready(response)) => return response,
         Err(failure) => {
             // 先取轨迹：下面的日志会把 `failure.uid` move 走，之后再借整条 `failure` 就晚了。
             let note = relay::fallback_summary_json(&failure);

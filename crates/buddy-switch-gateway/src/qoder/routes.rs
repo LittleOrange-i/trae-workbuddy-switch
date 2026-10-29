@@ -373,8 +373,13 @@ pub async fn chat_for_region(
         };
         let hop_model = hop_model.to_string();
         let hop_body = Bytes::from(hop_body);
+        // 同平台跨区域：换 region（协议一致，只是账号池与域名不同）。
+        let hop_region = fallback
+            .scope_at(hop)
+            .map(crate::routes::cross::qoder_region_of)
+            .unwrap_or(region);
         let response =
-            chat_for_region_once(state.clone(), region, hop_body, protocol, key.clone()).await;
+            chat_for_region_once(state.clone(), hop_region, hop_body, protocol, key.clone()).await;
         if response.status().is_success() {
             let mut response = response;
             if hop > 0 {

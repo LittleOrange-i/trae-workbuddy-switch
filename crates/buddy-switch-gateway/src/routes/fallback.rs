@@ -62,14 +62,14 @@ impl FallbackLoop {
         let fb = model_fallback::shared();
         let guard = fb.read().await;
         let mut plan = model_fallback::plan_for(&guard, scope, origin_model);
-        // ★ Trae / Qoder 侧**只支持同作用域**的备选。
+        // ★ Trae / Qoder 侧支持**同平台跨区域**，但**不支持跨平台**。
         //
-        //   跨作用域（同平台跨区域）在 WB 的中继里能靠「换 region」实现，
-        //   但这两条平台的中继把 region/variant 固化在入口签名里、且返回 `Response`
-        //   无法折回可判事件的结果 —— 强行做会让判据退化成只看状态码。
-        //   这里**过滤掉**跨作用域的目标（而不是发出去再失败）：
-        //   卡片会按 `target.scope` 标注「仅 WB 支持」，用户看得到原因。
-        plan.retain(|target| !target.crosses_scope(scope));
+        //   同平台跨区域（`trae-cn` → `trae-global`）：只换 region / variant，协议一致，
+        //   与 WB 侧同一套做法。
+        //   跨平台：会形成 `relay → 目标平台入口 → 目标平台的 relay` 的调用环。
+        //   目标平台自己的中继又会过滤跨平台目标 —— 不变量靠这里维持，所以**必须过滤**。
+        //   卡片按 `target.scope` 标注「跨平台仅 WorkBuddy 支持」。
+        plan.retain(|target| target.scope_or(scope).product() == scope.product());
         let triggers = model_fallback::chain_of(&guard, scope, origin_model)
             .map(|chain| chain.effective_triggers())
             .unwrap_or_default();
@@ -106,6 +106,11 @@ impl FallbackLoop {
     ///   客户端收到一个「降级到 A → A」的头，而实际只是重试了一次主模型。
     pub fn model_at(&self, hop: usize) -> Option<&str> {
         self.plan.get(hop).map(|target| target.model.as_str())
+    }
+
+    /// 第 `hop` 跳实际要去的作用域（`None` 时取入口作用域）。
+    pub fn scope_at(&self, hop: usize) -> Option<Scope> {
+        self.plan.get(hop).map(|target| target.scope_or(self.scope))
     }
 
     /// 第 `hop` 跳的**完整目标**（含作用域）。

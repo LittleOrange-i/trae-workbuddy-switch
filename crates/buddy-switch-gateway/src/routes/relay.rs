@@ -147,6 +147,12 @@ pub enum RelayOutcome {
         /// 客户端看到的 `model` 字段会变成目标模型 —— 不给这个摘要，用户只会以为网关串号了。
         fallback: Option<FallbackInfo>,
     },
+    /// **已完全成型**的响应，调用方直接返回、不再加工。
+    ///
+    /// 跨作用域降级用它：目标产品线的入口函数返回的是 `axum::Response`
+    /// （它自己已经把 SSE / JSON / 错误体都封装好了），与 `Ok { response: reqwest::Response }`
+    /// 是两种不同的类型，不能互转。硬要转就得把整条流读进内存 —— 那会毁掉流式。
+    Ready(axum::response::Response),
 }
 
 /// 一次降级的可读摘要：从谁、降到谁、为什么、跳过了哪些。
@@ -457,14 +463,146 @@ async fn relay_hops(
             //      记进 `skipped` 并在卡片上显示原因，否则用户配了链却等不到降级。
             if target.crosses_scope(scope) {
                 let target_scope = target.scope_or(scope);
-                if target_scope.product() != scope.product() {
+                // 目标平台在当前构建里不可用（变体缺失）⇒ 跳过，不发请求。
+                if !crate::routes::cross::is_reachable(target_scope) {
                     skipped.push((
                         format!("{}:{}", target_scope.as_str(), target.model),
-                        "cross_platform_pending",
+                        "target_unavailable",
                     ));
                     continue;
                 }
-                hop_region = crate::model_fallback::region_of(target_scope);
+                // ★ 跨作用域统一走 `cross::relay_on_scope`：它在**同一进程**内把请求交给
+                //   目标产品线的入口（入站/出站都是 OpenAI 形态，无需协议转换）。
+                //   `key: None` —— 配额在入口已判过一次，再判会让一次降级吃两份配额。
+                let mut hop_body_bytes = body.clone().into_bytes();
+                // 改模型名：跨平台时 body 里的 `model` 必须是**目标作用域**的模型名。
+                hop_body_bytes = crate::model_route::rewrite_body_model(
+                    &String::from_utf8_lossy(&hop_body_bytes),
+                    &target.model,
+                )
+                .into_bytes();
+                // ★ `Box::pin` 是**编译期**要求：`relay_on_scope` → 目标平台入口 → 它们的
+                //   relay 与本函数同型，编译器无法证明不递归（async fn 的 future 大小必须
+                //   在编译期确定）。
+                //
+                //   **运行时不会无限递归**：目标平台的中继（`trae` / `qoder` 的
+                //   `FallbackLoop::plan`）**过滤掉跨作用域目标**，所以它不会再调回这里。
+                //   这条不变量由 `cross_scope_targets_are_not_self_loops_and_dedupe_by_scope`
+                //   与 `FallbackLoop::plan` 的 retain 共同保证。
+                let response = Box::pin(crate::routes::cross::relay_on_scope(
+                    target_scope,
+                    // 入口的 headers 不在 `RelayRequest` 里（它只带归属域与 body）。
+                    // 跨平台降级不依赖入口的会话头：目标产品线用自己的粘性键。
+                    axum::http::HeaderMap::new(),
+                    axum::body::Bytes::from(hop_body_bytes),
+                    None,
+                ))
+                .await;
+
+                if response.status().is_success() {
+                    if hop > 0 {
+                        crate::model_fallback::record_event(crate::model_fallback::FallbackEvent {
+                            scope: scope.as_str().to_string(),
+                            at_ms: timeutil::now_ms(),
+                            from: origin.clone(),
+                            path: vec![format!("{}:{}", target_scope.as_str(), target.model)],
+                            reason: reason
+                                .map(|value| value.as_str().to_string())
+                                .unwrap_or_default(),
+                            account: String::new(),
+                            ms: started.elapsed().as_millis() as i64,
+                            result: "degraded",
+                        });
+                    }
+                    let mut response = response;
+                    if hop > 0 {
+                        if let Some(trigger) = reason {
+                            crate::routes::relay::apply_fallback_headers(
+                                &mut response,
+                                &FallbackInfo {
+                                    from: origin.clone(),
+                                    to: format!("{}:{}", target_scope.as_str(), target.model),
+                                    reason: trigger,
+                                    skipped: skipped.clone(),
+                                },
+                            );
+                        }
+                    }
+                    return Ok(RelayOutcome::Ready(response));
+                }
+
+                // 失败：只有 5xx / 429 值得继续降级（其余是请求本身的问题）。
+                let status = response.status();
+                let (event, kind) = if status == axum::http::StatusCode::TOO_MANY_REQUESTS {
+                    (
+                        UpstreamEvent::SoftRate {
+                            reset_at_ms: None,
+                            model_scoped: true,
+                        },
+                        buddy_switch_core::modules::upstream::UpstreamErrorKind::SoftRate,
+                    )
+                } else if status.is_server_error() {
+                    (
+                        UpstreamEvent::Server,
+                        buddy_switch_core::modules::upstream::UpstreamErrorKind::Server,
+                    )
+                } else {
+                    // 4xx 不可降级 —— 直接原样抛（含 401/402/审核）。
+                    let trigger = crate::model_fallback::trigger_for(
+                        &GatewayError::Upstream {
+                            kind: buddy_switch_core::modules::upstream::UpstreamErrorKind::Client,
+                            status: status.as_u16(),
+                            message: format!("降级目标 {} 返回 {}", target_scope.as_str(), status),
+                            attempts: Vec::new(),
+                        },
+                        None,
+                    );
+                    let _ = trigger;
+                    return Err(RelayFailure {
+                        error: GatewayError::Upstream {
+                            kind: buddy_switch_core::modules::upstream::UpstreamErrorKind::Client,
+                            status: status.as_u16(),
+                            message: format!("降级目标 {} 返回 {}", target_scope.as_str(), status),
+                            attempts: Vec::new(),
+                        },
+                        account: String::new(),
+                        uid: String::new(),
+                        upstream_message: String::new(),
+                        sanitized: false,
+                        event: None,
+                        fallback: None,
+                    });
+                };
+                let failure = RelayFailure {
+                    error: GatewayError::Upstream {
+                        kind,
+                        status: status.as_u16(),
+                        message: format!("降级目标 {} 返回 {}", target_scope.as_str(), status),
+                        attempts: Vec::new(),
+                    },
+                    account: String::new(),
+                    uid: String::new(),
+                    upstream_message: String::new(),
+                    sanitized: false,
+                    event: Some(event),
+                    fallback: None,
+                };
+                // 走与同平台失败**完全一样**的收口：判 allowed、记 tried、决定是否下一跳。
+                let trigger =
+                    crate::model_fallback::trigger_for(&failure.error, failure.event.as_ref());
+                let allowed =
+                    trigger.is_some_and(|value| crate::model_fallback::allows(&chain, value));
+                if hop > 0 {
+                    tried.push(format!("{}:{}", target_scope.as_str(), target.model));
+                }
+                last = Some(failure);
+                if allowed && plan.len() > hop + 1 {
+                    if reason.is_none() {
+                        reason = trigger;
+                    }
+                    continue;
+                }
+                break;
             }
             // 目标不可用（已禁用 / 闸门暂停中）⇒ **跳过这一跳，不发请求**。
             // 发出去只会拿到一个必然失败的响应，白烧一次配额与延迟。
@@ -497,6 +635,8 @@ async fn relay_hops(
         state.pool.write().await.release_probe(model, probe_tag);
 
         match outcome {
+            // `relay_once` 不产 `Ready`（它只走本平台的上游）；透传是为了穷尽 match。
+            Ok(RelayOutcome::Ready(response)) => return Ok(RelayOutcome::Ready(response)),
             Ok(RelayOutcome::Ok {
                 response,
                 prefix,
@@ -1292,15 +1432,19 @@ pub fn upstream_kind_of(
     use buddy_switch_core::modules::upstream::UpstreamErrorKind;
     match event {
         UpstreamEvent::HardCredit => UpstreamErrorKind::HardCredit,
-        UpstreamEvent::SoftRate { .. } => UpstreamErrorKind::SoftRate,
+        UpstreamEvent::SoftRate { .. } => {
+            buddy_switch_core::modules::upstream::UpstreamErrorKind::SoftRate
+        }
         UpstreamEvent::SessionDead => UpstreamErrorKind::SessionDead,
         // 401/403 对**客户端**的语义就是「这个账号的凭据不可用了」⇒ 对外仍是 401，
         // 由文案把「换号后仍失败时该去重新登录」讲清楚。
         UpstreamEvent::AuthRejected => UpstreamErrorKind::SessionDead,
         UpstreamEvent::NotFound => UpstreamErrorKind::NotFound,
-        UpstreamEvent::Server => UpstreamErrorKind::Server,
+        UpstreamEvent::Server => buddy_switch_core::modules::upstream::UpstreamErrorKind::Server,
         UpstreamEvent::Timeout => UpstreamErrorKind::Timeout,
-        UpstreamEvent::ModelBlocked | UpstreamEvent::Client => UpstreamErrorKind::Client,
+        UpstreamEvent::ModelBlocked | UpstreamEvent::Client => {
+            buddy_switch_core::modules::upstream::UpstreamErrorKind::Client
+        }
     }
 }
 
