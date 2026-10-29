@@ -618,9 +618,7 @@ impl QoderPool {
             }
             // Qoder 池的 `model_cooldowns` 只存 `until`（`HashMap<String, i64>`）⇒
             // 没有「上游文案时刻」这一维可落，`upstream_reset_at_ms` 忽略。
-            ProbeOutcome::ModelRateLimited {
-                reset_at_ms, ..
-            } => {
+            ProbeOutcome::ModelRateLimited { reset_at_ms, .. } => {
                 if model.is_empty() {
                     return false;
                 }
@@ -921,7 +919,10 @@ mod tests {
         let changed = pool.adopt_probe_result(
             "a",
             "m-a",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None,
+            },
             now,
         );
         assert!(changed);
@@ -940,7 +941,10 @@ mod tests {
         assert!(!pool.adopt_probe_result(
             "a",
             "m-a",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None
+            },
             now,
         ));
 

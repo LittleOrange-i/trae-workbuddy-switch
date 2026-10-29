@@ -3232,7 +3232,9 @@ pub async fn save_model_fallback(scope: String, config: Value) -> Result<Value, 
 #[tauri::command]
 pub async fn get_fallback_stats(scope: String, days: u32) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
-    Ok(buddy_switch_gateway::model_fallback::stats_payload(scope, days))
+    Ok(buddy_switch_gateway::model_fallback::stats_payload(
+        scope, days,
+    ))
 }
 
 /// POST /api/gateway/model-fallback/preview —— 保存前**预演**一次降级路径。

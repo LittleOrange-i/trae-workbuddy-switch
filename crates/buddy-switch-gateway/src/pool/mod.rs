@@ -4256,7 +4256,10 @@ mod tests {
                 "u1",
                 Some(RealmTag::Cn),
                 "glm-5.3",
-                &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+                &ProbeOutcome::ModelRateLimited {
+                    reset_at_ms: None,
+                    upstream_reset_at_ms: None
+                },
                 NOW,
             ),
             "模型级限流 ⇒ 应置该模型冷却（返回 true）"
@@ -4310,7 +4313,10 @@ mod tests {
             "u1",
             Some(RealmTag::Cn),
             "m",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None
+            },
             NOW,
         ));
         let cooldown = pool.get("u1").unwrap().model_cooldowns["m"].clone();
@@ -4379,7 +4385,10 @@ mod tests {
             "u1",
             Some(RealmTag::Cn),
             "m",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None
+            },
             NOW,
         ));
         assert_eq!(
@@ -4480,7 +4489,10 @@ mod tests {
             "u1",
             Some(RealmTag::Cn),
             "m",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None
+            },
             NOW,
         ));
 
@@ -4566,7 +4578,10 @@ mod tests {
             "u1",
             Some(RealmTag::Cn),
             "m4",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None,
+            },
             now,
         );
         assert_eq!(
@@ -4589,7 +4604,10 @@ mod tests {
                 "u1",
                 Some(RealmTag::Global),
                 "m",
-                &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+                &ProbeOutcome::ModelRateLimited {
+                    reset_at_ms: None,
+                    upstream_reset_at_ms: None
+                },
                 NOW,
             ),
             "用 global 的探测去写 cn 的号 ⇒ 必须拒绝"
@@ -4604,7 +4622,10 @@ mod tests {
             "u1",
             None,
             "m",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None
+            },
             NOW,
         ));
         assert!(pool.get("u1").unwrap().model_cooldowns.contains_key("m"));
@@ -4624,7 +4645,10 @@ mod tests {
             "u1",
             Some(RealmTag::Cn),
             "m",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None,
+            },
             NOW,
         );
         assert!(pool.dirty, "置了冷却 ⇒ 必须置 dirty，否则回填不会落盘");
@@ -4644,14 +4668,20 @@ mod tests {
             "u1",
             Some(RealmTag::Cn),
             "glm-5.3",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None,
+            },
             NOW,
         );
         pool.adopt_probe_result(
             "u1",
             Some(RealmTag::Cn),
             "kimi-k3",
-            &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+            &ProbeOutcome::ModelRateLimited {
+                reset_at_ms: None,
+                upstream_reset_at_ms: None,
+            },
             NOW,
         );
 
@@ -4734,7 +4764,10 @@ mod tests {
                 "u1",
                 Some(RealmTag::Cn),
                 "glm-5.3",
-                &ProbeOutcome::ModelRateLimited { reset_at_ms: None, upstream_reset_at_ms: None },
+                &ProbeOutcome::ModelRateLimited {
+                    reset_at_ms: None,
+                    upstream_reset_at_ms: None
+                },
                 NOW,
             ),
             "已禁用的账号不应被探测回填"

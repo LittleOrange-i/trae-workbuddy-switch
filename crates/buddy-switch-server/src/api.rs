@@ -382,7 +382,10 @@ fn api_routes() -> Router {
             post(api_preview_gateway_model_fallback),
         )
         // 降级统计：读**落盘账本**（不是环形缓冲），「近 N 天」才成立。
-        .route("/api/gateway/fallback-stats", get(api_gateway_fallback_stats))
+        .route(
+            "/api/gateway/fallback-stats",
+            get(api_gateway_fallback_stats),
+        )
         .route("/api/gateway/logs", get(api_gateway_logs))
         .route("/api/gateway/logs/clear", post(api_gateway_clear_logs))
         // 限流探测（账号 × 模型矩阵 · 一次性作业 + 轮询）：start 异步作业 / status 快照 / cancel。
