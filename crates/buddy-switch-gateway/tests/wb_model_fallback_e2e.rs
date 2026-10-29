@@ -85,7 +85,10 @@ async fn set_chains(chains: Vec<(&str, Vec<&str>)>) {
         scoped.chains.insert(
             from.to_string(),
             FallbackChain {
-                targets: targets.into_iter().map(str::to_string).collect(),
+                targets: targets
+                    .into_iter()
+                    .map(buddy_switch_gateway::model_fallback::FallbackTarget::same_scope)
+                    .collect(),
                 // 空 `triggers` = 基线（闸门 / 6004 / 11102），正是本用例要的。
                 triggers: Default::default(),
                 enabled: true,
