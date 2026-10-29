@@ -487,14 +487,20 @@ pub(crate) fn build_responses_usage(
         }
 
         // 2. 尝试从 completion_tokens_details 提取 reasoning_tokens
-        if let Some(details) = raw.get("completion_tokens_details").and_then(Value::as_object) {
+        if let Some(details) = raw
+            .get("completion_tokens_details")
+            .and_then(Value::as_object)
+        {
             if let Some(reasoning) = details.get("reasoning_tokens").and_then(Value::as_u64) {
                 reasoning_tokens = Some(reasoning);
             }
         }
         // 若 completion_tokens_details 未包含或为 0，回退尝试 completion_thinking_tokens
         if reasoning_tokens.is_none() || reasoning_tokens == Some(0) {
-            if let Some(reasoning) = raw.get("completion_thinking_tokens").and_then(Value::as_u64) {
+            if let Some(reasoning) = raw
+                .get("completion_thinking_tokens")
+                .and_then(Value::as_u64)
+            {
                 if reasoning > 0 {
                     reasoning_tokens = Some(reasoning);
                 }
@@ -523,7 +529,10 @@ pub(crate) fn build_responses_usage(
                 }
             }
         }
-        if let Some(ctd) = raw.get("completion_tokens_details").and_then(Value::as_object) {
+        if let Some(ctd) = raw
+            .get("completion_tokens_details")
+            .and_then(Value::as_object)
+        {
             for (key, val) in ctd {
                 if key != "reasoning_tokens" {
                     output_details.insert(key.clone(), val.clone());
