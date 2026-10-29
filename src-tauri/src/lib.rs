@@ -222,17 +222,49 @@ fn spawn_background_task(spec: TaskSpec) {
         //
         // 覆盖**两个 region**：`gateway_logs.json` 是单文件、行内带 `region`，
         // 只记一个 region 会让另一个的历史永远空着。
-        TaskKind::GatewayUsageRecord => {
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    for region in modules::region::Region::all() {
-                        let _ = modules::token_daily::record_gateway_today(region);
+        TaskKind::GatewayUsageRecord => match spec.product {
+            // WorkBuddy：`token_daily` 的 gateway 桶（按 region 分文件）。
+            //
+            // 覆盖**两个 region**：`gateway_logs.json` 是单文件、行内带 `region`，
+            // 只记一个 region 会让另一个的历史永远空着。
+            Product::Workbuddy => {
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        for region in modules::region::Region::all() {
+                            let _ = modules::token_daily::record_gateway_today(region);
+                        }
+                        tokio::time::sleep(Duration::from_millis(GATEWAY_USAGE_RECORD_INTERVAL_MS))
+                            .await;
                     }
-                    tokio::time::sleep(Duration::from_millis(GATEWAY_USAGE_RECORD_INTERVAL_MS))
-                        .await;
-                }
-            });
-        }
+                });
+            }
+            // Trae / Qoder：`gateway_ledger`（按 scope 分文件，含 unlabeled 一档）。
+            //
+            // ⚠️ 必须一次记**全部** scope：日志是单文件、行内带归属（Trae 看 `variant`、
+            // Qoder 看 `region`），只记当前作用域会让切区域后的账本整段是空的。
+            Product::Trae => {
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        modules::gateway_ledger::record_all(
+                            modules::gateway_ledger::LedgerProduct::Trae,
+                        );
+                        tokio::time::sleep(Duration::from_millis(GATEWAY_USAGE_RECORD_INTERVAL_MS))
+                            .await;
+                    }
+                });
+            }
+            Product::Qoder => {
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        modules::gateway_ledger::record_all(
+                            modules::gateway_ledger::LedgerProduct::Qoder,
+                        );
+                        tokio::time::sleep(Duration::from_millis(GATEWAY_USAGE_RECORD_INTERVAL_MS))
+                            .await;
+                    }
+                });
+            }
+        },
         // ★ 客户端（登录态）用量「今日」快照（2026-10-15 用户报障修复，与服务端同语义）：
         // 周期把客户端会话日志的**今日**用量聚合进 `token_daily` 的 client 桶并落盘。
         //
@@ -611,6 +643,15 @@ pub fn run() {
             // 网关逐日用量趋势（只读 `token_daily` 90 天落库历史；两宿主同步）。
             commands::get_gateway_token_trend,
             commands::get_gateway_usage_dim,
+            // Trae / Qoder 的网关账本（用量页「账本」视图，issue #63 的平台补齐）。
+            commands::get_trae_gateway_usage_dim,
+            commands::get_qoder_gateway_usage_dim,
+            // Trae 客户端账本（导入用户自己导出的明文库，不内置解密）。
+            commands::probe_trae_client_db,
+            commands::unlock_trae_client_db,
+            commands::get_trae_client_token_stats,
+            commands::get_trae_client_db_config,
+            commands::save_trae_client_db_path,
             commands::get_usage_reconcile,
             commands::checkin,
             commands::checkin_all,
@@ -682,6 +723,11 @@ pub fn run() {
             commands::save_account_strategy,
             commands::get_disabled_models,
             commands::set_model_disabled,
+            // 模型降级链（P13）：读 / 存 / 预演。
+            commands::get_model_fallback,
+            commands::save_model_fallback,
+            commands::preview_model_fallback,
+            commands::get_fallback_stats,
             // 图片能力声明 / 覆盖（issue #101）：三条产品线 `/v1/models` 与管理面共用一份存储。
             commands::get_model_image_caps,
             commands::set_model_image_cap,

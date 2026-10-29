@@ -31,7 +31,28 @@ pub struct ModelCooldown {
     /// 解冻时刻（毫秒）。
     pub until_ms: i64,
     /// 上游声明的重置时刻（毫秒）；无声明为 0。
+    ///
+    /// ⚠️ 这个字段**不可信**：`cooldown_model` 在「上游没给墙钟」时会把**本仓算出来的**
+    /// 时刻（下限 / 兜底）也写进来（见 `from_upstream` 的文档），所以它回答不了
+    /// 「上游到底说几点恢复」。要那个答案读 [`Self::upstream_reset_at_ms`]。
     pub reset_at_ms: i64,
+    /// **展示专用**：上游**文案**里声明的重置时刻（毫秒，`0` = 未声明）。
+    ///
+    /// ## 为什么与 `reset_at_ms` 并存
+    ///
+    /// WB `6004` 的响应体里**没有任何结构化数值键**，时刻只写在 `msg` 文案里
+    /// （`… your usage will reset at 2026-10-29 16:26:36 UTC+8 …`）。探测台账早就把
+    /// 它解析出来放在 `ProbeCell::upstream_reset_at_ms` 给「探测详情」看，但**没有传给池**
+    /// ⇒ 池视图只能显示 `until_ms`（探测回填的 10 分钟兜底），用户看到的是
+    /// 「11:12 解冻」而上游明明写着 16:26 —— 2026-10-29 报障的根因。
+    ///
+    /// ## ★ 绝不参与冷却计算
+    ///
+    /// 文案里的时刻是**配额窗口重置**、不是解锁时刻（`parse_reset_at_ms` 的文档记着实测
+    /// 6/6 判错）。拿它当冷却时长会把号冻掉几小时，而它作为「界面上的一条信息」
+    /// 正是用户要的。因此本字段只写不算：`healthy_for_model` / 选号 / 退避全都不读它。
+    #[serde(default)]
+    pub upstream_reset_at_ms: i64,
     /// 原因标识。
     pub reason: String,
     /// 该模型被判「封禁」的累计次数（`11102` 专用，退避指数来源）。
@@ -375,6 +396,19 @@ impl PoolEntry {
         }
     }
 
+    /// 记录「上游文案里声明的重置时刻」（**展示专用**，见 [`ModelCooldown::upstream_reset_at_ms`]）。
+    ///
+    /// 无该模型的冷却条目时**静默忽略**：探测回填是「先置冷却、再补展示字段」两步，
+    /// 第二步可能因为条目已被 `note_success` 清掉而不成立 —— 那不是错误。
+    pub fn set_model_upstream_reset(&mut self, model: &str, reset_at_ms: i64) {
+        if reset_at_ms <= 0 {
+            return;
+        }
+        if let Some(cooldown) = self.model_cooldowns.get_mut(model) {
+            cooldown.upstream_reset_at_ms = reset_at_ms;
+        }
+    }
+
     /// 惰性清理**已结案**的模型级冷却条目；返回是否有条目被移除。
     ///
     /// ## 为什么「过期」不再等于「清理」（#88 4.2 改）
@@ -625,6 +659,9 @@ impl PoolEntry {
             ModelCooldown {
                 until_ms: until,
                 reset_at_ms,
+                // 真实流量只有结构化墙钟（`reset_at_ms`）；文案里的时刻由探测回填单独写
+                // （`Pool::adopt_probe_result`），这里恒 0。
+                upstream_reset_at_ms: 0,
                 reason: reason.to_string(),
                 hits: 0,
                 from_upstream,
@@ -710,6 +747,7 @@ impl PoolEntry {
             ModelCooldown {
                 until_ms: now_ms.saturating_add(ttl),
                 reset_at_ms: 0,
+                upstream_reset_at_ms: 0,
                 reason: reason.to_string(),
                 hits,
                 // 封禁的时长是「按次数退避」算出来的，不是上游给的时刻。

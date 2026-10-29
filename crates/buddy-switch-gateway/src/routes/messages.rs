@@ -19,7 +19,10 @@ use crate::protocol::anthropic::{
     aggregate_message, to_upstream_request_adaptive, AnthropicSseStream,
 };
 use crate::routes::relay::{self, RelayKind, RelayOutcome, RelayRequest};
-use crate::routes::{anthropic_error, authenticate, json_response, parse_body, sse_response};
+use crate::routes::{
+    anthropic_error, anthropic_error_with_fallback, authenticate, json_response, parse_body,
+    sse_response,
+};
 use crate::session_headers;
 use crate::state::GatewayState;
 use crate::timeutil;
@@ -179,6 +182,8 @@ pub async fn messages_for_region(
 
     match attempt {
         Err(failure) => {
+            // 先取轨迹：下面的日志会把 `failure.uid` move 走，之后再借整条 `failure` 就晚了。
+            let note = relay::fallback_summary_json(&failure);
             let http_status = failure.error.status();
             let elapsed_ms = started.elapsed().as_millis() as i64;
             state.log.record(
@@ -202,17 +207,23 @@ pub async fn messages_for_region(
                 }
                 .to_value(),
             );
-            anthropic_error(failure.error)
+            anthropic_error_with_fallback(failure.error, note)
         }
         Ok(RelayOutcome::Ok {
             response,
             prefix,
             account,
             uid,
+            fallback,
         }) => {
+            // ★ 降级后记**实际使用的模型**（账本与日志同口径，见 chat 路由的同名注释）。
+            let model = fallback
+                .as_ref()
+                .map(|info| info.to.clone())
+                .unwrap_or_else(|| model.clone());
             // ★ 上游**响应头**已到 ⇒ 此刻的耗时就是 `latencyMs`（TTFB）；总耗时是 `totalMs`。
             let header_at_ms = started.elapsed().as_millis() as i64;
-            if wants_stream {
+            let mut resp = if wants_stream {
                 // ★ 流式请求的日志**推迟到流结束**才写（见 `StreamingLogSink`）：
                 //   写日志时用量还没到达，此前只能写死 0（实测本机 200/200 条全 0）。
                 let sinks = relay::stream_sinks(
@@ -278,12 +289,17 @@ pub async fn messages_for_region(
                         }
                         .to_value(),
                     );
-                    return anthropic_error(crate::error::GatewayError::Upstream {
+                    // 降级后仍然拿到「200 信封错误」：头要带上，否则客户端不知道是备选模型的锅。
+                    let mut resp = anthropic_error(crate::error::GatewayError::Upstream {
                         kind: relay::upstream_kind_of(&envelope.event),
                         status: envelope.status,
                         message: envelope.message,
                         attempts: Vec::new(),
                     });
+                    if let Some(info) = fallback.as_ref() {
+                        relay::apply_fallback_headers(&mut resp, info);
+                    }
+                    return resp;
                 }
                 let message = aggregate_message(&text, &model);
                 let prompt_tokens = message
@@ -324,7 +340,12 @@ pub async fn messages_for_region(
                     .to_value(),
                 );
                 json_response(StatusCode::OK, message)
+            };
+            // 降级成功：把「从谁降到谁、为什么」写进响应头（与 chat 路由同一套头）。
+            if let Some(info) = fallback.as_ref() {
+                relay::apply_fallback_headers(&mut resp, info);
             }
+            resp
         }
     }
 }

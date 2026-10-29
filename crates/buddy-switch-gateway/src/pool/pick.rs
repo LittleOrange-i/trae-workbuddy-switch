@@ -1872,6 +1872,7 @@ mod tests {
             ModelCooldown {
                 until_ms: NOW + 60_000,
                 reset_at_ms: 0,
+                upstream_reset_at_ms: 0,
                 reason: String::new(),
                 hits: 0,
                 from_upstream: false,
@@ -1908,6 +1909,7 @@ mod tests {
             ModelCooldown {
                 until_ms: NOW - 1, // 刚过期
                 reset_at_ms: 0,
+                upstream_reset_at_ms: 0,
                 reason: String::new(),
                 hits: 1,
                 from_upstream: false,
