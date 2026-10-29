@@ -1,6 +1,6 @@
 {
   "name": "@nextagentx/buddy-switch-linux-x64",
-  "version": "2026.10.280925",
+  "version": "2026.10.291453",
   "description": "Buddy Switch platform binary (linux-x64)",
   "os": [
     "linux"
