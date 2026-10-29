@@ -62,14 +62,18 @@ impl FallbackLoop {
         let fb = model_fallback::shared();
         let guard = fb.read().await;
         let mut plan = model_fallback::plan_for(&guard, scope, origin_model);
-        // ★ Trae / Qoder 侧支持**同平台跨区域**，但**不支持跨平台**。
+        // ★ 同平台跨区域**总是允许**；跨平台受**嵌套深度**限制。
         //
-        //   同平台跨区域（`trae-cn` → `trae-global`）：只换 region / variant，协议一致，
-        //   与 WB 侧同一套做法。
-        //   跨平台：会形成 `relay → 目标平台入口 → 目标平台的 relay` 的调用环。
-        //   目标平台自己的中继又会过滤跨平台目标 —— 不变量靠这里维持，所以**必须过滤**。
-        //   卡片按 `target.scope` 标注「跨平台仅 WorkBuddy 支持」。
-        plan.retain(|target| target.scope_or(scope).product() == scope.product());
+        //   同平台跨区域（`trae-cn` → `trae-global`）：只换 region / variant，协议一致。
+        //   跨平台（`trae-cn` → `wb-cn`）：调 `cross::relay_on_scope`，它会检查
+        //   `cross_depth()`。**这里先过滤一次**，是为了「不让用户白等一次必然被拒的请求」：
+        //   已经跨出去过（`cross_depth() >= MAX`）时，跨平台目标不该进入 plan，
+        //   否则会先发出去、再拿到 502。
+        plan.retain(|target| {
+            let target_scope = target.scope_or(scope);
+            target_scope.product() == scope.product()
+                || crate::routes::cross::cross_depth() < crate::routes::cross::MAX_CROSS_DEPTH
+        });
         let triggers = model_fallback::chain_of(&guard, scope, origin_model)
             .map(|chain| chain.effective_triggers())
             .unwrap_or_default();

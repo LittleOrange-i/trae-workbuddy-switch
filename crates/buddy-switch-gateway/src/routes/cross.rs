@@ -34,10 +34,53 @@ use buddy_switch_core::modules::qoder::region::QoderRegion;
 use buddy_switch_core::modules::trae::region::TraeRegion;
 use buddy_switch_core::modules::trae::variant::{all_specs, TraeVariant};
 
+tokio::task_local! {
+    /// 跨平台降级的**嵌套深度**。
+    ///
+    /// ## 为什么需要它
+    /// `A 入口 → cross → B 入口 → B 的降级链 → cross → A 入口 → …` 会无限递归。
+    /// 编译器只能要求 `Box::pin`，管不了运行时。
+    ///
+    /// ## 为什么用 `task_local` 而不是参数
+    /// 入口函数（`chat_for_region` / `chat_for_variant`）的签名已经很长，为这个
+    /// 内部约束再加一个参数会污染四个入口与统一网关。`task_local` **跟随任务**
+    /// （不是线程）—— tokio 在 await 点迁移任务时它仍然正确，这正是 `thread_local` 做不到的。
+    static CROSS_DEPTH: u8;
+}
+
+/// 允许的跨平台嵌套层数。
+///
+/// 1 = 「A 降级到 B」可以做，但 B 内部**不能再跨平台**（B 自己的降级链只走同作用域）。
+/// 这个上限把「无限递归」变成「最多两层」，同时保留双向跨平台的能力。
+pub const MAX_CROSS_DEPTH: u8 = 1;
+
+/// 当前跨平台嵌套深度（不在跨平台调用里时为 0）。
+pub fn cross_depth() -> u8 {
+    CROSS_DEPTH.try_with(|depth| *depth).unwrap_or(0)
+}
+
 /// 把请求交给 `target` 作用域对应的产品线，返回它的响应。
 ///
 /// 调用方负责判断响应是否成功（以及是否继续降级）。
 pub async fn relay_on_scope(
+    target: Scope,
+    headers: HeaderMap,
+    body: Bytes,
+    key: Option<Arc<crate::apikey::KeyActor>>,
+) -> Response {
+    // ★ 限深：已经跨出去过一次的请求，目标平台内部**不许再跨**。
+    //   没有这一条，`A → B → A` 会一直递归下去（编译器只挡得住「future 大小」，
+    //   挡不住运行时递归）。
+    let depth = cross_depth();
+    if depth >= MAX_CROSS_DEPTH {
+        return depth_exceeded(target);
+    }
+    CROSS_DEPTH
+        .scope(depth + 1, relay_on_scope_inner(target, headers, body, key))
+        .await
+}
+
+async fn relay_on_scope_inner(
     target: Scope,
     headers: HeaderMap,
     body: Bytes,
@@ -110,6 +153,28 @@ pub fn qoder_region_of(scope: Scope) -> QoderRegion {
     } else {
         QoderRegion::Cn
     }
+}
+
+/// 跨平台嵌套超限（`A → B → A`）。
+///
+/// 返回 502 而不是 400：这是**网关自己的**能力边界，不是客户端请求有问题。
+fn depth_exceeded(target: Scope) -> Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::BAD_GATEWAY,
+        axum::Json(serde_json::json!({
+            "error": {
+                "message": format!(
+                    "降级目标 {} 需要再次跨平台，超过允许的嵌套层数（{}）",
+                    target.as_str(),
+                    MAX_CROSS_DEPTH
+                ),
+                "type": "server_error",
+                "code": "fallback_cross_depth_exceeded",
+            }
+        })),
+    )
+        .into_response()
 }
 
 fn unsupported(target: Scope) -> Response {

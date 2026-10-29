@@ -407,7 +407,20 @@ pub async fn chat_for_variant(
             .and_then(crate::routes::cross::trae_variant_of)
             .unwrap_or(variant);
         let hop_body = Bytes::from(hop_body);
-        let response = if stream {
+        // ★ 跨平台目标：交给 `cross::relay_on_scope`（同进程内调目标产品线入口）。
+        //   深度由 `cross_depth()` 兜底（`FallbackLoop::plan` 已先过滤一次）。
+        let response = if fallback
+            .scope_at(hop)
+            .is_some_and(|target_scope| target_scope.product() != scope.product())
+        {
+            Box::pin(crate::routes::cross::relay_on_scope(
+                fallback.scope_at(hop).expect("上面已判过 Some"),
+                axum::http::HeaderMap::new(),
+                hop_body.clone(),
+                None,
+            ))
+            .await
+        } else if stream {
             stream_chat(
                 &state,
                 &hop_body,
@@ -616,7 +629,20 @@ pub async fn messages_for_variant(
             .and_then(crate::routes::cross::trae_variant_of)
             .unwrap_or(variant);
         let hop_body = Bytes::from(hop_body);
-        let response = if stream {
+        // ★ 跨平台目标：交给 `cross::relay_on_scope`（同进程内调目标产品线入口）。
+        //   深度由 `cross_depth()` 兜底（`FallbackLoop::plan` 已先过滤一次）。
+        let response = if fallback
+            .scope_at(hop)
+            .is_some_and(|target_scope| target_scope.product() != scope.product())
+        {
+            Box::pin(crate::routes::cross::relay_on_scope(
+                fallback.scope_at(hop).expect("上面已判过 Some"),
+                axum::http::HeaderMap::new(),
+                hop_body.clone(),
+                None,
+            ))
+            .await
+        } else if stream {
             stream_chat(
                 &state,
                 &hop_body,
@@ -847,7 +873,20 @@ pub async fn responses_for_variant(
             .and_then(crate::routes::cross::trae_variant_of)
             .unwrap_or(variant);
         let hop_body = Bytes::from(hop_body);
-        let response = if stream {
+        // ★ 跨平台目标：交给 `cross::relay_on_scope`（同进程内调目标产品线入口）。
+        //   深度由 `cross_depth()` 兜底（`FallbackLoop::plan` 已先过滤一次）。
+        let response = if fallback
+            .scope_at(hop)
+            .is_some_and(|target_scope| target_scope.product() != scope.product())
+        {
+            Box::pin(crate::routes::cross::relay_on_scope(
+                fallback.scope_at(hop).expect("上面已判过 Some"),
+                axum::http::HeaderMap::new(),
+                hop_body.clone(),
+                None,
+            ))
+            .await
+        } else if stream {
             stream_chat(
                 &state,
                 &hop_body,

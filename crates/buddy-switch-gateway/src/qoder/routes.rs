@@ -378,8 +378,21 @@ pub async fn chat_for_region(
             .scope_at(hop)
             .map(crate::routes::cross::qoder_region_of)
             .unwrap_or(region);
-        let response =
-            chat_for_region_once(state.clone(), hop_region, hop_body, protocol, key.clone()).await;
+        // ★ 跨平台目标：交给 `cross::relay_on_scope`（同进程内调目标产品线入口）。
+        let response = if fallback
+            .scope_at(hop)
+            .is_some_and(|target_scope| target_scope.product() != scope.product())
+        {
+            Box::pin(crate::routes::cross::relay_on_scope(
+                fallback.scope_at(hop).expect("上面已判过 Some"),
+                axum::http::HeaderMap::new(),
+                hop_body.clone(),
+                None,
+            ))
+            .await
+        } else {
+            chat_for_region_once(state.clone(), hop_region, hop_body, protocol, key.clone()).await
+        };
         if response.status().is_success() {
             let mut response = response;
             if hop > 0 {
