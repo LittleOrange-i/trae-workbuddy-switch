@@ -204,6 +204,7 @@ export const zh = {
   "shared.gateway.fallback.drawer.edit": "编辑降级链 · {model}",
   "shared.gateway.fallback.field.from": "主模型",
   "shared.gateway.fallback.field.fromLocked": "主模型不可改。要换主模型请删掉这条链重配 —— 改 from 等于换了一条链。",
+  "shared.gateway.fallback.field.crossModelPlaceholder": "填目标平台的模型 id",
   "shared.gateway.fallback.field.thisScope": "本区域",
   "shared.gateway.fallback.field.crossPlatformPending": "跨平台仅 WorkBuddy 支持",
   "shared.gateway.fallback.field.targets": "备选模型（按顺序尝试）",

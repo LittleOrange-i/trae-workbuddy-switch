@@ -200,7 +200,35 @@ pub async fn chat_for_region(
 
     match attempt {
         // 跨作用域降级：目标产品线已经产出了成型响应，直接返回。
-        Ok(RelayOutcome::Ready(response)) => return response,
+        // 跨作用域降级：目标产品线已经产出了成型响应，直接返回。
+        //
+        // ★ 但**请求日志必须记**：否则用户看不到这次请求存在（账本也少一笔）。
+        //   token 用量拿不到（响应由目标产品线封装）—— 记 0 表示「本入口未知」，
+        //   不是「没消耗」；目标平台自己的账本会记它那一边的真实用量。
+        Ok(RelayOutcome::Ready { response, model }) => {
+            let elapsed = started.elapsed().as_millis() as i64;
+            state.log.record(
+                RequestMeta {
+                    endpoint: "/v1/chat/completions",
+                    key_id: key.as_deref().map(|actor| actor.key_id.clone()),
+                    key_scope: key.as_deref().map(|actor| actor.scope),
+                    method: "POST",
+                    region,
+                    account: String::new(),
+                    account_uid: String::new(),
+                    model,
+                    status: response.status().as_u16(),
+                    latency_ms: elapsed,
+                    total_ms: elapsed,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    credit: 0.0,
+                    stream: true,
+                }
+                .to_value(),
+            );
+            return response;
+        }
         Err(failure) => {
             // 先取轨迹：下面的日志会把 `failure.uid` move 走，之后再借整条 `failure` 就晚了。
             let note = relay::fallback_summary_json(&failure);
@@ -452,6 +480,7 @@ async fn run(
     relay::relay(
         state,
         RelayRequest {
+            openai_shape: true,
             region,
             kind: RelayKind::Llm,
             model: model.to_string(),

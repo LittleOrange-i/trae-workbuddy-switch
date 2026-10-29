@@ -92,6 +92,17 @@ pub struct RelayRequest {
     pub region: Region,
     /// ★ **协议类型**（P12 T03 新增）。
     pub kind: RelayKind,
+    /// 入口是不是 **OpenAI 形态**（`/v1/chat/completions`）。
+    ///
+    /// ## 为什么跨作用域降级要看它
+    /// 目标产品线的入口**只吃 OpenAI body、只吐 OpenAI SSE**。而 `/v1/messages`
+    /// （Anthropic）与 `/v1/responses` 的客户端拿到 OpenAI SSE 会**解析失败** ——
+    /// 那比不降级更糟（用户看到一串乱码事件）。
+    ///
+    /// `prepared_body` 在三种入口下都是 OpenAI 形态（Anthropic / Responses 在进中继前
+    /// 已转换），所以**发出去**没问题；问题在**回来的响应格式**。
+    /// ⇒ 非 OpenAI 入口只允许同作用域降级。
+    pub openai_shape: bool,
     /// 客户端声明的模型名（原样，仅用于冷却与账本）。
     pub model: String,
     /// 已由 [`outbound::prepare_outbound_body`] 处理过的请求体。
@@ -152,7 +163,14 @@ pub enum RelayOutcome {
     /// 跨作用域降级用它：目标产品线的入口函数返回的是 `axum::Response`
     /// （它自己已经把 SSE / JSON / 错误体都封装好了），与 `Ok { response: reqwest::Response }`
     /// 是两种不同的类型，不能互转。硬要转就得把整条流读进内存 —— 那会毁掉流式。
-    Ready(axum::response::Response),
+    Ready {
+        response: axum::response::Response,
+        /// 实际服务这次请求的**目标模型**（`trae-cn:claude-4` 这种带作用域的形式）。
+        ///
+        /// 必须带出来：入口要用它写请求日志。不带的话日志只能记原模型，
+        /// 用户会以为「降级了但日志还显示原模型」。
+        model: String,
+    },
 }
 
 /// 一次降级的可读摘要：从谁、降到谁、为什么、跳过了哪些。
@@ -465,6 +483,15 @@ async fn relay_hops(
             //   2. **跨平台**（`wb-cn` → `trae-cn`）：需要换 relay。暂不支持，且**不静默**：
             //      记进 `skipped` 并在卡片上显示原因，否则用户配了链却等不到降级。
             if target.crosses_scope(scope) {
+                // 非 OpenAI 入口不能跨作用域：目标产品线只吐 OpenAI SSE，
+                // Anthropic / Responses 的客户端解析不了（详见 `openai_shape` 的文档）。
+                if !request.openai_shape {
+                    skipped.push((
+                        format!("{}:{}", target.scope_or(scope).as_str(), target.model),
+                        "cross_scope_openai_only",
+                    ));
+                    continue;
+                }
                 let target_scope = target.scope_or(scope);
                 // 目标平台在当前构建里不可用（变体缺失）⇒ 跳过，不发请求。
                 if !crate::routes::cross::is_reachable(target_scope) {
@@ -477,6 +504,11 @@ async fn relay_hops(
                 // ★ 跨作用域统一走 `cross::relay_on_scope`：它在**同一进程**内把请求交给
                 //   目标产品线的入口（入站/出站都是 OpenAI 形态，无需协议转换）。
                 //   `key: None` —— 配额在入口已判过一次，再判会让一次降级吃两份配额。
+                // ★ 与同平台分支同一条硬约束：body 里没有 `model` 字段 ⇒ 改写是 no-op ⇒
+                //   每跳实际发同一个模型，却告诉客户端「降到了备选」= 撒谎。
+                if !crate::model_route::body_has_model(&body) {
+                    break;
+                }
                 let mut hop_body_bytes = body.clone().into_bytes();
                 // 改模型名：跨平台时 body 里的 `model` 必须是**目标作用域**的模型名。
                 hop_body_bytes = crate::model_route::rewrite_body_model(
@@ -531,7 +563,10 @@ async fn relay_hops(
                             );
                         }
                     }
-                    return Ok(RelayOutcome::Ready(response));
+                    return Ok(RelayOutcome::Ready {
+                        response,
+                        model: format!("{}:{}", target_scope.as_str(), target.model),
+                    });
                 }
 
                 // 失败：只有 5xx / 429 值得继续降级（其余是请求本身的问题）。
@@ -639,7 +674,9 @@ async fn relay_hops(
 
         match outcome {
             // `relay_once` 不产 `Ready`（它只走本平台的上游）；透传是为了穷尽 match。
-            Ok(RelayOutcome::Ready(response)) => return Ok(RelayOutcome::Ready(response)),
+            Ok(RelayOutcome::Ready { response, model }) => {
+                return Ok(RelayOutcome::Ready { response, model })
+            }
             Ok(RelayOutcome::Ok {
                 response,
                 prefix,
@@ -2315,6 +2352,7 @@ mod tests {
 
     fn relay_request(conversation_id: Option<&str>, model: &str, region: Region) -> RelayRequest {
         RelayRequest {
+            openai_shape: false,
             region,
             // 既有测试全部针对 **LLM** 路径 ⇒ 行为必须与加 `kind` 之前**逐字相同**。
             kind: RelayKind::Llm,

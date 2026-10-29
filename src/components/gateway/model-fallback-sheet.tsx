@@ -22,6 +22,7 @@ import { TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
@@ -37,7 +38,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { previewModelFallback } from "@/lib/api";
+import { getGatewayModels, previewModelFallback } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { SCOPES, type Scope } from "@/lib/scope";
 import { cn } from "@/lib/utils";
@@ -109,6 +110,39 @@ export function ModelFallbackSheet({
   /* 可选模型：已禁用的不出现（与 `disabled_models` 同源），并按名字去重 ——
      跨区目录里同名模型有两条记录，下拉里出现两个一样的选项会让人以为是两回事。
      WB 侧「在清单里即可用」（`CatalogModel` 没有 `available` 字段，见其注释）。 */
+  /**
+   * 跨作用域目标的模型清单（按 scope 缓存）。
+   *
+   * 只对**同平台的另一区域**拉取（`wb-global`）：那三条 `get*GatewayModels` 里只有
+   * WB 的返回结构是已知的。跨平台（`trae-cn` / `qoder-cn`）不拉 —— 那两条的清单
+   * 由各自页面持有、结构也不同，这里让用户手填模型 id 更诚实（填错会得到目标平台
+   * 自己的 404，比一个空白下拉好）。
+   */
+  const [scopeModels, setScopeModels] = useState<Record<string, string[]>>({});
+
+  useEffect(() => {
+    if (!draft) return;
+    const wanted = new Set(
+      draft.targets
+        .map((target) => target.scope)
+        .filter((candidate): candidate is string => Boolean(candidate) && candidate !== scope),
+    );
+    for (const candidate of wanted) {
+      if (scopeModels[candidate]) continue;
+      if (!candidate.startsWith("wb-")) continue;
+      void getGatewayModels(candidate.endsWith("global") ? "global" : "cn")
+        .then((snapshot: { models: { name: string }[] }) =>
+          setScopeModels((prev) => ({
+            ...prev,
+            [candidate]: snapshot.models.map((model) => model.name),
+          })),
+        )
+        .catch(() => {
+          /* 拉不到就让用户手填，不阻塞配置 */
+        });
+    }
+  }, [draft, scope, scopeModels]);
+
   const options = useMemo(() => {
     // 页面注入了清单（Trae / Qoder）就用它：那两条平台的模型不在 gateway store 里。
     // 注入的清单**同样要过禁用过滤** —— 否则下拉里会出现一个「选了立刻被拒」的模型。
@@ -315,6 +349,24 @@ export function ModelFallbackSheet({
                         })}
                       </SelectContent>
                     </Select>
+                    {/* 跨平台（目标平台不是 WB）时手填模型 id：
+                        那两条平台的清单由各自页面持有、结构也不同，这里不猜 ——
+                        填错会得到目标平台自己的 404，比一个空白下拉更可解释。 */}
+                    {target.scope && target.scope !== scope && !target.scope.startsWith("wb-") ? (
+                      <Input
+                        value={target.model}
+                        onChange={(event) =>
+                          setDraft((prev) => {
+                            if (!prev) return prev;
+                            const targets = [...prev.targets];
+                            targets[index] = { ...targets[index], model: event.target.value };
+                            return { ...prev, targets };
+                          })
+                        }
+                        placeholder={t("shared.gateway.fallback.field.crossModelPlaceholder")}
+                        className="min-w-0 flex-1 font-mono text-[12px]"
+                      />
+                    ) : (
                     <Select
                       value={target.model}
                       onValueChange={(value) =>
@@ -330,7 +382,10 @@ export function ModelFallbackSheet({
                         <SelectValue placeholder="—" />
                       </SelectTrigger>
                       <SelectContent>
-                        {options
+                        {(target.scope && target.scope !== scope
+                          ? (scopeModels[target.scope] ?? [])
+                          : options
+                        )
                           .filter((name) => name !== draft.from)
                           .map((name) => (
                             <SelectItem key={name} value={name} className="font-mono text-[12px]">
@@ -339,13 +394,18 @@ export function ModelFallbackSheet({
                           ))}
                         {/* 跨作用域时，已存的目标模型可能不在当前 options 里 ——
                             补一条，否则下拉显示空白、用户以为没配。 */}
-                        {target.model && !options.includes(target.model) ? (
+                        {target.model &&
+                        !(target.scope && target.scope !== scope
+                          ? (scopeModels[target.scope] ?? [])
+                          : options
+                        ).includes(target.model) ? (
                           <SelectItem value={target.model} className="font-mono text-[12px]">
                             {target.model}
                           </SelectItem>
                         ) : null}
                       </SelectContent>
                     </Select>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"

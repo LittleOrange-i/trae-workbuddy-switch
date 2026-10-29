@@ -170,6 +170,7 @@ export const en = {
   "shared.gateway.fallback.drawer.edit": "Edit fallback · {model}",
   "shared.gateway.fallback.field.from": "Primary model",
   "shared.gateway.fallback.field.fromLocked": "The primary cannot be changed. Delete and recreate to switch it — changing from is a different chain.",
+  "shared.gateway.fallback.field.crossModelPlaceholder": "target platform model id",
   "shared.gateway.fallback.field.thisScope": "this scope",
   "shared.gateway.fallback.field.crossPlatformPending": "cross-platform only from WorkBuddy",
   "shared.gateway.fallback.field.targets": "Backup models (tried in order)",
