@@ -923,8 +923,15 @@ mod tests {
         );
         let fb = store(Scope::WbCn, scoped);
         let plan = plan_for(&fb, Scope::WbCn, "glm");
-        assert_eq!(names(&plan), vec!["glm", "glm", "deepseek", "glm"], "plan={plan:?}");
-        let scopes: Vec<&str> = plan.iter().map(|t| t.scope_or(Scope::WbCn).as_str()).collect();
+        assert_eq!(
+            names(&plan),
+            vec!["glm", "glm", "deepseek", "glm"],
+            "plan={plan:?}"
+        );
+        let scopes: Vec<&str> = plan
+            .iter()
+            .map(|t| t.scope_or(Scope::WbCn).as_str())
+            .collect();
         assert_eq!(
             scopes,
             vec!["wb-cn", "trae-cn", "wb-cn", "wb-global"],
