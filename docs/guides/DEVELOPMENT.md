@@ -52,8 +52,13 @@ mv dist dist.old.$$ && npm run build:fast
 1. `npm run build:app:release` 生成 `.app.tar.gz` + `.sig`（Windows NSIS 构建会额外生成当前版本的 `*_x64-setup.exe` + `.exe.sig`）。CI 会先清掉 `target/**/release/bundle`，避免 cargo cache 把旧安装包带进 Release。
 2. macOS：`UPDATE_OS=macos UPDATE_ARCH=aarch64 sh scripts/gen-update-json.sh` 生成 `latest-macos-aarch64.json`；Intel 用 `UPDATE_ARCH=x86_64`
 3. Windows：`UPDATE_OS=windows UPDATE_ARCH=x86_64 sh scripts/gen-update-json.sh` 生成 `latest-windows-x86_64.json`
-4. `python3 scripts/merge-update-manifests.py <产物目录>` 合并为 `latest.json`，并把 Windows 平台项写入 `latest-macos-x86_64.json`（兼容已安装的 Windows 客户端）
-5. 将安装包、签名更新包、`latest*.json` 一并上传到 GitHub Release
+4. Linux：`UPDATE_OS=linux UPDATE_ARCH=x86_64 sh scripts/gen-update-json.sh` 生成 `latest-linux-x86_64.json`。
+   只有 **AppImage** 能自更新（`deb` 归系统包管理器，无法原地升级）⇒ 认的是
+   `*_amd64.AppImage.tar.gz` + `.sig`（`createUpdaterArtifacts` 产出，与 `.AppImage` 同目录）；
+   清单同时写 `linux-x86_64-appimage` 与 `linux-x86_64` 两个平台键（前者是新版客户端的首选候选，
+   后者兜住回退路径）。
+5. `python3 scripts/merge-update-manifests.py <产物目录>` 合并为 `latest.json`，并把 Windows 平台项写入 `latest-macos-x86_64.json`（兼容已安装的 Windows 客户端）
+6. 将安装包、签名更新包、`latest*.json` 一并上传到 GitHub Release
 
 ### npm 版（webui）发布
 
